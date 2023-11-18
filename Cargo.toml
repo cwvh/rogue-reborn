@@ -1,0 +1,20 @@
+[package]
+name = "rogue-reborn"
+version = "0.1.0"
+edition = "2021"
+
+# Need O1 in debug otherwise the execution time is too slow
+[profile.dev]
+debug = 2
+opt-level = 1
+
+[dependencies]
+anyhow = "1.0.75"
+byteorder = "1.5.0"
+glob = "0.3.1"
+human-readable = "0.0.1"
+
+[dependencies.minifb]
+version = "0.25.0"
+default-features = false
+features = ["x11"]
