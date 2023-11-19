@@ -1,0 +1,6 @@
+2023-11-18
+* [map] replace id+name in each struct with a section (short) header newtype
+* [map] newtype Latin1 string and replace all std String use
+* [map] anyhow context message consistency
+* [map] unify VecN, Coord, and similar, types that all look the same
+* [map] are individual field contexts useful for parse errors, maybe replace?

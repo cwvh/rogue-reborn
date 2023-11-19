@@ -3,11 +3,6 @@ name = "rogue-reborn"
 version = "0.1.0"
 edition = "2021"
 
-# Need O1 in debug otherwise the execution time is too slow
-[profile.dev]
-debug = 2
-opt-level = 1
-
 [dependencies]
 anyhow = "1.0.75"
 byteorder = "1.5.0"
@@ -18,3 +13,6 @@ human-readable = "0.0.1"
 version = "0.25.0"
 default-features = false
 features = ["x11"]
+
+[dev-dependencies]
+chrono = "0.4.31"
