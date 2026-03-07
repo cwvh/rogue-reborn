@@ -81,8 +81,8 @@ struct Mesh {
 
 fn main() {
     // Load the map
-    let map_path = Path::new("data/map/m00/citystreet_large.map");
-    // let map_path = Path::new("data/map/rm02/rm02.map");
+    // let map_path = Path::new("data/map/m00/citystreet_large.map");
+    let map_path = Path::new("data/map/rm02/rm02.map");
     let map_num = extract_map_num(map_path).unwrap_or_else(|| String::from("m00"));
     let level = map::read(map_path)
         .expect("Failed to load map");
@@ -93,7 +93,7 @@ fn main() {
     // Initialize GLFW
     let mut glfw = glfw::init_no_callbacks().unwrap();
     let (mut window, events) = glfw
-        .create_window(800, 600, "Wireframe Viewer", glfw::WindowMode::Windowed)
+        .create_window(1024, 768, "Wireframe Viewer", glfw::WindowMode::Windowed)
         .expect("Failed to create GLFW window");
     window.make_current();
     window.set_key_polling(true);
@@ -163,7 +163,7 @@ fn main() {
                     let scroll = y as f32;
                     if scroll != 0.0 {
                         let dir = camera.get_forward();
-                        let zoom_speed = base_speed * 20.0;
+                        let zoom_speed = base_speed * 5.0;
                         camera.position[0] += dir[0] * zoom_speed * scroll;
                         camera.position[1] += dir[1] * zoom_speed * scroll;
                         camera.position[2] += dir[2] * zoom_speed * scroll;
@@ -424,7 +424,7 @@ fn resolve_texture_path(map_num: &str, material_filename: &str) -> Option<PathBu
 
     for cand in candidates.iter() {
         // 1) data/<map_num>/...
-        let p1 = Path::new("data").join(map_num).join(cand);
+        let p1 = Path::new("data").join("map").join(map_num).join(cand);
         if p1.exists() {
             return Some(p1);
         }
