@@ -63,7 +63,8 @@ struct Mesh {
 
 fn main() {
     // Load the map
-    let level = map::read(Path::new("data/map/m00/citystreet_large.map"))
+    // let level = map::read(Path::new("data/map/m00/citystreet_large.map"))
+    let level = map::read(Path::new("data/map/rm02/rm02.map"))
         .expect("Failed to load map");
 
     // Build a flattened mesh from the MAP geometry
@@ -83,7 +84,7 @@ fn main() {
 
     // OpenGL setup
     unsafe {
-        glViewport(0, 0, 800, 600);
+        glViewport(0, 0, 1024, 768);
         glClearColor(0.1, 0.1, 0.1, 1.0);
         glEnable(0x0B71); // GL_DEPTH_TEST
         glPolygonMode(0x0408, 0x1B01); // GL_FRONT_AND_BACK, GL_LINE
