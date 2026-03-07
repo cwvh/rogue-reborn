@@ -38,18 +38,18 @@ impl Camera {
     fn get_forward(&self) -> [f32; 3] {
         let (yaw_rad, pitch_rad) = (self.yaw.to_radians(), self.pitch.to_radians());
         [
-            yaw_rad.cos() * pitch_rad.cos(),
+            -yaw_rad.sin() * pitch_rad.cos(),
             pitch_rad.sin(),
-            yaw_rad.sin() * pitch_rad.cos(),
+            -yaw_rad.cos() * pitch_rad.cos(),
         ]
     }
 
     fn get_right(&self) -> [f32; 3] {
         let yaw_rad = self.yaw.to_radians();
         [
-            yaw_rad.sin(),
+            yaw_rad.cos(),
             0.0,
-            -yaw_rad.cos(),
+            yaw_rad.sin(),
         ]
     }
 }
@@ -136,15 +136,11 @@ fn main() {
                 WindowEvent::Scroll(_x, y) => {
                     let scroll = y as f32;
                     if scroll != 0.0 {
-                        let fwd = camera.get_forward();
-                        let fwd_flat = [fwd[0], 0.0, fwd[2]];
-                        let len = (fwd_flat[0]*fwd_flat[0] + fwd_flat[2]*fwd_flat[2]).sqrt();
-                        if len > 0.0 {
-                            let dir = [fwd_flat[0]/len, 0.0, fwd_flat[2]/len];
-                            let zoom_speed = base_speed * 20.0;
-                            camera.position[0] += dir[0] * zoom_speed * scroll;
-                            camera.position[2] += dir[2] * zoom_speed * scroll;
-                        }
+                        let dir = camera.get_forward();
+                        let zoom_speed = base_speed * 20.0;
+                        camera.position[0] += dir[0] * zoom_speed * scroll;
+                        camera.position[1] += dir[1] * zoom_speed * scroll;
+                        camera.position[2] += dir[2] * zoom_speed * scroll;
                     }
                 }
                 _ => {}
@@ -156,14 +152,9 @@ fn main() {
         if keys.contains(&Key::LeftShift) {
             speed *= 5.0;
         }
-        let forward = camera.get_forward();
         let right = camera.get_right();
-        let mut fwd_flat = [forward[0], 0.0, forward[2]];
-        let len = (fwd_flat[0]*fwd_flat[0] + fwd_flat[2]*fwd_flat[2]).sqrt();
-        if len > 0.0 {
-            fwd_flat[0] /= len;
-            fwd_flat[2] /= len;
-        }
+        let yaw_rad = camera.yaw.to_radians();
+        let fwd_flat = [-yaw_rad.sin(), 0.0, -yaw_rad.cos()];
         if keys.contains(&Key::W) {
             camera.position[0] += fwd_flat[0] * speed;
             camera.position[2] += fwd_flat[2] * speed;
