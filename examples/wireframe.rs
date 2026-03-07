@@ -125,7 +125,7 @@ fn main() {
                     if let Some((last_x, last_y)) = last_cursor_pos {
                         let dx = xpos - last_x;
                         let dy = ypos - last_y;
-                        camera.yaw += dx as f32 * 0.1;
+                        camera.yaw -= dx as f32 * 0.1;
                         camera.pitch -= dy as f32 * 0.1;
                         camera.pitch = camera.pitch.clamp(-89.0, 89.0);
                     }
