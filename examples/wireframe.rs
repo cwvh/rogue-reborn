@@ -63,8 +63,8 @@ struct Mesh {
 
 fn main() {
     // Load the map
-    // let level = map::read(Path::new("data/map/m00/citystreet_large.map"))
-    let level = map::read(Path::new("data/map/rm02/rm02.map"))
+    let level = map::read(Path::new("data/map/m00/citystreet_large.map"))
+    // let level = map::read(Path::new("data/map/rm02/rm02.map"))
         .expect("Failed to load map");
 
     // Build a flattened mesh from the MAP geometry
