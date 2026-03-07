@@ -49,7 +49,7 @@ impl Camera {
         [
             yaw_rad.cos(),
             0.0,
-            yaw_rad.sin(),
+            -yaw_rad.sin(),
         ]
     }
 }
