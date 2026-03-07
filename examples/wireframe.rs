@@ -1,6 +1,6 @@
 use rogue_reborn::map;
 use std::path::Path;
-use glfw::{Action, Context, Key, WindowEvent, MouseButton, CursorMode};
+use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 
 #[link(name = "GL")]
 extern "C" {
@@ -54,40 +54,25 @@ impl Camera {
     }
 }
 
-struct Cube {
+struct Mesh {
     vertices: Vec<[f32; 3]>,
-    faces: Vec<[usize; 4]>,
+    indices: Vec<[u32; 3]>,
+    center: [f32; 3],
+    radius: f32,
 }
 
 fn main() {
-    // Construct a simple cube geometry
-    let cube = Cube {
-        vertices: vec![
-            [-1.0, -1.0, -1.0], // 0
-            [ 1.0, -1.0, -1.0], // 1
-            [ 1.0,  1.0, -1.0], // 2
-            [-1.0,  1.0, -1.0], // 3
-            [-1.0, -1.0,  1.0], // 4
-            [ 1.0, -1.0,  1.0], // 5
-            [ 1.0,  1.0,  1.0], // 6
-            [-1.0,  1.0,  1.0], // 7
-        ],
-        faces: vec![
-            [0, 1, 2, 3], // back
-            [4, 5, 6, 7], // front
-            [0, 1, 5, 4], // bottom
-            [2, 3, 7, 6], // top
-            [1, 2, 6, 5], // right
-            [0, 3, 7, 4], // left
-        ],
-    };
-
     // Load the map
-    let map = map::read(Path::new("data/map/m00/citystreet_large.map")).expect("Failed to load map");
+    let level = map::read(Path::new("data/map/m00/citystreet_large.map"))
+        .expect("Failed to load map");
+
+    // Build a flattened mesh from the MAP geometry
+    let mesh = build_mesh(&level);
 
     // Initialize GLFW
     let mut glfw = glfw::init_no_callbacks().unwrap();
-    let (mut window, events) = glfw.create_window(800, 600, "Wireframe Viewer", glfw::WindowMode::Windowed)
+    let (mut window, events) = glfw
+        .create_window(800, 600, "Wireframe Viewer", glfw::WindowMode::Windowed)
         .expect("Failed to create GLFW window");
     window.make_current();
     gl::load_with(|s| window.get_proc_address(s) as *const _);
@@ -100,12 +85,20 @@ fn main() {
         glPolygonMode(0x0408, 0x1B01); // GL_FRONT_AND_BACK, GL_LINE
     }
 
-    // Camera setup
+    // Camera setup: start back from the map center looking in -Z
     let mut camera = Camera::new();
-    let mut last_cursor_pos = None;
+    camera.position = [
+        mesh.center[0],
+        mesh.center[1],
+        mesh.center[2] + mesh.radius * 2.0,
+    ];
+    let mut last_cursor_pos: Option<(f64, f64)> = None;
     window.set_cursor_mode(CursorMode::Disabled);
 
     let mut keys = std::collections::HashSet::new();
+
+    // Base movement speed scales with map size
+    let base_speed = (mesh.radius / 200.0).max(0.01);
 
     while !window.should_close() {
         glfw.poll_events();
@@ -114,8 +107,12 @@ fn main() {
                 WindowEvent::Key(key, _, action, _) => {
                     match (key, action) {
                         (Key::Escape, Action::Press) => window.set_should_close(true), // Escape to quit
-                        (k, Action::Press) => { keys.insert(k); },
-                        (k, Action::Release) => { keys.remove(&k); },
+                        (k, Action::Press) => {
+                            keys.insert(k);
+                        }
+                        (k, Action::Release) => {
+                            keys.remove(&k);
+                        }
                         _ => {}
                     }
                 }
@@ -133,8 +130,11 @@ fn main() {
             }
         }
 
-        // WASD movement
-        let speed = 0.1;
+        // WASD movement (hold LeftShift to move faster)
+        let mut speed = base_speed;
+        if keys.contains(&Key::LeftShift) {
+            speed *= 5.0;
+        }
         let forward = camera.get_forward();
         let right = camera.get_right();
         if keys.contains(&Key::W) {
@@ -156,28 +156,100 @@ fn main() {
             camera.position[2] += right[2] * speed;
         }
 
+        // Compute dynamic aspect and clip planes
+        let (w, h) = window.get_size();
+        let aspect = (w as f32 / h.max(1) as f32).max(0.1);
+        let z_near = (mesh.radius / 1000.0).max(0.05);
+        let z_far = (mesh.radius * 10.0 + 100.0).max(z_near + 1.0);
+
         unsafe {
             glClear(0x00004000 | 0x00000100); // GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
             glMatrixMode(0x1701); // GL_PROJECTION
             glLoadIdentity();
-            glu_perspective(45.0, 800.0/600.0, 0.1, 100.0);
+            glu_perspective(60.0, aspect, z_near, z_far);
 
             glMatrixMode(0x1700); // GL_MODELVIEW
             glLoadIdentity();
             apply_camera(&camera);
 
-            // Draw the cube as wireframe
-            for face in &cube.faces {
-                glBegin(0x0002); // GL_LINE_LOOP
-                for &idx in face {
-                    let v = cube.vertices[idx];
-                    glVertex3f(v[0], v[1], v[2]);
-                }
-                glEnd();
+            // Draw all triangles in wireframe
+            glBegin(0x0004); // GL_TRIANGLES
+            for tri in &mesh.indices {
+                let a = mesh.vertices[tri[0] as usize];
+                let b = mesh.vertices[tri[1] as usize];
+                let c = mesh.vertices[tri[2] as usize];
+                glVertex3f(a[0], a[1], a[2]);
+                glVertex3f(b[0], b[1], b[2]);
+                glVertex3f(c[0], c[1], c[2]);
             }
+            glEnd();
         }
 
         window.swap_buffers();
+    }
+}
+
+fn build_mesh(level: &map::Map) -> Mesh {
+    let mut vertices: Vec<[f32; 3]> = Vec::new();
+    let mut indices: Vec<[u32; 3]> = Vec::new();
+
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+
+    for object in &level.geometries.objects {
+        let base = vertices.len() as u32;
+
+        // Append object vertices
+        for v in &object.vertices {
+            let p = [v.x, v.y, v.z];
+            for i in 0..3 {
+                if p[i] < min[i] {
+                    min[i] = p[i];
+                }
+                if p[i] > max[i] {
+                    max[i] = p[i];
+                }
+            }
+            vertices.push(p);
+        }
+
+        // Append triangle indices from all object data groups
+        for od in &object.object_datas {
+            for &(i0, i1, i2) in &od.faces.face_indices {
+                indices.push([
+                    base + i0 as u32,
+                    base + i1 as u32,
+                    base + i2 as u32,
+                ]);
+            }
+        }
+    }
+
+    // Fallback if empty
+    if vertices.is_empty() {
+        return Mesh {
+            vertices,
+            indices,
+            center: [0.0, 0.0, 0.0],
+            radius: 10.0,
+        };
+    }
+
+    let center = [
+        (min[0] + max[0]) * 0.5,
+        (min[1] + max[1]) * 0.5,
+        (min[2] + max[2]) * 0.5,
+    ];
+    let dx = max[0] - center[0];
+    let dy = max[1] - center[1];
+    let dz = max[2] - center[2];
+    let radius = (dx * dx + dy * dy + dz * dz).sqrt().max(1.0);
+
+    Mesh {
+        vertices,
+        indices,
+        center,
+        radius,
     }
 }
 
@@ -191,7 +263,7 @@ fn apply_camera(camera: &Camera) {
     }
 }
 
-// Minimal gluPerspective and gluLookAt replacements for OpenGL 1.x
+// Minimal gluPerspective replacement for OpenGL 1.x
 fn glu_perspective(fov_y: f32, aspect: f32, z_near: f32, z_far: f32) {
     let f = 1.0 / (fov_y.to_radians() / 2.0).tan();
     let nf = 1.0 / (z_near - z_far);
@@ -204,52 +276,5 @@ fn glu_perspective(fov_y: f32, aspect: f32, z_near: f32, z_far: f32) {
         mat[11] = -1.0;
         mat[14] = (2.0 * z_far * z_near) * nf;
         glMultMatrixf(mat.as_ptr());
-    }
-}
-
-fn glu_look_at(
-    eye_x: f32, eye_y: f32, eye_z: f32,
-    center_x: f32, center_y: f32, center_z: f32,
-    up_x: f32, up_y: f32, up_z: f32
-) {
-    // Compute forward vector
-    let fx = center_x - eye_x;
-    let fy = center_y - eye_y;
-    let fz = center_z - eye_z;
-    let flen = (fx * fx + fy * fy + fz * fz).sqrt();
-    let fx = fx / flen;
-    let fy = fy / flen;
-    let fz = fz / flen;
-
-    // Compute up vector
-    let up_len = (up_x * up_x + up_y * up_y + up_z * up_z).sqrt();
-    let upx = up_x / up_len;
-    let upy = up_y / up_len;
-    let upz = up_z / up_len;
-
-    // Compute side vector = forward x up
-    let sx = fy * upz - fz * upy;
-    let sy = fz * upx - fx * upz;
-    let sz = fx * upy - fy * upx;
-    let slen = (sx * sx + sy * sy + sz * sz).sqrt();
-    let sx = sx / slen;
-    let sy = sy / slen;
-    let sz = sz / slen;
-
-    // Recompute up as: side x forward
-    let ux = sy * fz - sz * fy;
-    let uy = sz * fx - sx * fz;
-    let uz = sx * fy - sy * fx;
-
-    let mat = [
-        sx,  ux,  -fx,  0.0,
-        sy,  uy,  -fy,  0.0,
-        sz,  uz,  -fz,  0.0,
-        0.0, 0.0,  0.0, 1.0,
-    ];
-
-    unsafe {
-        glMultMatrixf(mat.as_ptr());
-        glTranslatef(-eye_x, -eye_y, -eye_z);
     }
 }
