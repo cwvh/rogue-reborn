@@ -1,6 +1,6 @@
 use rogue_reborn::map;
 use rogue_reborn::rsb;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 
@@ -81,8 +81,10 @@ struct Mesh {
 
 fn main() {
     // Load the map
-    let level = map::read(Path::new("data/map/m00/citystreet_large.map"))
-    // let level = map::read(Path::new("data/map/rm02/rm02.map"))
+    let map_path = Path::new("data/map/m00/citystreet_large.map");
+    // let map_path = Path::new("data/map/rm02/rm02.map");
+    let map_num = extract_map_num(map_path).unwrap_or_else(|| String::from("m00"));
+    let level = map::read(map_path)
         .expect("Failed to load map");
 
     // Build a flattened mesh from the MAP geometry
@@ -222,7 +224,7 @@ fn main() {
                 for object in &level.geometries.objects {
                     for od in &object.object_datas {
                         let mat_index = od.mn as usize;
-                        if let Some(tex_id) = ensure_texture(&level.materials, mat_index, &mut textures) {
+                        if let Some(tex_id) = ensure_texture(&level.materials, mat_index, &map_num, &mut textures) {
                             glBindTexture(0x0DE1, tex_id); // GL_TEXTURE_2D
 
                             // Faces and UVs are parallel arrays
@@ -372,7 +374,12 @@ fn glu_perspective(fov_y: f32, aspect: f32, z_near: f32, z_far: f32) {
 
 // Texture utilities
 
-fn ensure_texture(materials: &map::Materials, mat_index: usize, cache: &mut HashMap<String, u32>) -> Option<u32> {
+fn ensure_texture(
+    materials: &map::Materials,
+    mat_index: usize,
+    map_num: &str,
+    cache: &mut HashMap<String, u32>,
+) -> Option<u32> {
     if mat_index >= materials.materials.len() {
         return None;
     }
@@ -381,8 +388,8 @@ fn ensure_texture(materials: &map::Materials, mat_index: usize, cache: &mut Hash
         return Some(*id);
     }
 
-    let path = Path::new(&filename);
-    let rsb_tex = match rsb::read(path)? {
+    let resolved = resolve_texture_path(map_num, &filename)?;
+    let rsb_tex = match rsb::read(&resolved) {
         Ok(t) => t,
         Err(_) => return None,
     };
@@ -390,6 +397,58 @@ fn ensure_texture(materials: &map::Materials, mat_index: usize, cache: &mut Hash
     let tex_id = upload_rsb_to_gl(&rsb_tex)?;
     cache.insert(filename, tex_id);
     Some(tex_id)
+}
+
+// Find an on-disk RSB path by searching map-local and shared texture dirs,
+// converting MAP's .bmp references to .RSB/.rsb.
+fn resolve_texture_path(map_num: &str, material_filename: &str) -> Option<PathBuf> {
+    // Preserve any subdirectories from the material filename (e.g., "faces/foo.bmp")
+    let rel = Path::new(material_filename);
+
+    // Texture name without extension (MAP refers to .bmp)
+    let stem = rel.file_stem()?.to_string_lossy().into_owned();
+
+    // Rebuild the relative path keeping parent directories, swapping extension to RSB
+    let mut build_rel = |ext: &str| -> PathBuf {
+        if let Some(parent) = rel.parent() {
+            parent.join(format!("{stem}.{ext}"))
+        } else {
+            PathBuf::from(format!("{stem}.{ext}"))
+        }
+    };
+
+    let candidates = [
+        build_rel("RSB"),
+        build_rel("rsb"),
+    ];
+
+    for cand in candidates.iter() {
+        // 1) data/<map_num>/...
+        let p1 = Path::new("data").join(map_num).join(cand);
+        if p1.exists() {
+            return Some(p1);
+        }
+        // 2) data/texture/...
+        let p2 = Path::new("data").join("texture").join(cand);
+        if p2.exists() {
+            return Some(p2);
+        }
+    }
+
+    None
+}
+
+// Extract the map number (e.g., "m00") from a map path like data/map/m00/citystreet_large.map
+fn extract_map_num(path: &Path) -> Option<String> {
+    let mut comps = path.components().map(|c| c.as_os_str());
+    while let Some(c) = comps.next() {
+        if c == "map" {
+            if let Some(next) = comps.next() {
+                return Some(next.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
 }
 
 fn upload_rsb_to_gl(tex: &rsb::Rsb) -> Option<u32> {
