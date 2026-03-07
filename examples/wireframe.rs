@@ -1,5 +1,7 @@
 use rogue_reborn::map;
+use rogue_reborn::rsb;
 use std::path::Path;
+use std::collections::HashMap;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 
 #[link(name = "GL")]
@@ -17,6 +19,22 @@ extern "C" {
     fn glVertex3f(x: f32, y: f32, z: f32);
     fn glRotatef(angle: f32, x: f32, y: f32, z: f32);
     fn glTranslatef(x: f32, y: f32, z: f32);
+    fn glTexCoord2f(s: f32, t: f32);
+    fn glTexParameteri(target: u32, pname: u32, param: i32);
+    fn glGenTextures(n: i32, textures: *mut u32);
+    fn glBindTexture(target: u32, texture: u32);
+    fn glTexImage2D(
+        target: u32,
+        level: i32,
+        internalformat: i32,
+        width: i32,
+        height: i32,
+        border: i32,
+        format: u32,
+        type_: u32,
+        pixels: *const std::ffi::c_void
+    );
+    fn glDisable(cap: u32);
     fn glSwapBuffers();
 }
 
@@ -101,6 +119,8 @@ fn main() {
     window.set_cursor_mode(CursorMode::Disabled);
 
     let mut keys = std::collections::HashSet::new();
+    let mut textures: HashMap<String, u32> = HashMap::new();
+    let mut textured = false;
 
     // Base movement speed scales with map size
     let base_speed = (mesh.radius / 200.0).max(0.01);
@@ -112,6 +132,9 @@ fn main() {
                 WindowEvent::Key(key, _, action, _) => {
                     match (key, action) {
                         (Key::Escape, Action::Press) | (Key::Q, Action::Press) => window.set_should_close(true), // Escape or 'q' to quit
+                        (Key::T, Action::Press) => {
+                            textured = !textured;
+                        }
                         (k, Action::Press) => {
                             keys.insert(k);
                         }
@@ -189,17 +212,68 @@ fn main() {
             glLoadIdentity();
             apply_camera(&camera);
 
-            // Draw all triangles in wireframe
-            glBegin(0x0004); // GL_TRIANGLES
-            for tri in &mesh.indices {
-                let a = mesh.vertices[tri[0] as usize];
-                let b = mesh.vertices[tri[1] as usize];
-                let c = mesh.vertices[tri[2] as usize];
-                glVertex3f(a[0], a[1], a[2]);
-                glVertex3f(b[0], b[1], b[2]);
-                glVertex3f(c[0], c[1], c[2]);
+            // Draw either textured geometry or wireframe triangles
+            if textured {
+                // Textured mode
+                glEnable(0x0DE1); // GL_TEXTURE_2D
+                glPolygonMode(0x0408, 0x1B02); // GL_FRONT_AND_BACK, GL_FILL
+
+                // Iterate map geometry by material groups
+                for object in &level.geometries.objects {
+                    for od in &object.object_datas {
+                        let mat_index = od.mn as usize;
+                        if let Some(tex_id) = ensure_texture(&level.materials, mat_index, &mut textures) {
+                            glBindTexture(0x0DE1, tex_id); // GL_TEXTURE_2D
+
+                            // Faces and UVs are parallel arrays
+                            let face_count = od.faces.face_indices.len().min(od.faces.texture_indices.len());
+                            if face_count == 0 {
+                                continue;
+                            }
+
+                            glBegin(0x0004); // GL_TRIANGLES
+                            for i in 0..face_count {
+                                let (i0, i1, i2) = od.faces.face_indices[i];
+                                let (t0, t1, t2) = od.faces.texture_indices[i];
+
+                                let p0 = &object.vertices[i0 as usize];
+                                let p1 = &object.vertices[i1 as usize];
+                                let p2 = &object.vertices[i2 as usize];
+
+                                let uv0 = &od.texture_vertices.uv_coords[t0 as usize];
+                                let uv1 = &od.texture_vertices.uv_coords[t1 as usize];
+                                let uv2 = &od.texture_vertices.uv_coords[t2 as usize];
+
+                                // Flip V to match OpenGL texture origin
+                                glTexCoord2f(uv0.u, 1.0 - uv0.v);
+                                glVertex3f(p0.x, p0.y, p0.z);
+
+                                glTexCoord2f(uv1.u, 1.0 - uv1.v);
+                                glVertex3f(p1.x, p1.y, p1.z);
+
+                                glTexCoord2f(uv2.u, 1.0 - uv2.v);
+                                glVertex3f(p2.x, p2.y, p2.z);
+                            }
+                            glEnd();
+                        }
+                    }
+                }
+            } else {
+                // Wireframe mode
+                glDisable(0x0DE1); // GL_TEXTURE_2D
+                glPolygonMode(0x0408, 0x1B01); // GL_FRONT_AND_BACK, GL_LINE
+
+                glBegin(0x0004); // GL_TRIANGLES
+                for tri in &mesh.indices {
+                    let a = mesh.vertices[tri[0] as usize];
+                    let b = mesh.vertices[tri[1] as usize];
+                    let c = mesh.vertices[tri[2] as usize];
+                    glVertex3f(a[0], a[1], a[2]);
+                    glVertex3f(b[0], b[1], b[2]);
+                    glVertex3f(c[0], c[1], c[2]);
+                }
+                glEnd();
             }
-            glEnd();
         }
 
         window.swap_buffers();
@@ -280,7 +354,7 @@ fn apply_camera(camera: &Camera) {
     }
 }
 
-// Minimal gluPerspective replacement for OpenGL 1.x
+ // Minimal gluPerspective replacement for OpenGL 1.x
 fn glu_perspective(fov_y: f32, aspect: f32, z_near: f32, z_far: f32) {
     let f = 1.0 / (fov_y.to_radians() / 2.0).tan();
     let nf = 1.0 / (z_near - z_far);
@@ -294,4 +368,109 @@ fn glu_perspective(fov_y: f32, aspect: f32, z_near: f32, z_far: f32) {
         mat[14] = (2.0 * z_far * z_near) * nf;
         glMultMatrixf(mat.as_ptr());
     }
+}
+
+// Texture utilities
+
+fn ensure_texture(materials: &map::Materials, mat_index: usize, cache: &mut HashMap<String, u32>) -> Option<u32> {
+    if mat_index >= materials.materials.len() {
+        return None;
+    }
+    let filename = materials.materials[mat_index].filename.clone();
+    if let Some(id) = cache.get(&filename) {
+        return Some(*id);
+    }
+
+    let path = Path::new(&filename);
+    let rsb_tex = match rsb::read(path) {
+        Ok(t) => t,
+        Err(_) => return None,
+    };
+
+    let tex_id = upload_rsb_to_gl(&rsb_tex)?;
+    cache.insert(filename, tex_id);
+    Some(tex_id)
+}
+
+fn upload_rsb_to_gl(tex: &rsb::Rsb) -> Option<u32> {
+    let rgba = rsb_to_rgba8(tex);
+    if rgba.is_empty() {
+        return None;
+    }
+
+    let mut id: u32 = 0;
+    unsafe {
+        glGenTextures(1, &mut id as *mut u32);
+        glBindTexture(0x0DE1, id); // GL_TEXTURE_2D
+
+        // Simple filters; can be refined per material address mode
+        glTexParameteri(0x0DE1, 0x2801, 0x2601); // GL_TEXTURE_MIN_FILTER, GL_LINEAR
+        glTexParameteri(0x0DE1, 0x2800, 0x2601); // GL_TEXTURE_MAG_FILTER, GL_LINEAR
+
+        glTexImage2D(
+            0x0DE1,              // GL_TEXTURE_2D
+            0,                   // level
+            0x1908,              // GL_RGBA
+            tex.width as i32,
+            tex.height as i32,
+            0,                   // border
+            0x1908,              // GL_RGBA
+            0x1401,              // GL_UNSIGNED_BYTE
+            rgba.as_ptr() as *const std::ffi::c_void
+        );
+    }
+    Some(id)
+}
+
+fn rsb_to_rgba8(tex: &rsb::Rsb) -> Vec<u8> {
+    let size = tex.size();
+    let mut out = Vec::with_capacity(size * 4);
+
+    if tex.palette_colors.is_some() {
+        // Expect palette indices in tex.pixels
+        if let Some(colors) = &tex.palette_colors {
+            for px in &tex.pixels {
+                let idx = match px {
+                    rsb::Pixel::PaletteColorIndex(i) => *i as usize,
+                    _ => 0,
+                };
+                let c = colors.get(idx).cloned().unwrap_or(rsb::PaletteColor { r: 0, g: 0, b: 0, a: 255 });
+                out.push(c.r);
+                out.push(c.g);
+                out.push(c.b);
+                out.push(c.a);
+            }
+        }
+        return out;
+    }
+
+    // Non-paletted: expand using bitmask
+    let bm = &tex.bitmask;
+    let rbits = bm.r.max(1);
+    let gbits = bm.g.max(1);
+    let bbits = bm.b.max(1);
+    let abits = bm.a; // alpha may be 0
+
+    for px in &tex.pixels {
+        let r = px.r(bm).unwrap_or(0);
+        let g = px.g(bm).unwrap_or(0);
+        let b = px.b(bm).unwrap_or(0);
+        let a = px.a(bm).unwrap_or_else(|| if abits == 0 { 255 } else { 0 });
+
+        out.push(scale_to_u8(r, rbits));
+        out.push(scale_to_u8(g, gbits));
+        out.push(scale_to_u8(b, bbits));
+        // If alpha channel not present, a is already 255
+        out.push(if abits == 0 { a as u8 } else { scale_to_u8(a, abits) });
+    }
+
+    out
+}
+
+fn scale_to_u8(v: u32, bits: u32) -> u8 {
+    if bits == 0 {
+        return 255;
+    }
+    let max = (1u32 << bits) - 1;
+    (((v * 255) + (max / 2)) / max) as u8
 }
