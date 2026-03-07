@@ -75,6 +75,9 @@ fn main() {
         .create_window(800, 600, "Wireframe Viewer", glfw::WindowMode::Windowed)
         .expect("Failed to create GLFW window");
     window.make_current();
+    window.set_key_polling(true);
+    window.set_cursor_pos_polling(true);
+    window.set_framebuffer_size_polling(true);
     gl::load_with(|s| window.get_proc_address(s) as *const _);
 
     // OpenGL setup
@@ -106,7 +109,7 @@ fn main() {
             match event {
                 WindowEvent::Key(key, _, action, _) => {
                     match (key, action) {
-                        (Key::Escape, Action::Press) => window.set_should_close(true), // Escape to quit
+                        (Key::Escape, Action::Press) | (Key::Q, Action::Press) => window.set_should_close(true), // Escape or 'q' to quit
                         (k, Action::Press) => {
                             keys.insert(k);
                         }
@@ -125,6 +128,9 @@ fn main() {
                         camera.pitch = camera.pitch.clamp(-89.0, 89.0);
                     }
                     last_cursor_pos = Some((xpos, ypos));
+                }
+                WindowEvent::FramebufferSize(width, height) => {
+                    unsafe { glViewport(0, 0, width, height); }
                 }
                 _ => {}
             }
