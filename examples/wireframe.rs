@@ -78,6 +78,7 @@ fn main() {
     window.set_key_polling(true);
     window.set_cursor_pos_polling(true);
     window.set_framebuffer_size_polling(true);
+    window.set_scroll_polling(true);
     gl::load_with(|s| window.get_proc_address(s) as *const _);
 
     // OpenGL setup
@@ -132,6 +133,20 @@ fn main() {
                 WindowEvent::FramebufferSize(width, height) => {
                     unsafe { glViewport(0, 0, width, height); }
                 }
+                WindowEvent::Scroll(_x, y) => {
+                    let scroll = y as f32;
+                    if scroll != 0.0 {
+                        let fwd = camera.get_forward();
+                        let fwd_flat = [fwd[0], 0.0, fwd[2]];
+                        let len = (fwd_flat[0]*fwd_flat[0] + fwd_flat[2]*fwd_flat[2]).sqrt();
+                        if len > 0.0 {
+                            let dir = [fwd_flat[0]/len, 0.0, fwd_flat[2]/len];
+                            let zoom_speed = base_speed * 20.0;
+                            camera.position[0] += dir[0] * zoom_speed * scroll;
+                            camera.position[2] += dir[2] * zoom_speed * scroll;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -143,15 +158,19 @@ fn main() {
         }
         let forward = camera.get_forward();
         let right = camera.get_right();
+        let mut fwd_flat = [forward[0], 0.0, forward[2]];
+        let len = (fwd_flat[0]*fwd_flat[0] + fwd_flat[2]*fwd_flat[2]).sqrt();
+        if len > 0.0 {
+            fwd_flat[0] /= len;
+            fwd_flat[2] /= len;
+        }
         if keys.contains(&Key::W) {
-            camera.position[0] += forward[0] * speed;
-            camera.position[1] += forward[1] * speed;
-            camera.position[2] += forward[2] * speed;
+            camera.position[0] += fwd_flat[0] * speed;
+            camera.position[2] += fwd_flat[2] * speed;
         }
         if keys.contains(&Key::S) {
-            camera.position[0] -= forward[0] * speed;
-            camera.position[1] -= forward[1] * speed;
-            camera.position[2] -= forward[2] * speed;
+            camera.position[0] -= fwd_flat[0] * speed;
+            camera.position[2] -= fwd_flat[2] * speed;
         }
         if keys.contains(&Key::A) {
             camera.position[0] -= right[0] * speed;
