@@ -382,7 +382,7 @@ fn ensure_texture(materials: &map::Materials, mat_index: usize, cache: &mut Hash
     }
 
     let path = Path::new(&filename);
-    let rsb_tex = match rsb::read(path) {
+    let rsb_tex = match rsb::read(path)? {
         Ok(t) => t,
         Err(_) => return None,
     };
