@@ -82,7 +82,6 @@ struct Mesh {
 fn main() {
     // Load the map
     let map_path = Path::new("data/map/m00/citystreet_large.map");
-    // let map_path = Path::new("data/map/rm02/rm02.map");
     let map_num = extract_map_num(map_path).unwrap_or_else(|| String::from("m00"));
     let level = map::read(map_path)
         .expect("Failed to load map");
@@ -112,7 +111,7 @@ fn main() {
 
     // Camera setup: start at mission-provided location
     let mut camera = Camera::new();
-    camera.position = [33924.6_f32, 33307.0_f32, 30028.3_f32];
+    camera.position = [33924.6_f32, 33307.0_f32, 30028.3_f32];   // CSL
     let mut last_cursor_pos: Option<(f64, f64)> = None;
     window.set_cursor_mode(CursorMode::Disabled);
 
@@ -120,10 +119,11 @@ fn main() {
     let mut textures: HashMap<String, u32> = HashMap::new();
     let mut textured = false;
     let mut first_person = false;
-    let eye_height: f32 = 170.0;
+    let eye_height: f32 = 25.0;
 
     // Base movement speed scales with map size
-    let base_speed = (mesh.radius / 200.0).max(0.01);
+    // let base_speed = (mesh.radius / 200.0).max(0.01);
+    let base_speed = 5.0;
 
     while !window.should_close() {
         glfw.poll_events();
@@ -210,9 +210,10 @@ fn main() {
         // Resolve wall collisions in first-person mode
         if first_person {
             let foot_y = camera.position[1] - eye_height;
-            let adjusted = resolve_walls(&level, prev_pos, camera.position, foot_y, 30.0);
-            camera.position[0] = adjusted[0];
-            camera.position[2] = adjusted[2];
+            // TODO renable wall collision once I get it working
+            // let adjusted = resolve_walls(&level, prev_pos, camera.position, foot_y, 30.0);
+            // camera.position[0] = adjusted[0];
+            // camera.position[2] = adjusted[2];
         }
 
         // Snap to ground in first-person mode
