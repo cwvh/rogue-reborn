@@ -110,13 +110,9 @@ fn main() {
         glPolygonMode(0x0408, 0x1B01); // GL_FRONT_AND_BACK, GL_LINE
     }
 
-    // Camera setup: start back from the map center looking in -Z
+    // Camera setup: start at mission-provided location
     let mut camera = Camera::new();
-    camera.position = [
-        mesh.center[0],
-        mesh.center[1],
-        mesh.center[2] + mesh.radius * 2.0,
-    ];
+    camera.position = [33924.6_f32, 33307.0_f32, 30028.3_f32];
     let mut last_cursor_pos: Option<(f64, f64)> = None;
     window.set_cursor_mode(CursorMode::Disabled);
 
