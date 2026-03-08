@@ -186,6 +186,7 @@ fn main() {
         if keys.contains(&Key::LeftShift) {
             speed *= 5.0;
         }
+        let prev_pos = camera.position;
         let right = camera.get_right();
         let yaw_rad = camera.yaw.to_radians();
         let fwd_flat = [-yaw_rad.sin(), 0.0, -yaw_rad.cos()];
@@ -204,6 +205,14 @@ fn main() {
         if keys.contains(&Key::D) {
             camera.position[0] += right[0] * speed;
             camera.position[2] += right[2] * speed;
+        }
+
+        // Resolve wall collisions in first-person mode
+        if first_person {
+            let foot_y = camera.position[1] - eye_height;
+            let adjusted = resolve_walls(&level, prev_pos, camera.position, foot_y, 30.0);
+            camera.position[0] = adjusted[0];
+            camera.position[2] = adjusted[2];
         }
 
         // Snap to ground in first-person mode
@@ -433,6 +442,63 @@ fn find_ground_y(level: &map::Map, x: f32, z: f32, current_y: f32) -> Option<f32
     }
 
     best_below.or(best_above)
+}
+
+// Collision resolution against wall planes from Object.collisions.
+fn resolve_walls(level: &map::Map, old_pos: [f32; 3], mut new_pos: [f32; 3], y_ref: f32, radius: f32) -> [f32; 3] {
+    // Treat walls as near-vertical planes and push the player back if crossing them.
+    let ny_wall_max = 0.3f32;
+
+    for _ in 0..2 {
+        let mut corrected = false;
+
+        for object in &level.geometries.objects {
+            for face in &object.collisions.faces {
+                let mut nx = face.x;
+                let mut ny = face.y;
+                let mut nz = face.z;
+                let mut d = face.distance_origin_to_face;
+
+                let len = (nx * nx + ny * ny + nz * nz).sqrt();
+                if len <= 1e-6 {
+                    continue;
+                }
+                nx /= len;
+                ny /= len;
+                nz /= len;
+                d /= len;
+
+                // Only consider near-vertical planes as walls
+                if ny.abs() > ny_wall_max {
+                    continue;
+                }
+
+                // Signed distances to the plane (n·p + d)
+                let s_old = nx * old_pos[0] + ny * y_ref + nz * old_pos[2] + d;
+                let s_new = nx * new_pos[0] + ny * y_ref + nz * new_pos[2] + d;
+
+                // If we moved from the back side (<= -radius) to front side (> -radius), resolve penetration
+                if s_old <= -radius && s_new > -radius {
+                    let penetration = s_new + radius;
+                    // Push back along the horizontal component of the normal
+                    let hx = nx;
+                    let hz = nz;
+                    let hlen = (hx * hx + hz * hz).sqrt();
+                    if hlen > 1e-5 && penetration > 0.0 {
+                        new_pos[0] -= (hx / hlen) * penetration;
+                        new_pos[2] -= (hz / hlen) * penetration;
+                        corrected = true;
+                    }
+                }
+            }
+        }
+
+        if !corrected {
+            break;
+        }
+    }
+
+    new_pos
 }
 
 // Texture utilities
