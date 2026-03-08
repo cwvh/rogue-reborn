@@ -2,6 +2,7 @@ use rogue_reborn::map;
 use rogue_reborn::rsb;
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
+use std::time::{Instant, Duration};
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 
 #[link(name = "GL")]
@@ -127,6 +128,7 @@ fn main() {
 
     while !window.should_close() {
         glfw.poll_events();
+
         for (_, event) in glfw::flush_messages(&events) {
             match event {
                 WindowEvent::Key(key, _, action, _) => {
@@ -229,6 +231,7 @@ fn main() {
         let z_near = (mesh.radius / 1000.0).max(0.05);
         let z_far = (mesh.radius * 10.0 + 100.0).max(z_near + 1.0);
 
+        let mut render_time = Instant::now();
         unsafe {
             glClear(0x00004000 | 0x00000100); // GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
             glMatrixMode(0x1701); // GL_PROJECTION
@@ -250,6 +253,7 @@ fn main() {
                     for od in &object.object_datas {
                         let mat_index = od.mn as usize;
                         if let Some(tex_id) = ensure_texture(&level.materials, mat_index, &map_num, &mut textures) {
+                            // TODO put all faces with same tex-id together so I can bind once
                             glBindTexture(0x0DE1, tex_id); // GL_TEXTURE_2D
 
                             // Faces and UVs are parallel arrays
@@ -302,6 +306,7 @@ fn main() {
                 glEnd();
             }
         }
+        println!("render_time:{:?}", render_time.elapsed());
 
         window.swap_buffers();
     }
