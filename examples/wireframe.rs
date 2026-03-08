@@ -416,9 +416,9 @@ fn find_ground_y(level: &map::Map, x: f32, z: f32, current_y: f32) -> Option<f32
                 continue;
             }
 
-            // Plane in Hessian normal form: n dot p = d
-            // Solve for y given x,z: y = (d - nx*x - nz*z) / ny
-            let y = (d - nx * x - nz * z) / ny;
+            // Plane in standard form: n dot p + d = 0
+            // Solve for y given x,z: y = (-d - nx*x - nz*z) / ny
+            let y = (-d - nx * x - nz * z) / ny;
 
             if y <= current_y {
                 if best_below.map_or(true, |v| y > v) {
