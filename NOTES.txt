@@ -1,0 +1,12 @@
+Map format
+* Each item in `geometries.objects` list has description for vertices, faces,
+  collisions, textures, etc. There is also a `name` field, like "2", "309",
+  etc., that is referenced again `portals.portals` list as an integer in the
+  `room` field. Each `Portal` describes its room number and opposite_room.
+* Each item in `rooms.rooms` list has a `section_name` that matches the string
+  `geometries.objects..name`. The `Room` describes `sherman_levels` with TM AABB
+  information and `level_heights`.
+* Each item in `planning_levels.levels` describes the rooms by string name like
+  "2", "309", etc., that are part of that level (or floor). This gives us the
+  the vertices we should render when the player is at a specific level. This
+  structure also has the `floor_height` and `level_number`.

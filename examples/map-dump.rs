@@ -5,6 +5,7 @@ use rogue_reborn::map;
 
 fn main() -> Result<()> {
     let map = map::read(Path::new("data/map/m00/citystreet_large.map"))?;
-    println!("{map:#?}");
+    // println!("{map:#?}");
+    println!("{}", serde_json::to_string_pretty(&map)?);
     Ok(())
 }
