@@ -142,7 +142,14 @@ fn main() {
                         (Key::F, Action::Press) => {
                             first_person = !first_person;
                             if first_person {
-                                if let Some(gy) = find_ground_y(&level, camera.position[0], camera.position[2], camera.position[1]) {
+                                let target_floor = nearest_planning_floor(&level, camera.position[1]);
+                                if let Some(gy) = find_ground_y(
+                                    &level,
+                                    camera.position[0],
+                                    camera.position[2],
+                                    camera.position[1],
+                                    target_floor,
+                                ) {
                                     camera.position[1] = gy + eye_height;
                                 }
                             }
@@ -222,7 +229,14 @@ fn main() {
 
         // Snap to ground in first-person mode
         if first_person {
-            if let Some(ground_y) = find_ground_y(&level, camera.position[0], camera.position[2], camera.position[1]) {
+            let target_floor = nearest_planning_floor(&level, camera.position[1]);
+            if let Some(ground_y) = find_ground_y(
+                &level,
+                camera.position[0],
+                camera.position[2],
+                camera.position[1],
+                target_floor,
+            ) {
                 camera.position[1] = ground_y + eye_height;
             }
         }
@@ -405,14 +419,27 @@ fn glu_perspective(fov_y: f32, aspect: f32, z_near: f32, z_far: f32) {
     }
 }
 
-// Walkable-surface detection via Object.collisions.
-// Approximates ground height at (x,z) from up-facing collision planes.
-fn find_ground_y(level: &map::Map, x: f32, z: f32, current_y: f32) -> Option<f32> {
+/**
+ * Walkable-surface detection via Object.collisions.
+ * Approximates ground height at (x,z) from up-facing collision planes.
+ * If target_floor is provided, prefer planes whose solved Y is near that floor.
+ */
+fn find_ground_y(
+    level: &map::Map,
+    x: f32,
+    z: f32,
+    current_y: f32,
+    target_floor: Option<f32>,
+) -> Option<f32> {
     let max_slope_deg = 50.0f32;
     let ny_thresh = max_slope_deg.to_radians().cos();
+    // Band around a target planning-level floor height to disambiguate stacked floors
+    const FLOOR_BAND: f32 = 200.0;
 
-    let mut best_below: Option<f32> = None;
-    let mut best_above: Option<f32> = None;
+    let mut best_below_any: Option<f32> = None;
+    let mut best_above_any: Option<f32> = None;
+    let mut best_below_banded: Option<f32> = None;
+    let mut best_above_banded: Option<f32> = None;
 
     for object in &level.geometries.objects {
         for face in &object.collisions.faces {
@@ -438,19 +465,52 @@ fn find_ground_y(level: &map::Map, x: f32, z: f32, current_y: f32) -> Option<f32
             // Solve for y given x,z: y = (-d - nx*x - nz*z) / ny
             let y = (-d - nx * x - nz * z) / ny;
 
+            let in_band = match target_floor {
+                Some(t) => (y - t).abs() <= FLOOR_BAND,
+                None => false,
+            };
+
             if y <= current_y {
-                if best_below.map_or(true, |v| y > v) {
-                    best_below = Some(y);
+                if best_below_any.map_or(true, |v| y > v) {
+                    best_below_any = Some(y);
+                }
+                if in_band && best_below_banded.map_or(true, |v| y > v) {
+                    best_below_banded = Some(y);
                 }
             } else {
-                if best_above.map_or(true, |v| y < v) {
-                    best_above = Some(y);
+                if best_above_any.map_or(true, |v| y < v) {
+                    best_above_any = Some(y);
+                }
+                if in_band && best_above_banded.map_or(true, |v| y < v) {
+                    best_above_banded = Some(y);
                 }
             }
         }
     }
 
-    best_below.or(best_above)
+    // Prefer banded results when a target floor is provided; otherwise fall back to any.
+    let banded = best_below_banded.or(best_above_banded);
+    if banded.is_some() {
+        banded
+    } else {
+        best_below_any.or(best_above_any)
+    }
+}
+
+/**
+ * Find the nearest planning-level floor height to the given Y.
+ */
+fn nearest_planning_floor(level: &map::Map, y: f32) -> Option<f32> {
+    let mut best: Option<f32> = None;
+    let mut best_diff = f32::INFINITY;
+    for pl in &level.planning_levels.levels {
+        let diff = (pl.floor_height - y).abs();
+        if diff < best_diff {
+            best_diff = diff;
+            best = Some(pl.floor_height);
+        }
+    }
+    best
 }
 
 // Collision resolution against wall planes from Object.collisions.
