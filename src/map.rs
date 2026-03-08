@@ -4,6 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
 use byteorder::{LE, ReadBytesExt};
+#[cfg(feature = "get-size")]
 use get_size::GetSize;
 #[cfg(feature = "serde")]
 use serde::{Serialize, Deserialize};
@@ -19,7 +20,8 @@ const END: &[u8] = b"EndMap";
 /// on-disk format has list lengths, the in-memory `Map` type uses `Vec<T>` and
 /// omits the explicit length.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Map {
     pub header: MapHeader,
     pub materials: Materials,
@@ -74,7 +76,8 @@ pub fn read(filename: &Path) -> anyhow::Result<Map> {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct MapHeader {
     /// Unix timestamp of when the MAP file was created
     pub timestamp: u32,
@@ -96,7 +99,8 @@ impl MapHeader {
 
 /// List of all `Material`s for the level
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Materials {
     pub id: u32,
     pub materials: Vec<Material>,
@@ -124,7 +128,8 @@ impl Materials {
 
 /// Texture material reference and rendering parameters
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Material {
     pub id: u32,
     pub filename: String,
@@ -175,7 +180,8 @@ impl Material {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub enum TextureAddressMode {
     Opaque,
     Wrap,
@@ -197,7 +203,8 @@ impl TextureAddressMode {
 
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Color4f {
     pub r: f32,
     pub g: f32,
@@ -216,7 +223,8 @@ impl Color4f {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Geometries {
     pub id: u32,
     pub objects: Vec<Object>,
@@ -241,7 +249,8 @@ impl Geometries {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Object {
     pub id: u32,
     pub name: String,
@@ -308,7 +317,8 @@ impl Object {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Vertex {
     pub x: f32,
     pub y: f32,
@@ -323,7 +333,8 @@ impl Vertex {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct ObjectData {
     // TODO: what is this?
     pub mn: u32,
@@ -345,7 +356,8 @@ impl ObjectData {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Faces {
     pub normals: Vec<FaceNormal>,
     pub face_indices: Vec<(u16, u16, u16)>,
@@ -394,7 +406,8 @@ impl Faces {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct FaceNormal {
     pub x: f32,
     pub y: f32,
@@ -413,7 +426,8 @@ impl FaceNormal {
 
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct TextureVertices {
     pub normals: Vec<NormalCoord>,
     pub uv_coords: Vec<UvCoord>,
@@ -451,7 +465,8 @@ impl TextureVertices {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct NormalCoord {
     pub x: f32,
     pub y: f32,
@@ -466,7 +481,8 @@ impl NormalCoord {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct UvCoord {
     pub u: f32,
     pub v: f32,
@@ -481,7 +497,8 @@ impl UvCoord {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Collisions {
     pub vertices: Vec<Vertex>,
     pub faces: Vec<FaceNormal>,
@@ -508,7 +525,8 @@ impl Collisions {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Tag {
     pub coord1: (u16, u16, u16),
     pub face_index_1: u16,
@@ -538,7 +556,8 @@ impl Tag {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct EIndices {
     // TODO: what is this?
     pub text: String,
@@ -565,7 +584,8 @@ impl EIndices {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Portals {
     pub id: u32,
     pub name: String,
@@ -590,7 +610,8 @@ impl Portals {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Portal {
     pub id: u32,
     pub name: String,
@@ -623,7 +644,8 @@ impl Portal {
 // TODO: light count is zero for every RS map I tested. I think lights are
 // in the DMP files for RS.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Lights {
     pub id: u32,
     pub name: String,
@@ -640,7 +662,8 @@ impl Lights {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct DynamicObjects {
     pub id: u32,
     pub name: String,
@@ -662,7 +685,8 @@ impl DynamicObjects {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct DynamicObject {
     // TODO: if keeping the section header, then make a `SectionHeader` type
     // that holds the version and any additional names.
@@ -681,7 +705,8 @@ pub struct DynamicObject {
 /// Mappings of section header ID to the object type. This list is
 /// non-exhaustive at the moment and only used in `DynamicObject`.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Copy, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Copy, Debug)]
 pub enum Id {
     /// An object with dynamic properties, such as televisions
     Dynamic = 14,
@@ -747,7 +772,8 @@ impl DynamicObject {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct TransformationMatrix {
     pub x_axis: Vec3f,
     pub y_axis: Vec3f,
@@ -767,7 +793,8 @@ impl TransformationMatrix {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Vec3f {
     pub x: f32,
     pub y: f32,
@@ -782,7 +809,8 @@ impl Vec3f {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Vec6f {
     pub x1: f32,
     pub y1: f32,
@@ -803,7 +831,8 @@ impl Vec6f {
 // TODO: I don't think we really have an 8-D vector in the game. Rename this
 // once I figure out what a 6-D vector with an additional X+Y is.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Vec8f {
     pub x1: f32,
     pub y1: f32,
@@ -827,7 +856,8 @@ impl Vec8f {
 
 /// When the dynamic object section header is value 14
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub enum KindDynamicParams {
     // TODO: bad names; do better
 
@@ -881,7 +911,8 @@ impl KindDynamicParams {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct KindDynamicParamStruct {
     pub name: String,
     // TODO: translation matrix?
@@ -917,7 +948,8 @@ impl KindDynamicParamStruct {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct DynamicObjectKindCommon {
     pub tm: TransformationMatrix,
     pub name: String,
@@ -980,7 +1012,8 @@ impl DynamicObjectKindCommon {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub enum DynamicObjectKind {
     /// An object with dynamic properties like a television
     // Dynamic = 14,
@@ -1247,7 +1280,8 @@ impl DynamicObjectKind {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Rooms {
     pub section_id: u32,
     pub section_name: String,
@@ -1270,7 +1304,8 @@ impl Rooms {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Room {
     pub section_id: u32,
     pub section_name: String,
@@ -1365,7 +1400,8 @@ impl Room {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct ShermanLevel {
     pub name: String,
     pub tm_with_aabb: Vec<TransformationWithAABB>,
@@ -1404,7 +1440,8 @@ impl ShermanLevel {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct TransformationWithAABB {
     pub tm: TransformationMatrix,
     pub aabb: [f32; 6],
@@ -1424,7 +1461,8 @@ impl TransformationWithAABB {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct LevelHeight {
     pub height: f32,
     pub unknown: f32,
@@ -1442,7 +1480,8 @@ impl LevelHeight {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Transitions {
     pub section_id: u32,
     pub section_name: String,
@@ -1467,7 +1506,8 @@ impl Transitions {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct Transition {
     pub name: String,
     pub coords: TransitionCoords,
@@ -1482,7 +1522,8 @@ impl Transition {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct TransitionCoords {
     pub p1: Vec3f,
     pub p2: Vec3f,
@@ -1497,7 +1538,8 @@ impl TransitionCoords {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct PlanningLevels {
     pub section_id: u32,
     pub section_name: String,
@@ -1520,7 +1562,8 @@ impl PlanningLevels {
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, GetSize)]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
 pub struct PlanningLevel {
     pub level_number: f32,
     pub floor_height: f32,

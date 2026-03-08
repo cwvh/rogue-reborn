@@ -6,6 +6,7 @@ edition = "2024"
 [features]
 default = []
 serde = ["dep:serde", "dep:serde_json"]
+get-size = ["dep:get-size"]
 
 [profile.dev]
 opt-level = 1
@@ -18,7 +19,7 @@ opt-level = 2
 [dependencies]
 anyhow = "1.0.75"
 byteorder = "1.5.0"
-get-size = { version = "0.1.4", features = ["derive"] }
+get-size = { version = "0.1.4", optional = true, features = ["derive"] }
 gl = "0.14.0"
 glfw = "0.59.0"
 serde = { version = "1", optional = true, features = ["derive"] }
