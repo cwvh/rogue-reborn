@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::Context;
-use minifb::{Key, Window, WindowOptions};
+use minifb::{Key, Menu, Window, WindowOptions};
 use rogue_reborn::rsb;
 
 fn main() -> anyhow::Result<()> {
@@ -25,7 +25,8 @@ fn main() -> anyhow::Result<()> {
     )
     .context("window creation failed")?;
 
-    window.limit_update_rate(Some(std::time::Duration::from_millis(40)));
+    // window.limit_update_rate(Some(std::time::Duration::from_millis(40)));
+    window.set_target_fps(60);
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let rsb = if window.is_key_down(Key::F) { &blink } else { &rsb };
