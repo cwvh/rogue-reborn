@@ -20,6 +20,7 @@ extern "C" {
     fn glVertex3f(x: f32, y: f32, z: f32);
     fn glRotatef(angle: f32, x: f32, y: f32, z: f32);
     fn glTranslatef(x: f32, y: f32, z: f32);
+    fn glScalef(x: f32, y: f32, z: f32);
     fn glTexCoord2f(s: f32, t: f32);
     fn glTexParameteri(target: u32, pname: u32, param: i32);
     fn glGenTextures(n: i32, textures: *mut u32);
@@ -241,6 +242,7 @@ fn main() {
             glMatrixMode(0x1700); // GL_MODELVIEW
             glLoadIdentity();
             apply_camera(&camera);
+            glScalef(1.0, 1.0, -1.0);
 
             // Draw either textured geometry or wireframe triangles
             if textured {
@@ -276,13 +278,13 @@ fn main() {
                                 let uv2 = &od.texture_vertices.uv_coords[t2 as usize];
 
                                 // Flip V to match OpenGL texture origin
-                                glTexCoord2f(1.0 - uv0.u, uv0.v);
+                                glTexCoord2f(uv0.u, 1.0 - uv0.v);
                                 glVertex3f(p0.x, p0.y, p0.z);
 
-                                glTexCoord2f(1.0 - uv1.u, uv1.v);
+                                glTexCoord2f(uv1.u, 1.0 - uv1.v);
                                 glVertex3f(p1.x, p1.y, p1.z);
 
-                                glTexCoord2f(1.0 - uv2.u, uv2.v);
+                                glTexCoord2f(uv2.u, 1.0 - uv2.v);
                                 glVertex3f(p2.x, p2.y, p2.z);
                             }
                             glEnd();
