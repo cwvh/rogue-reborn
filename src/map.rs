@@ -4,6 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
 use byteorder::{LE, ReadBytesExt};
+use get_size::GetSize;
 
 const MAGIC: &[u8] = b"BeginMapv2.1";
 const END: &[u8] = b"EndMap";
@@ -15,7 +16,7 @@ const END: &[u8] = b"EndMap";
 /// The `Map` type does not represent the on-disk format exactly. Where the
 /// on-disk format has list lengths, the in-memory `Map` type uses `Vec<T>` and
 /// omits the explicit length.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Map {
     pub header: MapHeader,
     pub materials: Materials,
@@ -69,7 +70,7 @@ pub fn read(filename: &Path) -> anyhow::Result<Map> {
     Map::read(&mut buf)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct MapHeader {
     /// Unix timestamp of when the MAP file was created
     pub timestamp: u32,
@@ -90,7 +91,7 @@ impl MapHeader {
 }
 
 /// List of all `Material`s for the level
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Materials {
     pub id: u32,
     pub materials: Vec<Material>,
@@ -117,7 +118,7 @@ impl Materials {
 }
 
 /// Texture material reference and rendering parameters
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Material {
     pub id: u32,
     pub filename: String,
@@ -167,7 +168,7 @@ impl Material {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub enum TextureAddressMode {
     Opaque,
     Wrap,
@@ -188,7 +189,7 @@ impl TextureAddressMode {
 }
 
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Color4f {
     pub r: f32,
     pub g: f32,
@@ -206,7 +207,7 @@ impl Color4f {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Geometries {
     pub id: u32,
     pub objects: Vec<Object>,
@@ -230,7 +231,7 @@ impl Geometries {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Object {
     pub id: u32,
     pub name: String,
@@ -296,7 +297,7 @@ impl Object {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Vertex {
     pub x: f32,
     pub y: f32,
@@ -310,7 +311,7 @@ impl Vertex {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct ObjectData {
     // TODO: what is this?
     pub mn: u32,
@@ -331,7 +332,7 @@ impl ObjectData {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Faces {
     pub normals: Vec<FaceNormal>,
     pub face_indices: Vec<(u16, u16, u16)>,
@@ -379,7 +380,7 @@ impl Faces {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct FaceNormal {
     pub x: f32,
     pub y: f32,
@@ -397,7 +398,7 @@ impl FaceNormal {
 }
 
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct TextureVertices {
     pub normals: Vec<NormalCoord>,
     pub uv_coords: Vec<UvCoord>,
@@ -434,7 +435,7 @@ impl TextureVertices {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct NormalCoord {
     pub x: f32,
     pub y: f32,
@@ -448,7 +449,7 @@ impl NormalCoord {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct UvCoord {
     pub u: f32,
     pub v: f32,
@@ -462,7 +463,7 @@ impl UvCoord {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Collisions {
     pub vertices: Vec<Vertex>,
     pub faces: Vec<FaceNormal>,
@@ -488,7 +489,7 @@ impl Collisions {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Tag {
     pub coord1: (u16, u16, u16),
     pub face_index_1: u16,
@@ -517,7 +518,7 @@ impl Tag {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct EIndices {
     // TODO: what is this?
     pub text: String,
@@ -543,7 +544,7 @@ impl EIndices {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Portals {
     pub id: u32,
     pub name: String,
@@ -567,7 +568,7 @@ impl Portals {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Portal {
     pub id: u32,
     pub name: String,
@@ -599,7 +600,7 @@ impl Portal {
 
 // TODO: light count is zero for every RS map I tested. I think lights are
 // in the DMP files for RS.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Lights {
     pub id: u32,
     pub name: String,
@@ -615,7 +616,7 @@ impl Lights {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct DynamicObjects {
     pub id: u32,
     pub name: String,
@@ -636,7 +637,7 @@ impl DynamicObjects {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct DynamicObject {
     // TODO: if keeping the section header, then make a `SectionHeader` type
     // that holds the version and any additional names.
@@ -654,7 +655,7 @@ pub struct DynamicObject {
 
 /// Mappings of section header ID to the object type. This list is
 /// non-exhaustive at the moment and only used in `DynamicObject`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, GetSize)]
 pub enum Id {
     /// An object with dynamic properties, such as televisions
     Dynamic = 14,
@@ -719,7 +720,7 @@ impl DynamicObject {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct TransformationMatrix {
     pub x_axis: Vec3f,
     pub y_axis: Vec3f,
@@ -738,7 +739,7 @@ impl TransformationMatrix {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Vec3f {
     pub x: f32,
     pub y: f32,
@@ -752,7 +753,7 @@ impl Vec3f {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Vec6f {
     pub x1: f32,
     pub y1: f32,
@@ -772,7 +773,7 @@ impl Vec6f {
 
 // TODO: I don't think we really have an 8-D vector in the game. Rename this
 // once I figure out what a 6-D vector with an additional X+Y is.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Vec8f {
     pub x1: f32,
     pub y1: f32,
@@ -795,7 +796,7 @@ impl Vec8f {
 
 
 /// When the dynamic object section header is value 14
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub enum KindDynamicParams {
     // TODO: bad names; do better
 
@@ -848,7 +849,7 @@ impl KindDynamicParams {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct KindDynamicParamStruct {
     pub name: String,
     // TODO: translation matrix?
@@ -883,7 +884,7 @@ impl KindDynamicParamStruct {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct DynamicObjectKindCommon {
     pub tm: TransformationMatrix,
     pub name: String,
@@ -945,7 +946,7 @@ impl DynamicObjectKindCommon {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub enum DynamicObjectKind {
     /// An object with dynamic properties like a television
     // Dynamic = 14,
@@ -1211,7 +1212,7 @@ impl DynamicObjectKind {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Rooms {
     pub section_id: u32,
     pub section_name: String,
@@ -1233,7 +1234,7 @@ impl Rooms {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Room {
     pub section_id: u32,
     pub section_name: String,
@@ -1327,7 +1328,7 @@ impl Room {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct ShermanLevel {
     pub name: String,
     pub tm_with_aabb: Vec<TransformationWithAABB>,
@@ -1365,7 +1366,7 @@ impl ShermanLevel {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct TransformationWithAABB {
     pub tm: TransformationMatrix,
     pub aabb: [f32; 6],
@@ -1384,7 +1385,7 @@ impl TransformationWithAABB {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct LevelHeight {
     pub height: f32,
     pub unknown: f32,
@@ -1401,7 +1402,7 @@ impl LevelHeight {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Transitions {
     pub section_id: u32,
     pub section_name: String,
@@ -1425,7 +1426,7 @@ impl Transitions {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct Transition {
     pub name: String,
     pub coords: TransitionCoords,
@@ -1439,7 +1440,7 @@ impl Transition {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct TransitionCoords {
     pub p1: Vec3f,
     pub p2: Vec3f,
@@ -1453,7 +1454,7 @@ impl TransitionCoords {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct PlanningLevels {
     pub section_id: u32,
     pub section_name: String,
@@ -1475,7 +1476,7 @@ impl PlanningLevels {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, GetSize)]
 pub struct PlanningLevel {
     pub level_number: f32,
     pub floor_height: f32,

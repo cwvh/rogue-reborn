@@ -2,11 +2,11 @@ use rogue_reborn::map;
 use rogue_reborn::rsb;
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
-use std::time::{Instant, Duration};
+use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 
 #[link(name = "GL")]
-extern "C" {
+unsafe extern "C" {
     fn glViewport(x: i32, y: i32, width: i32, height: i32);
     fn glClearColor(r: f32, g: f32, b: f32, a: f32);
     fn glEnable(cap: u32);
@@ -113,7 +113,8 @@ fn main() {
 
     // Camera setup: start at mission-provided location
     let mut camera = Camera::new();
-    camera.position = [33924.6_f32, 33307.0_f32, 30028.3_f32];   // CSL
+    // negate z_lh because original coordinates were RH for Direct3D
+    camera.position = [33924.6_f32, 33307.0_f32, -30028.3_f32];   // CSL
     let mut last_cursor_pos: Option<(f64, f64)> = None;
     window.set_cursor_mode(CursorMode::Disabled);
 
@@ -125,7 +126,7 @@ fn main() {
 
     // Base movement speed scales with map size
     // let base_speed = (mesh.radius / 200.0).max(0.01);
-    let base_speed = 5.0;
+    let base_speed = 7.5;
 
     while !window.should_close() {
         glfw.poll_events();
@@ -189,7 +190,7 @@ fn main() {
         if keys.contains(&Key::LeftShift) {
             speed *= 5.0;
         }
-        let prev_pos = camera.position;
+        // let prev_pos = camera.position;
         let right = camera.get_right();
         let yaw_rad = camera.yaw.to_radians();
         let fwd_flat = [-yaw_rad.sin(), 0.0, -yaw_rad.cos()];
@@ -212,8 +213,8 @@ fn main() {
 
         // Resolve wall collisions in first-person mode
         if first_person {
-            let foot_y = camera.position[1] - eye_height;
             // TODO renable wall collision once I get it working
+            // let foot_y = camera.position[1] - eye_height;
             // let adjusted = resolve_walls(&level, prev_pos, camera.position, foot_y, 30.0);
             // camera.position[0] = adjusted[0];
             // camera.position[2] = adjusted[2];
@@ -232,7 +233,7 @@ fn main() {
         let z_near = (mesh.radius / 1000.0).max(0.05);
         let z_far = (mesh.radius * 10.0 + 100.0).max(z_near + 1.0);
 
-        let mut render_time = Instant::now();
+        let render_time = Instant::now();
         unsafe {
             glClear(0x00004000 | 0x00000100); // GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
             glMatrixMode(0x1701); // GL_PROJECTION
@@ -546,7 +547,7 @@ fn resolve_texture_path(map_num: &str, material_filename: &str) -> Option<PathBu
     let stem = rel.file_stem()?.to_string_lossy().into_owned();
 
     // Rebuild the relative path keeping parent directories, swapping extension to RSB
-    let mut build_rel = |ext: &str| -> PathBuf {
+    let build_rel = |ext: &str| -> PathBuf {
         if let Some(parent) = rel.parent() {
             parent.join(format!("{stem}.{ext}"))
         } else {
