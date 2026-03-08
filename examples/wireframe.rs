@@ -119,6 +119,8 @@ fn main() {
     let mut keys = std::collections::HashSet::new();
     let mut textures: HashMap<String, u32> = HashMap::new();
     let mut textured = false;
+    let mut first_person = false;
+    let eye_height: f32 = 170.0;
 
     // Base movement speed scales with map size
     let base_speed = (mesh.radius / 200.0).max(0.01);
@@ -132,6 +134,14 @@ fn main() {
                         (Key::Escape, Action::Press) | (Key::Q, Action::Press) => window.set_should_close(true), // Escape or 'q' to quit
                         (Key::T, Action::Press) => {
                             textured = !textured;
+                        }
+                        (Key::F, Action::Press) => {
+                            first_person = !first_person;
+                            if first_person {
+                                if let Some(gy) = find_ground_y(&level, camera.position[0], camera.position[2], camera.position[1]) {
+                                    camera.position[1] = gy + eye_height;
+                                }
+                            }
                         }
                         (k, Action::Press) => {
                             keys.insert(k);
@@ -156,13 +166,15 @@ fn main() {
                     unsafe { glViewport(0, 0, width, height); }
                 }
                 WindowEvent::Scroll(_x, y) => {
-                    let scroll = y as f32;
-                    if scroll != 0.0 {
-                        let dir = camera.get_forward();
-                        let zoom_speed = base_speed * 5.0;
-                        camera.position[0] += dir[0] * zoom_speed * scroll;
-                        camera.position[1] += dir[1] * zoom_speed * scroll;
-                        camera.position[2] += dir[2] * zoom_speed * scroll;
+                    if !first_person {
+                        let scroll = y as f32;
+                        if scroll != 0.0 {
+                            let dir = camera.get_forward();
+                            let zoom_speed = base_speed * 5.0;
+                            camera.position[0] += dir[0] * zoom_speed * scroll;
+                            camera.position[1] += dir[1] * zoom_speed * scroll;
+                            camera.position[2] += dir[2] * zoom_speed * scroll;
+                        }
                     }
                 }
                 _ => {}
@@ -192,6 +204,13 @@ fn main() {
         if keys.contains(&Key::D) {
             camera.position[0] += right[0] * speed;
             camera.position[2] += right[2] * speed;
+        }
+
+        // Snap to ground in first-person mode
+        if first_person {
+            if let Some(ground_y) = find_ground_y(&level, camera.position[0], camera.position[2], camera.position[1]) {
+                camera.position[1] = ground_y + eye_height;
+            }
         }
 
         // Compute dynamic aspect and clip planes
@@ -366,6 +385,54 @@ fn glu_perspective(fov_y: f32, aspect: f32, z_near: f32, z_far: f32) {
         mat[14] = (2.0 * z_far * z_near) * nf;
         glMultMatrixf(mat.as_ptr());
     }
+}
+
+// Walkable-surface detection via Object.collisions.
+// Approximates ground height at (x,z) from up-facing collision planes.
+fn find_ground_y(level: &map::Map, x: f32, z: f32, current_y: f32) -> Option<f32> {
+    let max_slope_deg = 50.0f32;
+    let ny_thresh = max_slope_deg.to_radians().cos();
+
+    let mut best_below: Option<f32> = None;
+    let mut best_above: Option<f32> = None;
+
+    for object in &level.geometries.objects {
+        for face in &object.collisions.faces {
+            let mut nx = face.x;
+            let mut ny = face.y;
+            let mut nz = face.z;
+            let mut d = face.distance_origin_to_face;
+
+            let len = (nx * nx + ny * ny + nz * nz).sqrt();
+            if len <= 1e-6 {
+                continue;
+            }
+            nx /= len;
+            ny /= len;
+            nz /= len;
+            d /= len;
+
+            if ny < ny_thresh || ny.abs() < 1e-6 {
+                continue;
+            }
+
+            // Plane in Hessian normal form: n dot p = d
+            // Solve for y given x,z: y = (d - nx*x - nz*z) / ny
+            let y = (d - nx * x - nz * z) / ny;
+
+            if y <= current_y {
+                if best_below.map_or(true, |v| y > v) {
+                    best_below = Some(y);
+                }
+            } else {
+                if best_above.map_or(true, |v| y < v) {
+                    best_above = Some(y);
+                }
+            }
+        }
+    }
+
+    best_below.or(best_above)
 }
 
 // Texture utilities
