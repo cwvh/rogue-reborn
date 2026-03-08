@@ -81,8 +81,8 @@ struct Mesh {
 
 fn main() {
     // Load the map
-    // let map_path = Path::new("data/map/m00/citystreet_large.map");
-    let map_path = Path::new("data/map/rm02/rm02.map");
+    let map_path = Path::new("data/map/m00/citystreet_large.map");
+    // let map_path = Path::new("data/map/rm02/rm02.map");
     let map_num = extract_map_num(map_path).unwrap_or_else(|| String::from("m00"));
     let level = map::read(map_path)
         .expect("Failed to load map");
