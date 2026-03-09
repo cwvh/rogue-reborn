@@ -271,9 +271,17 @@ fn main() {
                 glEnable(0x0DE1); // GL_TEXTURE_2D
                 glPolygonMode(0x0408, 0x1B02); // GL_FRONT_AND_BACK, GL_FILL
 
+                // Determine which room names are active for this planning level (if any)
+                let use_filter = !level.planning_levels.levels.is_empty();
                 // Iterate map geometry by material groups
                 for object in &level.geometries.objects {
                     for od in &object.object_datas {
+                        if use_filter {
+                            let rooms = &level.planning_levels.levels[planning_level_index].room_names;
+                            if !rooms.iter().any(|r| r == &object.name) {
+                                continue;
+                            }
+                        }
                         let mat_index = od.mn as usize;
                         if let Some(tex_id) = ensure_texture(&level.materials, mat_index, &map_num, &mut textures) {
                             // TODO put all faces with same tex-id together so I can bind once
