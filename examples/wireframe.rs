@@ -122,6 +122,7 @@ fn main() {
     let mut textures: HashMap<String, u32> = HashMap::new();
     let mut textured = false;
     let mut first_person = false;
+    let mut planning_level_index: usize = 0;
     let eye_height: f32 = 25.0;
 
     // Base movement speed scales with map size
@@ -138,6 +139,11 @@ fn main() {
                         (Key::Escape, Action::Press) | (Key::Q, Action::Press) => window.set_should_close(true), // Escape or 'q' to quit
                         (Key::T, Action::Press) => {
                             textured = !textured;
+                        }
+                        (Key::P, Action::Press) => {
+                            if !level.planning_levels.levels.is_empty() {
+                                planning_level_index = (planning_level_index + 1) % level.planning_levels.levels.len();
+                            }
                         }
                         (Key::F, Action::Press) => {
                             first_person = !first_person;
@@ -307,20 +313,39 @@ fn main() {
                     }
                 }
             } else {
-                // Wireframe mode
+                // Wireframe mode, filtered by current planning level rooms
                 glDisable(0x0DE1); // GL_TEXTURE_2D
                 glPolygonMode(0x0408, 0x1B01); // GL_FRONT_AND_BACK, GL_LINE
 
-                glBegin(0x0004); // GL_TRIANGLES
-                for tri in &mesh.indices {
-                    let a = mesh.vertices[tri[0] as usize];
-                    let b = mesh.vertices[tri[1] as usize];
-                    let c = mesh.vertices[tri[2] as usize];
-                    glVertex3f(a[0], a[1], a[2]);
-                    glVertex3f(b[0], b[1], b[2]);
-                    glVertex3f(c[0], c[1], c[2]);
+                // Determine which room names are active for this planning level (if any)
+                let use_filter = !level.planning_levels.levels.is_empty();
+                for object in &level.geometries.objects {
+                    if use_filter {
+                        let rooms = &level.planning_levels.levels[planning_level_index].room_names;
+                        if !rooms.iter().any(|r| r == &object.name) {
+                            continue;
+                        }
+                    }
+
+                    for od in &object.object_datas {
+                        let face_count = od.faces.face_indices.len();
+                        if face_count == 0 {
+                            continue;
+                        }
+
+                        glBegin(0x0004); // GL_TRIANGLES
+                        for &(i0, i1, i2) in &od.faces.face_indices {
+                            let p0 = &object.vertices[i0 as usize];
+                            let p1 = &object.vertices[i1 as usize];
+                            let p2 = &object.vertices[i2 as usize];
+
+                            glVertex3f(p0.x, p0.y, p0.z);
+                            glVertex3f(p1.x, p1.y, p1.z);
+                            glVertex3f(p2.x, p2.y, p2.z);
+                        }
+                        glEnd();
+                    }
                 }
-                glEnd();
             }
         }
         println!("render_time:{:?}", render_time.elapsed());
