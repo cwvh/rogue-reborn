@@ -21,6 +21,7 @@ unsafe extern "C" {
     fn glRotatef(angle: f32, x: f32, y: f32, z: f32);
     fn glTranslatef(x: f32, y: f32, z: f32);
     fn glScalef(x: f32, y: f32, z: f32);
+    fn glColor3f(r: f32, g: f32, b: f32);
     fn glTexCoord2f(s: f32, t: f32);
     fn glTexParameteri(target: u32, pname: u32, param: i32);
     fn glGenTextures(n: i32, textures: *mut u32);
@@ -123,6 +124,7 @@ fn main() {
     let mut textured = false;
     let mut first_person = false;
     let mut planning_level_index: usize = 0;
+    let mut show_portals = false;
     let eye_height: f32 = 25.0;
 
     // Base movement speed scales with map size
@@ -140,10 +142,13 @@ fn main() {
                         (Key::T, Action::Press) => {
                             textured = !textured;
                         }
-                        (Key::P, Action::Press) => {
+                        (Key::L, Action::Press) => {
                             if !level.planning_levels.levels.is_empty() {
                                 planning_level_index = (planning_level_index + 1) % level.planning_levels.levels.len();
                             }
+                        }
+                        (Key::P, Action::Press) => {
+                            show_portals = !show_portals;
                         }
                         (Key::F, Action::Press) => {
                             first_person = !first_person;
@@ -354,6 +359,21 @@ fn main() {
                         glEnd();
                     }
                 }
+            }
+            // Render portals overlay when toggled
+            if show_portals {
+                glDisable(0x0DE1); // GL_TEXTURE_2D
+                glColor3f(0.0, 1.0, 0.0);
+                for portal in &level.portals.portals {
+                    if portal.coordinates.len() >= 2 {
+                        glBegin(0x0002); // GL_LINE_LOOP
+                        for v in &portal.coordinates {
+                            glVertex3f(v.x, v.y, v.z);
+                        }
+                        glEnd();
+                    }
+                }
+                glColor3f(1.0, 1.0, 1.0); // restore default for next pass
             }
         }
         println!("render_time:{:?}", render_time.elapsed());
