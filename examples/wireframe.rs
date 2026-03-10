@@ -158,9 +158,16 @@ fn main() {
                         (Key::F, Action::Press) => {
                             first_person = !first_person;
                             if first_person {
-                                let target_floor = nearest_planning_floor(&level, camera.position[1]);
-                                if let Some(gy) = find_ground_y(
+                                let room_idx = select_current_room(&rt_index, &level, planning_level_index, camera.position[0], camera.position[2]);
+                                let target_floor =
+                                    room_idx
+                                        .and_then(|ri| room_planning_floor(&level, ri, planning_level_index))
+                                        .or_else(|| nearest_planning_floor(&level, camera.position[1]));
+                                if let Some(gy) = find_ground_y_indexed(
                                     &level,
+                                    &rt_index,
+                                    room_idx,
+                                    planning_level_index,
                                     camera.position[0],
                                     camera.position[2],
                                     camera.position[1],
