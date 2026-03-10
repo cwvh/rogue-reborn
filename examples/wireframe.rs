@@ -697,129 +697,67 @@ fn ortho_2d(left: f32, right: f32, bottom: f32, top: f32) {
 }
 
 fn draw_glyph(ch: char, x: f32, y: f32, scale: f32) {
-    // 7-seg segment endpoints in unit square
-    fn seg_coords(idx: u8) -> [f32; 4] {
-        match idx {
-            // a (top)
-            0 => [0.1, 0.9, 0.9, 0.9],
-            // b (upper-right)
-            1 => [0.9, 0.9, 0.9, 0.5],
-            // c (lower-right)
-            2 => [0.9, 0.5, 0.9, 0.1],
-            // d (bottom)
-            3 => [0.1, 0.1, 0.9, 0.1],
-            // e (lower-left)
-            4 => [0.1, 0.5, 0.1, 0.1],
-            // f (upper-left)
-            5 => [0.1, 0.9, 0.1, 0.5],
-            // g (middle)
-            6 => [0.1, 0.5, 0.9, 0.5],
-            _ => [0.0, 0.0, 0.0, 0.0],
+    // Return a 5x7 bitmap for supported glyphs (top row first, bit 4 = leftmost)
+    fn glyph_bitmap(c: char) -> Option<[u8; 7]> {
+        match c {
+            // Digits 0-9
+            '0' => Some([0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E]),
+            '1' => Some([0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E]),
+            '2' => Some([0x0E, 0x11, 0x01, 0x06, 0x08, 0x10, 0x1F]),
+            '3' => Some([0x0E, 0x11, 0x01, 0x06, 0x01, 0x11, 0x0E]),
+            '4' => Some([0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02]),
+            '5' => Some([0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E]),
+            '6' => Some([0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E]),
+            '7' => Some([0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08]),
+            '8' => Some([0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E]),
+            '9' => Some([0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C]),
+            // Letters we commonly render
+            'L' => Some([0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F]),
+            'E' => Some([0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F]),
+            'V' => Some([0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04]),
+            'F' => Some([0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10]),
+            'P' => Some([0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10]),
+            'S' => Some([0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E]),
+            'R' => Some([0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11]),
+            'N' => Some([0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11]),
+            'D' => Some([0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E]),
+            'M' => Some([0x11, 0x1B, 0x15, 0x11, 0x11, 0x11, 0x11]),
+            ':' => Some([0x00, 0x04, 0x00, 0x00, 0x04, 0x00, 0x00]),
+            '.' => Some([0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00]),
+            ' ' => Some([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+            _ => None,
         }
-    }
-
-    // Emit all segments defined by indices
-    unsafe fn emit_segments(segs: &[u8], x: f32, y: f32, s: f32) {
-        glBegin(0x0001); // GL_LINES
-        for &idx in segs {
-            let c = seg_coords(idx);
-            glVertex3f(x + c[0] * s, y + c[1] * s, 0.0);
-            glVertex3f(x + c[2] * s, y + c[3] * s, 0.0);
-        }
-        glEnd();
     }
 
     let cu = ch.to_ascii_uppercase();
-    match cu {
-        // Digits via 7-seg
-        '0' => unsafe { emit_segments(&[0,1,2,3,4,5], x, y, scale) },
-        '1' => unsafe { emit_segments(&[1,2], x, y, scale) },
-        '2' => unsafe { emit_segments(&[0,1,6,4,3], x, y, scale) },
-        '3' => unsafe { emit_segments(&[0,1,2,3,6], x, y, scale) },
-        '4' => unsafe { emit_segments(&[5,6,1,2], x, y, scale) },
-        '5' => unsafe { emit_segments(&[0,5,6,2,3], x, y, scale) },
-        '6' => unsafe { emit_segments(&[0,5,4,3,2,6], x, y, scale) },
-        '7' => unsafe { emit_segments(&[0,1,2], x, y, scale) },
-        '8' => unsafe { emit_segments(&[0,1,2,3,4,5,6], x, y, scale) },
-        '9' => unsafe { emit_segments(&[0,1,2,3,5,6], x, y, scale) },
-
-        // Basic letters used in HUD
-        'L' => unsafe { emit_segments(&[5,4,3], x, y, scale) },
-        'E' => unsafe { emit_segments(&[0,5,6,3], x, y, scale) },
-        'F' => unsafe { emit_segments(&[0,5,6], x, y, scale) },
-        'P' => unsafe { emit_segments(&[0,5,6,1], x, y, scale) },
-        'S' => unsafe { emit_segments(&[0,4,6,2,3], x, y, scale) },
-        'R' => {
-            // P + diagonal
-            unsafe { emit_segments(&[0,5,6,1], x, y, scale) };
-            unsafe {
-                glBegin(0x0001);
-                glVertex3f(x + 0.5*scale, y + 0.5*scale, 0.0);
-                glVertex3f(x + 0.9*scale, y + 0.1*scale, 0.0);
-                glEnd();
+    if let Some(rows) = glyph_bitmap(cu) {
+        let px = scale / 7.0; // pixel size based on 7 rows
+        let py = px;
+        unsafe {
+            glBegin(0x0007); // GL_QUADS
+            for (row_idx, row_bits) in rows.iter().enumerate() {
+                for col in 0..5 {
+                    if ((row_bits >> (4 - col)) & 1) != 0 {
+                        let vx = x + (col as f32) * px;
+                        let vy = y + ((6 - row_idx) as f32) * py;
+                        glVertex3f(vx, vy, 0.0);
+                        glVertex3f(vx + px, vy, 0.0);
+                        glVertex3f(vx + px, vy + py, 0.0);
+                        glVertex3f(vx, vy + py, 0.0);
+                    }
+                }
             }
+            glEnd();
         }
-        'N' => {
-            unsafe {
-                glBegin(0x0001);
-                glVertex3f(x + 0.1*scale, y + 0.1*scale, 0.0);
-                glVertex3f(x + 0.1*scale, y + 0.9*scale, 0.0);
-                glVertex3f(x + 0.1*scale, y + 0.9*scale, 0.0);
-                glVertex3f(x + 0.9*scale, y + 0.1*scale, 0.0);
-                glVertex3f(x + 0.9*scale, y + 0.1*scale, 0.0);
-                glVertex3f(x + 0.9*scale, y + 0.9*scale, 0.0);
-                glEnd();
-            }
-        }
-        'D' => unsafe { emit_segments(&[0,1,2,3,4,5], x, y, scale) },
-        'M' => {
-            unsafe {
-                glBegin(0x0001);
-                glVertex3f(x + 0.1*scale, y + 0.1*scale, 0.0);
-                glVertex3f(x + 0.1*scale, y + 0.9*scale, 0.0);
-                glVertex3f(x + 0.1*scale, y + 0.9*scale, 0.0);
-                glVertex3f(x + 0.5*scale, y + 0.6*scale, 0.0);
-                glVertex3f(x + 0.5*scale, y + 0.6*scale, 0.0);
-                glVertex3f(x + 0.9*scale, y + 0.9*scale, 0.0);
-                glVertex3f(x + 0.9*scale, y + 0.9*scale, 0.0);
-                glVertex3f(x + 0.9*scale, y + 0.1*scale, 0.0);
-                glEnd();
-            }
-        }
-
-        ':' => {
-            unsafe {
-                glBegin(0x0001);
-                glVertex3f(x + 0.5*scale, y + 0.75*scale, 0.0);
-                glVertex3f(x + 0.5*scale, y + 0.72*scale, 0.0);
-                glVertex3f(x + 0.5*scale, y + 0.28*scale, 0.0);
-                glVertex3f(x + 0.5*scale, y + 0.25*scale, 0.0);
-                glEnd();
-            }
-        }
-        '.' => {
-            unsafe {
-                glBegin(0x0001);
-                glVertex3f(x + 0.85*scale, y + 0.12*scale, 0.0);
-                glVertex3f(x + 0.88*scale, y + 0.12*scale, 0.0);
-                glEnd();
-            }
-        }
-        ' ' => {}
-        _ => {
-            // Fallback: draw a box so unsupported chars are visible
-            unsafe {
-                glBegin(0x0001);
-                glVertex3f(x + 0.1*scale, y + 0.1*scale, 0.0);
-                glVertex3f(x + 0.9*scale, y + 0.1*scale, 0.0);
-                glVertex3f(x + 0.9*scale, y + 0.1*scale, 0.0);
-                glVertex3f(x + 0.9*scale, y + 0.9*scale, 0.0);
-                glVertex3f(x + 0.9*scale, y + 0.9*scale, 0.0);
-                glVertex3f(x + 0.1*scale, y + 0.9*scale, 0.0);
-                glVertex3f(x + 0.1*scale, y + 0.9*scale, 0.0);
-                glVertex3f(x + 0.1*scale, y + 0.1*scale, 0.0);
-                glEnd();
-            }
+    } else {
+        // Fallback: outline box to visualize unsupported chars
+        unsafe {
+            glBegin(0x0001); // GL_LINES
+            glVertex3f(x, y, 0.0);                 glVertex3f(x + scale, y, 0.0);
+            glVertex3f(x + scale, y, 0.0);         glVertex3f(x + scale, y + scale, 0.0);
+            glVertex3f(x + scale, y + scale, 0.0); glVertex3f(x, y + scale, 0.0);
+            glVertex3f(x, y + scale, 0.0);         glVertex3f(x, y, 0.0);
+            glEnd();
         }
     }
 }
