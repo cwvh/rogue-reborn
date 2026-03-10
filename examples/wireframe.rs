@@ -158,20 +158,15 @@ fn main() {
                         (Key::F, Action::Press) => {
                             first_person = !first_person;
                             if first_person {
-                                let room_idx = select_current_room(&rt_index, &level, planning_level_index, camera.position[0], camera.position[2]);
-                                let target_floor =
-                                    room_idx
-                                        .and_then(|ri| room_planning_floor(&level, ri, planning_level_index))
-                                        .or_else(|| nearest_planning_floor(&level, camera.position[1]));
+                                let room_idx = select_current_room(&rt_index, &level, camera.position[0], camera.position[2]);
                                 if let Some(gy) = find_ground_y_indexed(
                                     &level,
                                     &rt_index,
                                     room_idx,
-                                    planning_level_index,
                                     camera.position[0],
                                     camera.position[2],
                                     camera.position[1],
-                                    target_floor,
+                                    None,
                                 ) {
                                     camera.position[1] = gy + eye_height;
                                 }
@@ -243,29 +238,24 @@ fn main() {
 
         // Resolve wall collisions in first-person mode
         if first_person {
-            let room_idx = select_current_room(&rt_index, &level, planning_level_index, camera.position[0], camera.position[2]);
+            let room_idx = select_current_room(&rt_index, &level, camera.position[0], camera.position[2]);
             let foot_y = camera.position[1] - eye_height;
-            let adjusted = resolve_walls_indexed(&level, &rt_index, room_idx, planning_level_index, prev_pos, camera.position, foot_y, 30.0);
+            let adjusted = resolve_walls_indexed(&level, &rt_index, room_idx, prev_pos, camera.position, foot_y, 30.0);
             camera.position[0] = adjusted[0];
             camera.position[2] = adjusted[2];
         }
 
         // Snap to ground in first-person mode
         if first_person {
-            let room_idx = select_current_room(&rt_index, &level, planning_level_index, camera.position[0], camera.position[2]);
-            let target_floor =
-                room_idx
-                    .and_then(|ri| room_planning_floor(&level, ri, planning_level_index))
-                    .or_else(|| nearest_planning_floor(&level, camera.position[1]));
+            let room_idx = select_current_room(&rt_index, &level, camera.position[0], camera.position[2]);
             if let Some(ground_y) = find_ground_y_indexed(
                 &level,
                 &rt_index,
                 room_idx,
-                planning_level_index,
                 camera.position[0],
                 camera.position[2],
                 camera.position[1],
-                target_floor,
+                None,
             ) {
                 camera.position[1] = ground_y + eye_height;
             }
@@ -545,15 +535,8 @@ fn aabb_xy_contains(aabb: [f32; 4], x: f32, z: f32) -> bool {
 }
 
 // Pick the current room by XY containment among rooms active for the planning level
-fn select_current_room(idx: &RuntimeIndex, level: &map::Map, planning_level_idx: usize, x: f32, z: f32) -> Option<usize> {
-    if planning_level_idx >= idx.planning_rooms.len() {
-        return None;
-    }
-    let active = &idx.planning_rooms[planning_level_idx];
-    for (ri, room) in level.rooms.rooms.iter().enumerate() {
-        if !active.contains(&room.section_name) {
-            continue;
-        }
+fn select_current_room(idx: &RuntimeIndex, level: &map::Map, x: f32, z: f32) -> Option<usize> {
+    for (ri, _room) in level.rooms.rooms.iter().enumerate() {
         if aabb_xy_contains(idx.room_aabb_xy[ri], x, z) {
             return Some(ri);
         }
@@ -580,19 +563,9 @@ fn room_planning_floor(level: &map::Map, room_idx: usize, planning_level_idx: us
 }
 
 // Compute set of object indices for collisions/detection given room or planning level
-fn object_indices_for_scope(idx: &RuntimeIndex, level: &map::Map, room_idx: Option<usize>, planning_level_idx: usize) -> Vec<usize> {
+fn object_indices_for_scope(idx: &RuntimeIndex, level: &map::Map, room_idx: Option<usize>) -> Vec<usize> {
     if let Some(ri) = room_idx {
         return idx.room_objects.get(ri).cloned().unwrap_or_default();
-    }
-    if planning_level_idx < idx.planning_rooms.len() {
-        let active = &idx.planning_rooms[planning_level_idx];
-        let mut out = Vec::new();
-        for (oi, obj) in level.geometries.objects.iter().enumerate() {
-            if active.contains(&obj.name) {
-                out.push(oi);
-            }
-        }
-        return out;
     }
     // Fallback: all objects
     (0..level.geometries.objects.len()).collect()
@@ -607,7 +580,6 @@ fn find_ground_y_indexed(
     level: &map::Map,
     idx: &RuntimeIndex,
     room_idx: Option<usize>,
-    planning_level_idx: usize,
     x: f32,
     z: f32,
     current_y: f32,
@@ -622,7 +594,7 @@ fn find_ground_y_indexed(
     let mut best_below_banded: Option<f32> = None;
     let mut best_above_banded: Option<f32> = None;
 
-    let obj_indices = object_indices_for_scope(idx, level, room_idx, planning_level_idx);
+    let obj_indices = object_indices_for_scope(idx, level, room_idx);
     for &oi in &obj_indices {
         let object = &level.geometries.objects[oi];
         for face in &object.collisions.faces {
@@ -680,14 +652,13 @@ fn resolve_walls_indexed(
     level: &map::Map,
     idx: &RuntimeIndex,
     room_idx: Option<usize>,
-    planning_level_idx: usize,
     old_pos: [f32; 3],
     mut new_pos: [f32; 3],
     y_ref: f32,
     radius: f32,
 ) -> [f32; 3] {
     let ny_wall_max = 0.3f32;
-    let obj_indices = object_indices_for_scope(idx, level, room_idx, planning_level_idx);
+    let obj_indices = object_indices_for_scope(idx, level, room_idx);
 
     for _ in 0..2 {
         let mut corrected = false;
