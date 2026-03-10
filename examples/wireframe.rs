@@ -130,6 +130,7 @@ fn main() {
     let mut first_person = false;
     let mut planning_level_index: usize = 0;
     let mut show_portals = false;
+    let mut show_collisions = false;
     let eye_height: f32 = 25.0;
 
     // Base movement speed scales with map size
@@ -154,6 +155,9 @@ fn main() {
                         }
                         (Key::P, Action::Press) => {
                             show_portals = !show_portals;
+                        }
+                        (Key::C, Action::Press) => {
+                            show_collisions = !show_collisions;
                         }
                         (Key::F, Action::Press) => {
                             first_person = !first_person;
@@ -386,6 +390,61 @@ fn main() {
                         glEnd();
                     }
                 }
+                glColor3f(1.0, 1.0, 1.0); // restore default for next pass
+            }
+
+            // Render collisions (vertices and face normals) overlay when toggled
+            if show_collisions {
+                glDisable(0x0DE1); // GL_TEXTURE_2D
+                glColor3f(1.0, 0.0, 0.0);
+
+                for object in &level.geometries.objects {
+                    // Connect collision vertices in order as a line strip
+                    let verts = &object.collisions.vertices;
+                    if verts.len() >= 2 {
+                        glBegin(0x0003); // GL_LINE_STRIP
+                        for v in verts {
+                            glVertex3f(v.x, v.y, v.z);
+                        }
+                        glEnd();
+                    }
+
+                    // Draw face normals as short line segments
+                    if !object.collisions.faces.is_empty() {
+                        glBegin(0x0001); // GL_LINES
+                        for face in &object.collisions.faces {
+                            let nx = face.x;
+                            let ny = face.y;
+                            let nz = face.z;
+                            let d = face.distance_origin_to_face;
+
+                            let len = (nx * nx + ny * ny + nz * nz).sqrt();
+                            if len > 1e-6 {
+                                // Closest point on plane to origin for n·p + d = 0:
+                                // p0 = -d * n / |n|^2
+                                let inv_len2 = 1.0 / (len * len);
+                                let px = -d * nx * inv_len2;
+                                let py = -d * ny * inv_len2;
+                                let pz = -d * nz * inv_len2;
+
+                                // Unit normal direction for the segment
+                                let dirx = nx / len;
+                                let diry = ny / len;
+                                let dirz = nz / len;
+
+                                let scale = 200.0f32;
+                                let ex = px + dirx * scale;
+                                let ey = py + diry * scale;
+                                let ez = pz + dirz * scale;
+
+                                glVertex3f(px, py, pz);
+                                glVertex3f(ex, ey, ez);
+                            }
+                        }
+                        glEnd();
+                    }
+                }
+
                 glColor3f(1.0, 1.0, 1.0); // restore default for next pass
             }
         }
