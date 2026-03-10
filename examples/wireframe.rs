@@ -119,6 +119,8 @@ fn main() {
     let mut last_cursor_pos: Option<(f64, f64)> = None;
     window.set_cursor_mode(CursorMode::Disabled);
 
+    let mut render_time = Instant::now();
+
     let mut keys = std::collections::HashSet::new();
     let mut textures: HashMap<String, u32> = HashMap::new();
     let mut textured = false;
@@ -221,12 +223,12 @@ fn main() {
             camera.position[2] -= fwd_flat[2] * speed;
         }
         if keys.contains(&Key::A) {
-            camera.position[0] -= right[0] * speed;
-            camera.position[2] -= right[2] * speed;
+            camera.position[0] -= (right[0] * speed) / 2.0;
+            camera.position[2] -= (right[2] * speed) / 2.0;
         }
         if keys.contains(&Key::D) {
-            camera.position[0] += right[0] * speed;
-            camera.position[2] += right[2] * speed;
+            camera.position[0] += (right[0] * speed) / 2.0;
+            camera.position[2] += (right[2] * speed) / 2.0;
         }
 
         // Resolve wall collisions in first-person mode
@@ -258,7 +260,7 @@ fn main() {
         let z_near = (mesh.radius / 1000.0).max(0.05);
         let z_far = (mesh.radius * 10.0 + 100.0).max(z_near + 1.0);
 
-        let render_time = Instant::now();
+        render_time = Instant::now();
         unsafe {
             glClear(0x00004000 | 0x00000100); // GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
             glMatrixMode(0x1701); // GL_PROJECTION
@@ -376,7 +378,7 @@ fn main() {
                 glColor3f(1.0, 1.0, 1.0); // restore default for next pass
             }
         }
-        println!("render_time:{:?}", render_time.elapsed());
+        // println!("render_time:{:?}", render_time.elapsed());
 
         window.swap_buffers();
     }
