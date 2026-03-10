@@ -120,6 +120,7 @@ fn main() {
     window.set_cursor_mode(CursorMode::Disabled);
 
     let mut render_time = Instant::now();
+    let mut prev_frame = Instant::now();
 
     let mut keys = std::collections::HashSet::new();
     let mut textures: HashMap<String, u32> = HashMap::new();
@@ -260,6 +261,10 @@ fn main() {
         let z_near = (mesh.radius / 1000.0).max(0.05);
         let z_far = (mesh.radius * 10.0 + 100.0).max(z_near + 1.0);
 
+        // Frame timing for FPS
+        let frame_dt = prev_frame.elapsed().as_secs_f32();
+        let fps = if frame_dt > 0.0 { 1.0 / frame_dt } else { 0.0 };
+
         render_time = Instant::now();
         unsafe {
             glClear(0x00004000 | 0x00000100); // GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
@@ -380,7 +385,19 @@ fn main() {
         }
         // println!("render_time:{:?}", render_time.elapsed());
 
+        // Draw simple debug text overlay (upper-right)
+        let render_ms = (render_time.elapsed().as_secs_f64() * 1000.0) as f32;
+        let level_text = if !level.planning_levels.levels.is_empty() {
+            format!("LEVEL: {}", planning_level_index)
+        } else {
+            String::from("LEVEL: -")
+        };
+        let fps_text = format!("FPS: {:.1}", fps);
+        let render_text = format!("RENDER: {:.2} MS", render_ms);
+        draw_debug_text(w, h, &[&level_text, &fps_text, &render_text]);
+
         window.swap_buffers();
+        prev_frame = Instant::now();
     }
 }
 
@@ -623,6 +640,188 @@ fn resolve_walls(level: &map::Map, old_pos: [f32; 3], mut new_pos: [f32; 3], y_r
     }
 
     new_pos
+}
+
+// 2D debug text (stroke lines) overlay
+
+fn draw_debug_text(win_w: i32, win_h: i32, lines: &[&str]) {
+    unsafe {
+        // Ortho for pixel coordinates with origin at bottom-left
+        glMatrixMode(0x1701); // GL_PROJECTION
+        glLoadIdentity();
+        ortho_2d(0.0, win_w.max(1) as f32, 0.0, win_h.max(1) as f32);
+        glMatrixMode(0x1700); // GL_MODELVIEW
+        glLoadIdentity();
+
+        // Render settings for HUD
+        glDisable(0x0B71); // GL_DEPTH_TEST
+        glDisable(0x0DE1); // GL_TEXTURE_2D
+        glColor3f(1.0, 1.0, 1.0);
+
+        let margin = 10.0f32;
+        let scale = 14.0f32;
+        let line_h = scale * 1.5;
+        let adv = scale * 0.8;
+
+        let w = win_w.max(1) as f32;
+        let h = win_h.max(1) as f32;
+
+        for (i, text) in lines.iter().enumerate() {
+            let y = h - margin - (i as f32) * line_h;
+            let len = text.chars().count() as f32;
+            let tw = adv * len;
+            let mut x = w - margin - tw;
+            for ch in text.chars() {
+                draw_glyph(ch, x, y, scale);
+                x += adv;
+            }
+        }
+
+        // Leave depth state restored for next frame's 3D
+        glEnable(0x0B71); // GL_DEPTH_TEST
+    }
+}
+
+fn ortho_2d(left: f32, right: f32, bottom: f32, top: f32) {
+    // Column-major orthographic matrix
+    let rl = right - left;
+    let tb = top - bottom;
+    let mut m = [0.0f32; 16];
+    m[0]  = 2.0 / rl;
+    m[5]  = 2.0 / tb;
+    m[10] = -1.0;
+    m[12] = -(right + left) / rl;
+    m[13] = -(top + bottom) / tb;
+    m[15] = 1.0;
+    unsafe { glMultMatrixf(m.as_ptr()); }
+}
+
+fn draw_glyph(ch: char, x: f32, y: f32, scale: f32) {
+    // 7-seg segment endpoints in unit square
+    fn seg_coords(idx: u8) -> [f32; 4] {
+        match idx {
+            // a (top)
+            0 => [0.1, 0.9, 0.9, 0.9],
+            // b (upper-right)
+            1 => [0.9, 0.9, 0.9, 0.5],
+            // c (lower-right)
+            2 => [0.9, 0.5, 0.9, 0.1],
+            // d (bottom)
+            3 => [0.1, 0.1, 0.9, 0.1],
+            // e (lower-left)
+            4 => [0.1, 0.5, 0.1, 0.1],
+            // f (upper-left)
+            5 => [0.1, 0.9, 0.1, 0.5],
+            // g (middle)
+            6 => [0.1, 0.5, 0.9, 0.5],
+            _ => [0.0, 0.0, 0.0, 0.0],
+        }
+    }
+
+    // Emit all segments defined by indices
+    unsafe fn emit_segments(segs: &[u8], x: f32, y: f32, s: f32) {
+        glBegin(0x0001); // GL_LINES
+        for &idx in segs {
+            let c = seg_coords(idx);
+            glVertex3f(x + c[0] * s, y + c[1] * s, 0.0);
+            glVertex3f(x + c[2] * s, y + c[3] * s, 0.0);
+        }
+        glEnd();
+    }
+
+    let cu = ch.to_ascii_uppercase();
+    match cu {
+        // Digits via 7-seg
+        '0' => unsafe { emit_segments(&[0,1,2,3,4,5], x, y, scale) },
+        '1' => unsafe { emit_segments(&[1,2], x, y, scale) },
+        '2' => unsafe { emit_segments(&[0,1,6,4,3], x, y, scale) },
+        '3' => unsafe { emit_segments(&[0,1,2,3,6], x, y, scale) },
+        '4' => unsafe { emit_segments(&[5,6,1,2], x, y, scale) },
+        '5' => unsafe { emit_segments(&[0,5,6,2,3], x, y, scale) },
+        '6' => unsafe { emit_segments(&[0,5,4,3,2,6], x, y, scale) },
+        '7' => unsafe { emit_segments(&[0,1,2], x, y, scale) },
+        '8' => unsafe { emit_segments(&[0,1,2,3,4,5,6], x, y, scale) },
+        '9' => unsafe { emit_segments(&[0,1,2,3,5,6], x, y, scale) },
+
+        // Basic letters used in HUD
+        'L' => unsafe { emit_segments(&[5,4,3], x, y, scale) },
+        'E' => unsafe { emit_segments(&[0,5,6,3], x, y, scale) },
+        'F' => unsafe { emit_segments(&[0,5,6], x, y, scale) },
+        'P' => unsafe { emit_segments(&[0,5,6,1], x, y, scale) },
+        'S' => unsafe { emit_segments(&[0,4,6,2,3], x, y, scale) },
+        'R' => {
+            // P + diagonal
+            unsafe { emit_segments(&[0,5,6,1], x, y, scale) };
+            unsafe {
+                glBegin(0x0001);
+                glVertex3f(x + 0.5*scale, y + 0.5*scale, 0.0);
+                glVertex3f(x + 0.9*scale, y + 0.1*scale, 0.0);
+                glEnd();
+            }
+        }
+        'N' => {
+            unsafe {
+                glBegin(0x0001);
+                glVertex3f(x + 0.1*scale, y + 0.1*scale, 0.0);
+                glVertex3f(x + 0.1*scale, y + 0.9*scale, 0.0);
+                glVertex3f(x + 0.1*scale, y + 0.9*scale, 0.0);
+                glVertex3f(x + 0.9*scale, y + 0.1*scale, 0.0);
+                glVertex3f(x + 0.9*scale, y + 0.1*scale, 0.0);
+                glVertex3f(x + 0.9*scale, y + 0.9*scale, 0.0);
+                glEnd();
+            }
+        }
+        'D' => unsafe { emit_segments(&[0,1,2,3,4,5], x, y, scale) },
+        'M' => {
+            unsafe {
+                glBegin(0x0001);
+                glVertex3f(x + 0.1*scale, y + 0.1*scale, 0.0);
+                glVertex3f(x + 0.1*scale, y + 0.9*scale, 0.0);
+                glVertex3f(x + 0.1*scale, y + 0.9*scale, 0.0);
+                glVertex3f(x + 0.5*scale, y + 0.6*scale, 0.0);
+                glVertex3f(x + 0.5*scale, y + 0.6*scale, 0.0);
+                glVertex3f(x + 0.9*scale, y + 0.9*scale, 0.0);
+                glVertex3f(x + 0.9*scale, y + 0.9*scale, 0.0);
+                glVertex3f(x + 0.9*scale, y + 0.1*scale, 0.0);
+                glEnd();
+            }
+        }
+
+        ':' => {
+            unsafe {
+                glBegin(0x0001);
+                glVertex3f(x + 0.5*scale, y + 0.75*scale, 0.0);
+                glVertex3f(x + 0.5*scale, y + 0.72*scale, 0.0);
+                glVertex3f(x + 0.5*scale, y + 0.28*scale, 0.0);
+                glVertex3f(x + 0.5*scale, y + 0.25*scale, 0.0);
+                glEnd();
+            }
+        }
+        '.' => {
+            unsafe {
+                glBegin(0x0001);
+                glVertex3f(x + 0.85*scale, y + 0.12*scale, 0.0);
+                glVertex3f(x + 0.88*scale, y + 0.12*scale, 0.0);
+                glEnd();
+            }
+        }
+        ' ' => {}
+        _ => {
+            // Fallback: draw a box so unsupported chars are visible
+            unsafe {
+                glBegin(0x0001);
+                glVertex3f(x + 0.1*scale, y + 0.1*scale, 0.0);
+                glVertex3f(x + 0.9*scale, y + 0.1*scale, 0.0);
+                glVertex3f(x + 0.9*scale, y + 0.1*scale, 0.0);
+                glVertex3f(x + 0.9*scale, y + 0.9*scale, 0.0);
+                glVertex3f(x + 0.9*scale, y + 0.9*scale, 0.0);
+                glVertex3f(x + 0.1*scale, y + 0.9*scale, 0.0);
+                glVertex3f(x + 0.1*scale, y + 0.9*scale, 0.0);
+                glVertex3f(x + 0.1*scale, y + 0.1*scale, 0.0);
+                glEnd();
+            }
+        }
+    }
 }
 
 // Texture utilities
