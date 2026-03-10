@@ -1,7 +1,7 @@
 use rogue_reborn::map;
 use rogue_reborn::rsb;
 use std::path::{Path, PathBuf};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 
@@ -91,6 +91,8 @@ fn main() {
 
     // Build a flattened mesh from the MAP geometry
     let mesh = build_mesh(&level);
+    // Precompute room/object indices and AABBs for collisions and filtering
+    let rt_index = build_runtime_index(&level);
 
     // Initialize GLFW
     let mut glfw = glfw::init_no_callbacks().unwrap();
@@ -211,7 +213,7 @@ fn main() {
         if keys.contains(&Key::LeftShift) {
             speed *= 5.0;
         }
-        // let prev_pos = camera.position;
+        let prev_pos = camera.position;
         let right = camera.get_right();
         let yaw_rad = camera.yaw.to_radians();
         let fwd_flat = [-yaw_rad.sin(), 0.0, -yaw_rad.cos()];
@@ -234,18 +236,25 @@ fn main() {
 
         // Resolve wall collisions in first-person mode
         if first_person {
-            // TODO renable wall collision once I get it working
-            // let foot_y = camera.position[1] - eye_height;
-            // let adjusted = resolve_walls(&level, prev_pos, camera.position, foot_y, 30.0);
-            // camera.position[0] = adjusted[0];
-            // camera.position[2] = adjusted[2];
+            let room_idx = select_current_room(&rt_index, &level, planning_level_index, camera.position[0], camera.position[2]);
+            let foot_y = camera.position[1] - eye_height;
+            let adjusted = resolve_walls_indexed(&level, &rt_index, room_idx, planning_level_index, prev_pos, camera.position, foot_y, 30.0);
+            camera.position[0] = adjusted[0];
+            camera.position[2] = adjusted[2];
         }
 
         // Snap to ground in first-person mode
         if first_person {
-            let target_floor = nearest_planning_floor(&level, camera.position[1]);
-            if let Some(ground_y) = find_ground_y(
+            let room_idx = select_current_room(&rt_index, &level, planning_level_index, camera.position[0], camera.position[2]);
+            let target_floor =
+                room_idx
+                    .and_then(|ri| room_planning_floor(&level, ri, planning_level_index))
+                    .or_else(|| nearest_planning_floor(&level, camera.position[1]));
+            if let Some(ground_y) = find_ground_y_indexed(
                 &level,
+                &rt_index,
+                room_idx,
+                planning_level_index,
                 camera.position[0],
                 camera.position[2],
                 camera.position[1],
@@ -465,39 +474,133 @@ fn build_mesh(level: &map::Map) -> Mesh {
     }
 }
 
-// Camera transformation for OpenGL 1.x
-fn apply_camera(camera: &Camera) {
-    unsafe {
-        // Apply pitch (look up/down), then yaw (look left/right)
-        glRotatef(-camera.pitch, 1.0, 0.0, 0.0);
-        glRotatef(-camera.yaw, 0.0, 1.0, 0.0);
-        glTranslatef(-camera.position[0], -camera.position[1], -camera.position[2]);
+// Precomputed room/object indices and AABBs for collision/filtering
+struct RuntimeIndex {
+    // room section_name -> index in rooms.rooms
+    room_name_to_idx: HashMap<String, usize>,
+    // For each room index, the object indices belonging to it
+    room_objects: Vec<Vec<usize>>,
+    // For each room index, XY AABB [min_x, min_z, max_x, max_z]
+    room_aabb_xy: Vec<[f32; 4]>,
+    // For each planning level index, the set of room names active at that level
+    planning_rooms: Vec<HashSet<String>>,
+}
+
+fn build_runtime_index(level: &map::Map) -> RuntimeIndex {
+    // Build room name -> idx
+    let mut room_name_to_idx = HashMap::new();
+    for (i, room) in level.rooms.rooms.iter().enumerate() {
+        room_name_to_idx.insert(room.section_name.clone(), i);
+    }
+
+    // Build planning level room name sets
+    let mut planning_rooms = Vec::with_capacity(level.planning_levels.levels.len());
+    for pl in &level.planning_levels.levels {
+        let mut set = HashSet::with_capacity(pl.room_names.len());
+        for rn in &pl.room_names {
+            set.insert(rn.clone());
+        }
+        planning_rooms.push(set);
+    }
+
+    // For each room, collect object indices and compute XY AABB
+    let mut room_objects = vec![Vec::<usize>::new(); level.rooms.rooms.len()];
+    let mut room_aabb_xy = vec![[f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY]; level.rooms.rooms.len()];
+
+    for (oi, obj) in level.geometries.objects.iter().enumerate() {
+        if let Some(&ri) = room_name_to_idx.get(&obj.name) {
+            room_objects[ri].push(oi);
+            // Update room XY AABB from object vertices
+            let mut min_x = room_aabb_xy[ri][0];
+            let mut min_z = room_aabb_xy[ri][1];
+            let mut max_x = room_aabb_xy[ri][2];
+            let mut max_z = room_aabb_xy[ri][3];
+            for v in &obj.vertices {
+                if v.x < min_x { min_x = v.x; }
+                if v.z < min_z { min_z = v.z; }
+                if v.x > max_x { max_x = v.x; }
+                if v.z > max_z { max_z = v.z; }
+            }
+            room_aabb_xy[ri] = [min_x, min_z, max_x, max_z];
+        }
+    }
+
+    RuntimeIndex {
+        room_name_to_idx,
+        room_objects,
+        room_aabb_xy,
+        planning_rooms,
     }
 }
 
- // Minimal gluPerspective replacement for OpenGL 1.x
-fn glu_perspective(fov_y: f32, aspect: f32, z_near: f32, z_far: f32) {
-    let f = 1.0 / (fov_y.to_radians() / 2.0).tan();
-    let nf = 1.0 / (z_near - z_far);
-    unsafe {
-        glLoadIdentity();
-        let mut mat = [0.0f32; 16];
-        mat[0] = f / aspect;
-        mat[5] = f;
-        mat[10] = (z_far + z_near) * nf;
-        mat[11] = -1.0;
-        mat[14] = (2.0 * z_far * z_near) * nf;
-        glMultMatrixf(mat.as_ptr());
+fn aabb_xy_contains(aabb: [f32; 4], x: f32, z: f32) -> bool {
+    x >= aabb[0] && x <= aabb[2] && z >= aabb[1] && z <= aabb[3]
+}
+
+// Pick the current room by XY containment among rooms active for the planning level
+fn select_current_room(idx: &RuntimeIndex, level: &map::Map, planning_level_idx: usize, x: f32, z: f32) -> Option<usize> {
+    if planning_level_idx >= idx.planning_rooms.len() {
+        return None;
     }
+    let active = &idx.planning_rooms[planning_level_idx];
+    for (ri, room) in level.rooms.rooms.iter().enumerate() {
+        if !active.contains(&room.section_name) {
+            continue;
+        }
+        if aabb_xy_contains(idx.room_aabb_xy[ri], x, z) {
+            return Some(ri);
+        }
+    }
+    None
+}
+
+// Choose a per-room floor height matching the planning level's global hint
+fn room_planning_floor(level: &map::Map, room_idx: usize, planning_level_idx: usize) -> Option<f32> {
+    if planning_level_idx >= level.planning_levels.levels.len() || room_idx >= level.rooms.rooms.len() {
+        return None;
+    }
+    let hint = level.planning_levels.levels[planning_level_idx].floor_height;
+    let mut best: Option<f32> = None;
+    let mut best_diff = f32::INFINITY;
+    for h in &level.rooms.rooms[room_idx].level_heights {
+        let d = (h.height - hint).abs();
+        if d < best_diff {
+            best_diff = d;
+            best = Some(h.height);
+        }
+    }
+    best
+}
+
+// Compute set of object indices for collisions/detection given room or planning level
+fn object_indices_for_scope(idx: &RuntimeIndex, level: &map::Map, room_idx: Option<usize>, planning_level_idx: usize) -> Vec<usize> {
+    if let Some(ri) = room_idx {
+        return idx.room_objects.get(ri).cloned().unwrap_or_default();
+    }
+    if planning_level_idx < idx.planning_rooms.len() {
+        let active = &idx.planning_rooms[planning_level_idx];
+        let mut out = Vec::new();
+        for (oi, obj) in level.geometries.objects.iter().enumerate() {
+            if active.contains(&obj.name) {
+                out.push(oi);
+            }
+        }
+        return out;
+    }
+    // Fallback: all objects
+    (0..level.geometries.objects.len()).collect()
 }
 
 /**
- * Walkable-surface detection via Object.collisions.
+ * Walkable-surface detection via Object.collisions with room/planning filters.
  * Approximates ground height at (x,z) from up-facing collision planes.
  * If target_floor is provided, prefer planes whose solved Y is near that floor.
  */
-fn find_ground_y(
+fn find_ground_y_indexed(
     level: &map::Map,
+    idx: &RuntimeIndex,
+    room_idx: Option<usize>,
+    planning_level_idx: usize,
     x: f32,
     z: f32,
     current_y: f32,
@@ -505,7 +608,6 @@ fn find_ground_y(
 ) -> Option<f32> {
     let max_slope_deg = 50.0f32;
     let ny_thresh = max_slope_deg.to_radians().cos();
-    // Band around a target planning-level floor height to disambiguate stacked floors
     const FLOOR_BAND: f32 = 200.0;
 
     let mut best_below_any: Option<f32> = None;
@@ -513,7 +615,9 @@ fn find_ground_y(
     let mut best_below_banded: Option<f32> = None;
     let mut best_above_banded: Option<f32> = None;
 
-    for object in &level.geometries.objects {
+    let obj_indices = object_indices_for_scope(idx, level, room_idx, planning_level_idx);
+    for &oi in &obj_indices {
+        let object = &level.geometries.objects[oi];
         for face in &object.collisions.faces {
             let mut nx = face.x;
             let mut ny = face.y;
@@ -560,40 +664,29 @@ fn find_ground_y(
         }
     }
 
-    // Prefer banded results when a target floor is provided; otherwise fall back to any.
     let banded = best_below_banded.or(best_above_banded);
-    if banded.is_some() {
-        banded
-    } else {
-        best_below_any.or(best_above_any)
-    }
+    if banded.is_some() { banded } else { best_below_any.or(best_above_any) }
 }
 
-/**
- * Find the nearest planning-level floor height to the given Y.
- */
-fn nearest_planning_floor(level: &map::Map, y: f32) -> Option<f32> {
-    let mut best: Option<f32> = None;
-    let mut best_diff = f32::INFINITY;
-    for pl in &level.planning_levels.levels {
-        let diff = (pl.floor_height - y).abs();
-        if diff < best_diff {
-            best_diff = diff;
-            best = Some(pl.floor_height);
-        }
-    }
-    best
-}
-
-// Collision resolution against wall planes from Object.collisions.
-fn resolve_walls(level: &map::Map, old_pos: [f32; 3], mut new_pos: [f32; 3], y_ref: f32, radius: f32) -> [f32; 3] {
-    // Treat walls as near-vertical planes and push the player back if crossing them.
+// Collision resolution against wall planes from Object.collisions with filtering.
+fn resolve_walls_indexed(
+    level: &map::Map,
+    idx: &RuntimeIndex,
+    room_idx: Option<usize>,
+    planning_level_idx: usize,
+    old_pos: [f32; 3],
+    mut new_pos: [f32; 3],
+    y_ref: f32,
+    radius: f32,
+) -> [f32; 3] {
     let ny_wall_max = 0.3f32;
+    let obj_indices = object_indices_for_scope(idx, level, room_idx, planning_level_idx);
 
     for _ in 0..2 {
         let mut corrected = false;
 
-        for object in &level.geometries.objects {
+        for &oi in &obj_indices {
+            let object = &level.geometries.objects[oi];
             for face in &object.collisions.faces {
                 let mut nx = face.x;
                 let mut ny = face.y;
@@ -601,13 +694,8 @@ fn resolve_walls(level: &map::Map, old_pos: [f32; 3], mut new_pos: [f32; 3], y_r
                 let mut d = face.distance_origin_to_face;
 
                 let len = (nx * nx + ny * ny + nz * nz).sqrt();
-                if len <= 1e-6 {
-                    continue;
-                }
-                nx /= len;
-                ny /= len;
-                nz /= len;
-                d /= len;
+                if len <= 1e-6 { continue; }
+                nx /= len; ny /= len; nz /= len; d /= len;
 
                 // Only consider near-vertical planes as walls
                 if ny.abs() > ny_wall_max {
@@ -641,6 +729,50 @@ fn resolve_walls(level: &map::Map, old_pos: [f32; 3], mut new_pos: [f32; 3], y_r
 
     new_pos
 }
+
+// Camera transformation for OpenGL 1.x
+fn apply_camera(camera: &Camera) {
+    unsafe {
+        // Apply pitch (look up/down), then yaw (look left/right)
+        glRotatef(-camera.pitch, 1.0, 0.0, 0.0);
+        glRotatef(-camera.yaw, 0.0, 1.0, 0.0);
+        glTranslatef(-camera.position[0], -camera.position[1], -camera.position[2]);
+    }
+}
+
+ // Minimal gluPerspective replacement for OpenGL 1.x
+fn glu_perspective(fov_y: f32, aspect: f32, z_near: f32, z_far: f32) {
+    let f = 1.0 / (fov_y.to_radians() / 2.0).tan();
+    let nf = 1.0 / (z_near - z_far);
+    unsafe {
+        glLoadIdentity();
+        let mut mat = [0.0f32; 16];
+        mat[0] = f / aspect;
+        mat[5] = f;
+        mat[10] = (z_far + z_near) * nf;
+        mat[11] = -1.0;
+        mat[14] = (2.0 * z_far * z_near) * nf;
+        glMultMatrixf(mat.as_ptr());
+    }
+}
+
+
+/**
+ * Find the nearest planning-level floor height to the given Y.
+ */
+fn nearest_planning_floor(level: &map::Map, y: f32) -> Option<f32> {
+    let mut best: Option<f32> = None;
+    let mut best_diff = f32::INFINITY;
+    for pl in &level.planning_levels.levels {
+        let diff = (pl.floor_height - y).abs();
+        if diff < best_diff {
+            best_diff = diff;
+            best = Some(pl.floor_height);
+        }
+    }
+    best
+}
+
 
 // 2D debug text (stroke lines) overlay
 
