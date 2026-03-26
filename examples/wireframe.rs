@@ -287,6 +287,75 @@ fn main() {
             apply_camera(&camera);
             glScalef(1.0, 1.0, -1.0);
 
+            // Combined
+            {
+                // Textured mode
+                if textured {
+                    glEnable(0x0DE1); // GL_TEXTURE_2D
+                    glPolygonMode(0x0408, 0x1B02); // GL_FRONT_AND_BACK, GL_FILL
+                } else {
+                    glDisable(0x0DE1); // GL_TEXTURE_2D
+                    glPolygonMode(0x0408, 0x1B01); // GL_FRONT_AND_BACK, GL_LINE
+                }
+
+                // Determine which room names are active for this planning level (if any)
+                let use_filter = false; // !level.planning_levels.levels.is_empty();
+                // Iterate map geometry by material groups
+                for object in &level.geometries.objects {
+                    for od in &object.object_datas {
+                        if use_filter {
+                            let rooms = &level.planning_levels.levels[planning_level_index].room_names;
+                            if !rooms.iter().any(|r| r == &object.name) {
+                                continue;
+                            }
+                        }
+                        let mat_index = od.mn as usize;
+                        if let Some(tex_id) = ensure_texture(&level.materials, mat_index, &map_num, &mut textures) {
+                            // TODO put all faces with same tex-id together so I can bind once
+                            glBindTexture(0x0DE1, tex_id); // GL_TEXTURE_2D
+
+                            // Faces and UVs are parallel arrays
+                            let face_count = od.faces.face_indices.len().min(od.faces.texture_indices.len());
+                            if face_count == 0 {
+                                continue;
+                            }
+
+                            glBegin(0x0004); // GL_TRIANGLES
+                            for i in 0..face_count {
+                                let (i0, i1, i2) = od.faces.face_indices[i];
+                                let (t0, t1, t2) = od.faces.texture_indices[i];
+
+                                let p0 = &object.vertices[i0 as usize];
+                                let p1 = &object.vertices[i1 as usize];
+                                let p2 = &object.vertices[i2 as usize];
+
+                                let uv0 = &od.texture_vertices.uv_coords[t0 as usize];
+                                let uv1 = &od.texture_vertices.uv_coords[t1 as usize];
+                                let uv2 = &od.texture_vertices.uv_coords[t2 as usize];
+
+                                // Flip V to match OpenGL texture origin
+                                if textured {
+                                    glTexCoord2f(uv0.u, 1.0 - uv0.v);
+                                }
+                                glVertex3f(p0.x, p0.y, p0.z);
+
+                                if textured {
+                                    glTexCoord2f(uv1.u, 1.0 - uv1.v);
+                                }
+                                glVertex3f(p1.x, p1.y, p1.z);
+
+                                if textured {
+                                    glTexCoord2f(uv2.u, 1.0 - uv2.v);
+                                }
+                                glVertex3f(p2.x, p2.y, p2.z);
+                            }
+                            glEnd();
+                        }
+                    }
+                }
+            }
+
+            /*
             // Draw either textured geometry or wireframe triangles
             if textured {
                 // Textured mode
@@ -294,7 +363,7 @@ fn main() {
                 glPolygonMode(0x0408, 0x1B02); // GL_FRONT_AND_BACK, GL_FILL
 
                 // Determine which room names are active for this planning level (if any)
-                let use_filter = !level.planning_levels.levels.is_empty();
+                let use_filter = false; // !level.planning_levels.levels.is_empty();
                 // Iterate map geometry by material groups
                 for object in &level.geometries.objects {
                     for od in &object.object_datas {
@@ -348,7 +417,7 @@ fn main() {
                 glPolygonMode(0x0408, 0x1B01); // GL_FRONT_AND_BACK, GL_LINE
 
                 // Determine which room names are active for this planning level (if any)
-                let use_filter = !level.planning_levels.levels.is_empty();
+                let use_filter = false; // !level.planning_levels.levels.is_empty();
                 for object in &level.geometries.objects {
                     if use_filter {
                         let rooms = &level.planning_levels.levels[planning_level_index].room_names;
@@ -377,6 +446,8 @@ fn main() {
                     }
                 }
             }
+            */
+
             // Render portals overlay when toggled
             if show_portals {
                 glDisable(0x0DE1); // GL_TEXTURE_2D
@@ -595,11 +666,14 @@ fn aabb_xy_contains(aabb: [f32; 4], x: f32, z: f32) -> bool {
 
 // Pick the current room by XY containment among rooms active for the planning level
 fn select_current_room(idx: &RuntimeIndex, level: &map::Map, x: f32, z: f32) -> Option<usize> {
+    let z = -z;     // flip because the aabb are in D3D space
     for (ri, _room) in level.rooms.rooms.iter().enumerate() {
         if aabb_xy_contains(idx.room_aabb_xy[ri], x, z) {
+            println!("I think you are in room {ri} ; aabb={:?} ; x/z={x}/{z}", idx.room_aabb_xy[ri]);
             return Some(ri);
         }
     }
+    println!("no AABB intersected {x}/{z}");
     None
 }
 
