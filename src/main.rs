@@ -1216,8 +1216,13 @@ fn main() {
                 glDisable(0x0DE1); // GL_TEXTURE_2D
                 let others = view.as_ref().map_or(&[][..], |v| &v.players[..]);
                 for &(slot, pos, look) in others.iter().filter(|(i, ..)| *i != me) {
+                    // A player who has died lies where they fell until they come back
+                    let mut health = combat::Health::new();
+                    if let Some(until) = sim.players[slot].respawn_at {
+                        health.state = combat::NpcState::Dead { motion: "thdu_1", start: until - sim::RESPAWN_SECONDS };
+                    }
                     let ghost = Npc {
-                        health: combat::Health::new(),
+                        health,
                         pos,
                         floor: pos[1],
                         yaw: -sim::dequantize(look.0),
@@ -1529,6 +1534,11 @@ fn main() {
             }
             if let Some(hp) = sim.players[me].target_hp {
                 status.insert(0, format!("TARGET: {hp:.0}"));
+            }
+            if net.is_some() {
+                let p = &sim.players[me];
+                status.insert(0, if p.respawn_at.is_some() { "DEAD".to_string() } else { format!("HEALTH: {:.0}", p.hp.ceil()) });
+                status.insert(1, format!("DEATHS: {}", p.deaths));
             }
             let msg = if game_time < sim.players[me].message.1 { sim.players[me].message.0.as_str() } else { "" };
             let marker = tracer.is_some_and(|t| t.2 && game_time < t.3);

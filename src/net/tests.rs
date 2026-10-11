@@ -5,7 +5,7 @@ use crate::net::link::{Conditions, FakeLink, FakeNet};
 use crate::net::proto::Setup;
 use crate::net::server::Server;
 use crate::net::setup::build_sim;
-use crate::sim::{Event, Input, MAX_PLAYERS, Sim, TICK};
+use crate::sim::{self, Event, Input, MAX_PLAYERS, Sim, TICK};
 
 const BUILD: &str = "test";
 
@@ -21,6 +21,7 @@ fn setup() -> Setup {
         speed_scale: 1.0,
         seed: 7,
         culling: true,
+        pvp: false,
         doors_open: None,
         npcs: Vec::new(),
     }
@@ -327,4 +328,34 @@ fn the_whole_thing_is_repeatable() {
         (game.server.sim.checksum(), game.me(a).map(f32::to_bits), game.peers[a].events.len())
     };
     assert_eq!(run(), run());
+}
+
+#[test]
+fn a_player_shot_dead_is_dead_for_everyone_and_comes_back_where_the_server_says() {
+    let mut game = Game::new(Conditions::broadband());
+    game.server.sim.pvp = true;
+    // The shooter looks along the row the players start in, at the other one's head
+    let shooter = game.join(|t| {
+        let mut i = Input { fire: t > 30 && t < 40, run: true, ..Input::default() };
+        i.set_look(90.0, 0.0);
+        i
+    });
+    // The other stands still until they have been shot, and then tries to walk away
+    let target = game.join(|t| Input { forward: t > 60, run: true, ..Input::default() });
+    game.run(1.5);
+    let (a, b) = (game.peers[shooter].client.slot(), game.peers[target].client.slot());
+    assert_eq!(game.server.sim.players[b].deaths, 1, "{:?}", game.server.sim.players.iter().map(|p| (p.player.pos, p.look, p.ammo, p.hp)).collect::<Vec<_>>());
+    assert_eq!(game.server.sim.players[a].kills, 1, "a={a} b={b} {:?}", game.server.sim.players.iter().map(|p| (p.kills, p.deaths, p.hp)).collect::<Vec<_>>());
+    // Everyone's copy of the game says so, and the dead player did not walk on in their own
+    for peer in [shooter, target] {
+        let seen = &game.sim_of(peer).players[b];
+        assert!(seen.respawn_at.is_some() && seen.hp == 0.0, "peer {peer}: {:?} {}", seen.respawn_at, seen.hp);
+    }
+    assert!(distance(game.me(target), game.server_pos(b)) < 1.0);
+    game.run(sim::RESPAWN_SECONDS + 1.0);
+    let server = &game.server.sim.players[b];
+    assert!(server.respawn_at.is_none() && server.hp == sim::PLAYER_HP);
+    assert_eq!(game.sim_of(target).players[b].hp, sim::PLAYER_HP);
+    assert!(distance(game.me(target), game.server_pos(b)) < 1.0);
+    assert_eq!(game.sim_of(shooter).players[a].kills, 1);
 }

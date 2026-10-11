@@ -27,7 +27,7 @@ check() { # name, then a test command
 run() { # label port bad-network-options...
     local label=$1 port=$2; shift 2
     echo "$label"
-    "$SRV" --demo --port "$port" --duration 10 --max-players 4 "$@" > "$OUT/srv.txt" 2>&1 &
+    "$SRV" --demo --port "$port" --duration 10 --max-players 4 ${SRVOPT-} "$@" > "$OUT/srv.txt" 2>&1 &
     local srv=$!
     sleep 1.5
     "$BOT" --connect "127.0.0.1:$port" --keys WF --seconds 7 "$@" > "$OUT/bot1.txt" 2>&1 &
@@ -48,6 +48,36 @@ run() { # label port bad-network-options...
         awk -v a="$worst1" -v b="$worst2" -v l="${LIMIT:-1}" 'BEGIN { exit !(a < l && b < l) }'
 }
 
-LIMIT=1 run "a clean connection" 27971
-LIMIT=60 run "a bad connection (60 ms each way, 20 ms jitter, 5% lost)" 27972 --sim-latency 60 --sim-jitter 20 --sim-loss 5
+# Players can hurt each other here: one throws a grenade that also catches the other, who dies and
+# comes back, which moves them a long way. So this checks that everyone agrees on who died, not
+# that nobody was moved. The server stops first, so that it can say how things stood while they
+# were still there.
+fight() {
+    local port=27973
+    echo "players hurting each other"
+    "$SRV" --demo --port "$port" --duration 7 --max-players 4 > "$OUT/srv.txt" 2>&1 &
+    local srv=$!
+    sleep 1.5
+    "$BOT" --connect "127.0.0.1:$port" --keys WF --seconds 8 > "$OUT/bot1.txt" 2>&1 &
+    local b1=$!
+    "$BOT" --connect "127.0.0.1:$port" --keys T --seconds 8 > "$OUT/bot2.txt" 2>&1 &
+    local b2=$!
+    wait $b1 $b2 $srv
+    field() { echo "$1" | grep -o "$2=[^ ]*" | cut -d= -f2; }
+    local f1 f2
+    f1=$(grep '^final' "$OUT/bot1.txt"); f2=$(grep '^final' "$OUT/bot2.txt")
+    check "both clients ended connected" test "$(field "$f1" status)" = Connected -a "$(field "$f2" status)" = Connected
+    check "someone died" grep -q " died" "$OUT/srv.txt"
+    for f in "$f1" "$f2"; do
+        local slot server
+        slot=$(field "$f" slot)
+        server=$(grep "^player $slot " "$OUT/srv.txt")
+        check "the server and player $slot agree on kills, deaths and health" \
+            test "$(field "$f" kills) $(field "$f" deaths) $(field "$f" hp)" = "$(field "$server" kills) $(field "$server" deaths) $(field "$server" hp)"
+    done
+}
+
+SRVOPT=--no-pvp LIMIT=1 run "a clean connection" 27971
+SRVOPT=--no-pvp LIMIT=60 run "a bad connection (60 ms each way, 20 ms jitter, 5% lost)" 27972 --sim-latency 60 --sim-jitter 20 --sim-loss 5
+fight
 exit $status

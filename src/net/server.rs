@@ -112,6 +112,8 @@ pub struct Server {
 impl Server {
     pub fn new(sim: Sim, setup: Setup, build: &str, spawns: Vec<V3>) -> Server {
         assert!(!spawns.is_empty(), "players need somewhere to start");
+        let mut sim = sim;
+        sim.spawns = spawns.clone();
         Server { sim, setup, build: build.to_string(), spawns, spawned: 0, remotes: Vec::new(), tick: 0, next_tick_at: None, events: VecDeque::new(), next_event: 1, snapshot_every: SNAPSHOT_EVERY, snapshots_sent: 0, snapshot_bytes: 0 }
     }
 

@@ -128,8 +128,8 @@ fn main() {
         }
     }
     println!(
-        "final slot={slot} status={:?} pos=({:.1}, {:.1}, {:.1}) ammo={} grenades={} kills={} snapshots={} worst_correction={worst:.2} blasts={} bullet_hits={}",
-        client.status, me.player.pos[0], me.player.pos[1], me.player.pos[2], me.ammo, me.grenades_left, me.kills,
+        "final slot={slot} status={:?} pos=({:.1}, {:.1}, {:.1}) ammo={} grenades={} kills={} deaths={} hp={:.0} snapshots={} worst_correction={worst:.2} blasts={} bullet_hits={}",
+        client.status, me.player.pos[0], me.player.pos[1], me.player.pos[2], me.ammo, me.grenades_left, me.kills, me.deaths, me.hp,
         corrections, count(&|e| matches!(e, Event::Blast { .. })), count(&|e| matches!(e, Event::BulletHit { .. })),
     );
     client.leave(&mut link);

@@ -40,6 +40,7 @@ pub fn build_sim(setup: &Setup) -> Result<Sim> {
         culling: setup.culling,
     };
     let mut sim = Sim::new(level, world, config, characters, npcs);
+    sim.pvp = setup.pvp;
     if let Some(open) = setup.doors_open {
         sim.set_doors_open(open);
     }

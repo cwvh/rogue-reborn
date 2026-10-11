@@ -18,7 +18,7 @@ use crate::sim::{Event, Input, MAX_PLAYERS, Sim, Throw};
 type V3 = [f32; 3];
 
 /// Bumped whenever the messages change, so that a client and server that disagree notice
-pub const PROTOCOL: u8 = 1;
+pub const PROTOCOL: u8 = 2;
 
 const MAGIC: u16 = 0x5252;
 
@@ -52,6 +52,8 @@ pub struct Setup {
     pub speed_scale: f32,
     pub seed: u64,
     pub culling: bool,
+    /// Whether players can hurt each other
+    pub pvp: bool,
     pub doors_open: Option<f32>,
     pub npcs: Vec<NpcSetup>,
 }
@@ -97,6 +99,9 @@ pub struct PlayerSnap {
     pub flash_until: f32,
     pub gun_trigger: bool,
     pub kills: u32,
+    pub deaths: u32,
+    pub hp: f32,
+    pub respawn_at: Option<f32>,
     pub equipped_grenade: bool,
     pub grenades_left: u32,
     pub charge_from: Option<f32>,
@@ -160,6 +165,9 @@ impl Snapshot {
             flash_until: p.flash_until,
             gun_trigger: p.gun_trigger,
             kills: p.kills,
+            deaths: p.deaths,
+            hp: p.hp,
+            respawn_at: p.respawn_at,
             equipped_grenade: p.equipped_grenade,
             grenades_left: p.grenades_left,
             charge_from: p.charge_from,
@@ -215,6 +223,9 @@ impl Snapshot {
             p.flash_until = s.flash_until;
             p.gun_trigger = s.gun_trigger;
             p.kills = s.kills;
+            p.deaths = s.deaths;
+            p.hp = s.hp;
+            p.respawn_at = s.respawn_at;
             p.equipped_grenade = s.equipped_grenade;
             p.grenades_left = s.grenades_left;
             p.charge_from = s.charge_from;
@@ -419,6 +430,9 @@ fn write_player(w: &mut Writer, p: &PlayerSnap) {
     w.u8(flag_byte(p));
     write_message(w, &p.message);
     write_opt_f32(w, p.target_hp);
+    w.u16(p.deaths as u16);
+    w.f32(p.hp);
+    write_opt_f32(w, p.respawn_at);
 }
 
 fn read_player(r: &mut Reader, slot: u8) -> Result<PlayerSnap> {
@@ -438,9 +452,11 @@ fn read_player(r: &mut Reader, slot: u8) -> Result<PlayerSnap> {
     let on = |n: u8| flags >> n & 1 != 0;
     let message = read_message(r)?;
     let target_hp = r.opt_f32()?;
+    let (deaths, hp, respawn_at) = (r.u16()? as u32, r.f32()?, r.opt_f32()?);
     Ok(PlayerSnap {
         slot, pos, vel_y, on_ground: on(0), look, controlled: on(1), moved_speed, ammo, reserve, reload_until,
-        flash_until, gun_trigger: on(2), kills, equipped_grenade: on(3), grenades_left, charge_from, throw, message, target_hp,
+        flash_until, gun_trigger: on(2), kills, deaths, hp, respawn_at, equipped_grenade: on(3), grenades_left, charge_from,
+        throw, message, target_hp,
     })
 }
 
@@ -454,7 +470,7 @@ fn opt_bits(v: Option<f32>) -> Option<u32> {
 }
 
 /// A player's mask of what changed is this when they are sent in full instead
-const FULL: u16 = 0x8000;
+const FULL: u32 = 1 << 31;
 
 /// A player as it differs from `base`: a mask of the parts that changed, then those parts
 fn write_player_delta(w: &mut Writer, p: &PlayerSnap, base: &PlayerSnap) {
@@ -474,8 +490,11 @@ fn write_player_delta(w: &mut Writer, p: &PlayerSnap, base: &PlayerSnap) {
         flag_byte(p) != flag_byte(base),
         p.message != base.message,
         opt_bits(p.target_hp) != opt_bits(base.target_hp),
+        p.deaths as u16 != base.deaths as u16,
+        bits(p.hp) != bits(base.hp),
+        opt_bits(p.respawn_at) != opt_bits(base.respawn_at),
     ];
-    w.u16(changed.iter().enumerate().fold(0, |acc, (n, &c)| acc | (c as u16) << n));
+    w.varint(changed.iter().enumerate().fold(0, |acc, (n, &c)| acc | (c as u32) << n));
     if changed[0] { w.v3(p.pos); }
     if changed[1] { w.f32(p.vel_y); }
     if changed[2] { w.u16(p.look.0); w.u16(p.look.1); }
@@ -491,12 +510,15 @@ fn write_player_delta(w: &mut Writer, p: &PlayerSnap, base: &PlayerSnap) {
     if changed[12] { w.u8(flag_byte(p)); }
     if changed[13] { write_message(w, &p.message); }
     if changed[14] { write_opt_f32(w, p.target_hp); }
+    if changed[15] { w.u16(p.deaths as u16); }
+    if changed[16] { w.f32(p.hp); }
+    if changed[17] { write_opt_f32(w, p.respawn_at); }
 }
 
 /// The player `base` was, changed as the mask in the message says
-fn read_player_delta(r: &mut Reader, mask: u16, base: &PlayerSnap) -> Result<PlayerSnap> {
-    ensure!(mask < 1 << 15, "no such parts of a player as {mask:#x}");
-    let on = |n: u16| mask >> n & 1 != 0;
+fn read_player_delta(r: &mut Reader, mask: u32, base: &PlayerSnap) -> Result<PlayerSnap> {
+    ensure!(mask < 1 << 18, "no such parts of a player as {mask:#x}");
+    let on = |n: u32| mask >> n & 1 != 0;
     let mut p = base.clone();
     if on(0) { p.pos = r.v3()?; }
     if on(1) { p.vel_y = r.f32()?; }
@@ -517,6 +539,9 @@ fn read_player_delta(r: &mut Reader, mask: u16, base: &PlayerSnap) -> Result<Pla
     }
     if on(13) { p.message = read_message(r)?; }
     if on(14) { p.target_hp = r.opt_f32()?; }
+    if on(15) { p.deaths = r.u16()? as u32; }
+    if on(16) { p.hp = r.f32()?; }
+    if on(17) { p.respawn_at = r.opt_f32()?; }
     Ok(p)
 }
 
@@ -606,7 +631,7 @@ fn write_state(w: &mut Writer, s: &Snapshot, base: Option<&Snapshot>) {
         match base.and_then(|b| b.players.iter().find(|q| q.slot == p.slot)) {
             Some(q) => write_player_delta(w, p, q),
             None => {
-                w.u16(FULL);
+                w.varint(FULL);
                 write_player(w, p);
             }
         }
@@ -636,7 +661,7 @@ fn read_state(r: &mut Reader, base: Option<&Snapshot>) -> Result<Snapshot> {
     let mut players = Vec::with_capacity(n);
     for _ in 0..n {
         let slot = r.u8()?;
-        let mask = r.u16()?;
+        let mask = r.varint()?;
         players.push(if mask == FULL {
             read_player(r, slot)?
         } else {
@@ -673,6 +698,7 @@ fn write_setup(w: &mut Writer, s: &Setup) {
     w.f32(s.speed_scale);
     w.u64(s.seed);
     w.bool(s.culling);
+    w.bool(s.pvp);
     w.opt_f32(s.doors_open);
     w.u16(s.npcs.len() as u16);
     for n in &s.npcs {
@@ -691,6 +717,7 @@ fn read_setup(r: &mut Reader) -> Result<Setup> {
     let speed_scale = r.f32()?;
     let seed = r.u64()?;
     let culling = r.bool()?;
+    let pvp = r.bool()?;
     let doors_open = r.opt_f32()?;
     let n = r.u16()? as usize;
     let mut npcs = Vec::with_capacity(n.min(1024));
@@ -699,7 +726,7 @@ fn read_setup(r: &mut Reader) -> Result<Setup> {
         let actor = r.u16()?;
         npcs.push(NpcSetup { pos, floor, yaw, scale, stagger, actor: (actor != u16::MAX).then_some(actor) });
     }
-    Ok(Setup { map, model, idle, magazine, ammo, reserve, grenades, speed_scale, seed, culling, doors_open, npcs })
+    Ok(Setup { map, model, idle, magazine, ammo, reserve, grenades, speed_scale, seed, culling, pvp, doors_open, npcs })
 }
 
 fn header(w: &mut Writer, kind: u8) {
@@ -863,7 +890,7 @@ mod tests {
         Setup {
             map: "data/map/rm11/rm11.map".to_string(), model: "data/character/team_hrt/blue_M_a.CRP".to_string(),
             idle: "up_none_cyc".to_string(), magazine: 30, ammo: 30, reserve: 900, grenades: 3, speed_scale: 1.0,
-            seed: 0x5eed, culling: true, doors_open: Some(0.0),
+            seed: 0x5eed, culling: true, pvp: true, doors_open: Some(0.0),
             npcs: (0..8).map(|i| NpcSetup {
                 pos: [i as f32 * 110.0, 0.0, 12.0], floor: 0.0, yaw: 90.0 + i as f32, scale: [1.0, 1.0, 1.0],
                 stagger: i as f32 * 0.73, actor: (i % 3 != 0).then_some(i as u16),
@@ -874,7 +901,8 @@ mod tests {
     fn player(slot: u8) -> PlayerSnap {
         PlayerSnap {
             slot, pos: [1.0, 2.0, 3.0], vel_y: -4.0, on_ground: true, look: (123, 65000), controlled: true, moved_speed: 7.5,
-            ammo: 12, reserve: 400, reload_until: Some(3.5), flash_until: 1.25, gun_trigger: true, kills: 3,
+            ammo: 12, reserve: 400, reload_until: Some(3.5), flash_until: 1.25, gun_trigger: true, kills: 3, deaths: 1, hp: 62.5,
+            respawn_at: Some(20.0),
             equipped_grenade: true, grenades_left: 2, charge_from: None,
             throw: Some(Throw { start: 1.0, charge: 0.5, thrown: false }),
             message: Some(("KILLED".to_string(), 9.0)), target_hp: Some(33.0),
@@ -980,7 +1008,7 @@ mod tests {
         snap.npcs = (0..16).map(|_| NpcSnap { pos: [1.0; 3], yaw: 1.0, hp: 1.0, state: NpcState::Reacting { motion: "thiu_ab", start: 1.0 } }).collect();
         snap.events.clear();
         let (bytes, _) = ToClient::Snapshot(snap).encode();
-        assert!(bytes.len() < MAX_PACKET - 100, "{} bytes before any events", bytes.len());
+        assert!(bytes.len() < MAX_PACKET - 40, "{} bytes before any events", bytes.len());
     }
 
     fn delta_trip(base: &Snapshot, next: &Snapshot) -> (Snapshot, usize) {
@@ -1013,6 +1041,9 @@ mod tests {
         next.players[1].target_hp = Some(5.0);
         next.players[1].message = Some(("HELLO".to_string(), 3.0));
         next.players[1].charge_from = Some(2.0);
+        next.players[1].hp = 0.0;
+        next.players[1].respawn_at = None;
+        next.players[0].deaths = 2;
         next.npcs[1].state = NpcState::Dead { motion: "thdh_2", start: 15.0 };
         next.npcs[1].hp = 0.0;
         next.thrown.push(ThrownSnap { owner: 0, pos: [1.0; 3], vel: [0.0; 3], fuse: 2.0, spin: 0.0, at_rest: true });

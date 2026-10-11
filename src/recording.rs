@@ -20,7 +20,7 @@ use crate::sim::{Input, Sim, TICK};
 /// Every this many ticks, the sim's checksum is recorded
 pub const CHECK_EVERY: u32 = 60;
 
-const MAGIC: &[u8; 8] = b"RRDEMO\0\x02";
+const MAGIC: &[u8; 8] = b"RRDEMO\0\x03";
 
 /// How a game began: enough to set up the same sim again
 #[derive(Clone, Debug, PartialEq)]

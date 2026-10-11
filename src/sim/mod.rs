@@ -33,6 +33,13 @@ pub const TICK: f32 = 1.0 / 60.0;
 /// How long a reload takes
 pub const RELOAD_SECONDS: f32 = 2.2;
 
+/// A player's health at the start, and how long a dead player waits to come back
+pub const PLAYER_HP: f32 = 100.0;
+pub const RESPAWN_SECONDS: f32 = 3.0;
+
+/// How wide a player is to a bullet
+const HIT_RADIUS: f32 = 25.0;
+
 /// A grenade throw: from the start of the swing to the end, and how far into it the grenade
 /// leaves the hand (0..1)
 pub const THROW_SECONDS: f32 = 0.85;
@@ -210,6 +217,12 @@ pub struct PlayerState {
     pub gun_trigger: bool,
     pub kills: u32,
 
+    // Health, when players can hurt each other (see `Sim::pvp`)
+    pub hp: f32,
+    /// When a dead player comes back, or none if they are alive
+    pub respawn_at: Option<f32>,
+    pub deaths: u32,
+
     // Grenades
     pub equipped_grenade: bool,
     pub grenades_left: u32,
@@ -243,6 +256,10 @@ pub struct Sim {
     pub rng: u64,
     pub culling: bool,
     speed_scale: f32,
+    /// Whether players can hurt each other (a server's game: it is off when playing alone)
+    pub pvp: bool,
+    /// Where players come back after they die
+    pub spawns: Vec<V3>,
     eye_height: f32,
     /// What a player starts with
     pub magazine: u32,
@@ -285,6 +302,8 @@ impl Sim {
             rng: config.seed | 1,
             culling: config.culling,
             speed_scale: config.speed_scale,
+            pvp: false,
+            spawns: Vec::new(),
             eye_height,
             magazine: config.magazine,
             loadout: (config.ammo, config.reserve, config.grenades),
@@ -313,6 +332,9 @@ impl Sim {
             flash_until: 0.0,
             gun_trigger: false,
             kills: 0,
+            hp: PLAYER_HP,
+            respawn_at: None,
+            deaths: 0,
             equipped_grenade: false,
             grenades_left: grenades,
             charge_from: None,
@@ -363,6 +385,9 @@ impl Sim {
         }
         let yaw = input.look().0;
         self.players[slot].look = (input.yaw, input.pitch);
+        if self.players[slot].respawn_at.is_some() {
+            return;
+        }
         self.players[slot].controlled = input.observer.is_none();
         self.use_rooms_of(slot);
         self.move_player(slot, input, dt, right(yaw));
@@ -415,6 +440,9 @@ impl Sim {
             h.f32(p.next_shot);
             h.f32(p.flash_until);
             h.u32(p.kills);
+            h.f32(p.hp);
+            h.opt_f32(p.respawn_at);
+            h.u32(p.deaths);
             h.u32(p.equipped_grenade as u32);
             h.u32(p.grenades_left);
             h.opt_f32(p.charge_from);
@@ -499,8 +527,16 @@ impl Sim {
     pub fn tick(&mut self, inputs: &[Input], dt: f32) -> Vec<Event> {
         let mut ev: Vec<Event> = Vec::new();
         let none = Input::default();
-        let input_of = |i: usize| inputs.get(i).copied().unwrap_or(none);
         let slots: Vec<usize> = (0..self.players.len()).filter(|&i| self.players[i].active).collect();
+        // A dead player does nothing but look where they were looking
+        let mut given: Vec<Input> = (0..self.players.len()).map(|i| inputs.get(i).copied().unwrap_or(none)).collect();
+        for &i in &slots {
+            let p = &self.players[i];
+            if p.respawn_at.is_some() {
+                given[i] = Input { yaw: p.look.0, pitch: p.look.1, ..none };
+            }
+        }
+        let input_of = |i: usize| given[i];
 
         // Keys pressed since the last tick
         for &i in &slots {
@@ -541,6 +577,12 @@ impl Sim {
             p.gun_trigger = input.fire && !p.equipped_grenade;
         }
         self.time += dt;
+
+        for &i in &slots {
+            if self.players[i].respawn_at.is_some_and(|t| self.time >= t) {
+                self.respawn(i);
+            }
+        }
 
         for &i in &slots {
             let input = input_of(i);
@@ -586,8 +628,10 @@ impl Sim {
                 let (forward_cam, right_cam) = (forward(yaw, pitch), right(yaw));
                 self.use_rooms_of(i);
                 self.move_player(i, &input, dt, right_cam);
-                self.throw_grenade(i, &input, forward_cam, right_cam, &mut ev);
-                self.shoot(i, forward_cam, &mut ev);
+                if self.players[i].respawn_at.is_none() {
+                    self.throw_grenade(i, &input, forward_cam, right_cam, &mut ev);
+                    self.shoot(i, forward_cam, &mut ev);
+                }
             }
         }
 
@@ -756,6 +800,8 @@ impl Sim {
             }
         }
 
+        let hit_player = self.player_hit(slot, eye, dir);
+
         // Glass in the way breaks and lets the bullet through
         loop {
             let glass_hit = self.panes.iter().enumerate()
@@ -764,7 +810,7 @@ impl Sim {
                 .min_by(|a, b| a.1.total_cmp(&b.1));
             let Some((gi, gd)) = glass_hit else { break };
             // Something solid, or a character, is in front of the glass
-            if wall.is_some_and(|w| w < gd - 0.5) || best.as_ref().is_some_and(|(_, h)| h.distance < gd) {
+            if wall.is_some_and(|w| w < gd - 0.5) || best.as_ref().is_some_and(|(_, h)| h.distance < gd) || hit_player.is_some_and(|h| h.1 < gd) {
                 break;
             }
             self.broken_at[gi] = Some(now);
@@ -778,6 +824,14 @@ impl Sim {
         }
 
         let start = [eye[0] + dir[0] * 30.0, eye[1] + dir[1] * 30.0 - 8.0, eye[2] + dir[2] * 30.0];
+        // Another player in the way, nearer than whatever else was hit
+        let hit_player = hit_player.filter(|h| wall.is_none_or(|w| h.1 <= w) && best.as_ref().is_none_or(|(_, b)| h.1 < b.distance));
+        if let Some((victim, dist, part)) = hit_player {
+            let point = [eye[0] + dir[0] * dist, eye[1] + dir[1] * dist, eye[2] + dir[2] * dist];
+            self.hurt_player(victim, Some(slot), combat::damage(part), point, if part == combat::BodyPart::Head { "HEAD SHOT KILL" } else { "KILLED" }, ev);
+            ev.push(Event::Shot { player: slot, start, end: point, hit_character: true });
+            return;
+        }
         match best {
             Some((i, hit)) if wall.map_or(true, |w| hit.distance <= w) => {
                 next_rng(&mut self.rng);
@@ -916,6 +970,23 @@ impl Sim {
             ev.push(Event::Sound { name: format!("English/{name}{}.wav", 1 + (self.rng >> 40) as u32 % n), at: Some(self.npcs[i].pos), gain: 1.0 });
         }
 
+        // Players are hurt as characters are, if they can be
+        if self.pvp {
+            for i in 0..self.players.len() {
+                if !self.players[i].active || self.players[i].respawn_at.is_some() {
+                    continue;
+                }
+                let feet = self.players[i].player.pos;
+                let chest = [feet[0], feet[1] + 100.0, feet[2]];
+                let head = [feet[0], feet[1] + 160.0, feet[2]];
+                let strength = grenade::blast_strength(dist3(c, chest));
+                if strength < 0.02 || !(grenade::clear_between(&self.world, c, chest) || grenade::clear_between(&self.world, c, head)) {
+                    continue;
+                }
+                self.hurt_player(i, Some(owner), PLAYER_HP * strength, chest, "GRENADE KILL", ev);
+            }
+        }
+
         // Glass in reach breaks, the nearest panes first
         let mut panes_near: Vec<(usize, f32)> = self.panes.iter().enumerate()
             .filter(|(i, _)| self.broken_at[*i].is_none())
@@ -951,6 +1022,108 @@ impl Sim {
             let veil = if open { ((900.0 - d) / 900.0).clamp(0.0, 1.0) } else { 0.0 };
             ev.push(Event::PlayerBlast { player: i, shake, veil });
         }
+    }
+
+    /// The nearest other player that a bullet from `eye` along `dir` hits, if players can be
+    /// hit: who, how far along, and where on the body
+    fn player_hit(&self, shooter: usize, eye: V3, dir: V3) -> Option<(usize, f32, combat::BodyPart)> {
+        if !self.pvp {
+            return None;
+        }
+        let height = self.world.params().height;
+        let a = dir[0] * dir[0] + dir[2] * dir[2];
+        if a < 1e-9 {
+            return None;
+        }
+        (0..self.players.len())
+            .filter(|&i| i != shooter && self.players[i].active && self.players[i].respawn_at.is_none())
+            .filter_map(|i| {
+                // The body is an upright cylinder
+                let feet = self.players[i].player.pos;
+                let (ox, oz) = (eye[0] - feet[0], eye[2] - feet[2]);
+                let b = 2.0 * (ox * dir[0] + oz * dir[2]);
+                let c = ox * ox + oz * oz - HIT_RADIUS * HIT_RADIUS;
+                let disc = b * b - 4.0 * a * c;
+                if disc < 0.0 {
+                    return None;
+                }
+                let t = (-b - disc.sqrt()) / (2.0 * a);
+                let up = (eye[1] + dir[1] * t - feet[1]) / height;
+                if t <= 0.0 || !(0.0..=1.0).contains(&up) {
+                    return None;
+                }
+                let part = match up {
+                    u if u >= 0.88 => combat::BodyPart::Head,
+                    u if u >= 0.55 => combat::BodyPart::Torso,
+                    u if u >= 0.40 => combat::BodyPart::Abdomen,
+                    _ => combat::BodyPart::LeftLeg,
+                };
+                Some((i, t, part))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
+    /// Take health from a player. If it is all of it they die, and `attacker` (who is not the
+    /// victim) is credited, with `kill_text` on their screen.
+    fn hurt_player(&mut self, victim: usize, attacker: Option<usize>, amount: f32, at: V3, kill_text: &str, ev: &mut Vec<Event>) {
+        let now = self.time;
+        let p = &mut self.players[victim];
+        if p.respawn_at.is_some() {
+            return;
+        }
+        p.hp = (p.hp - amount).max(0.0);
+        let killed = p.hp <= 0.0;
+        let hp = p.hp;
+        let pos = p.player.pos;
+        if let Some(a) = attacker.filter(|&a| a != victim) {
+            self.players[a].target_hp = Some(hp);
+        }
+        next_rng(&mut self.rng);
+        let roll = (self.rng >> 40) as u32;
+        ev.push(Event::Log(format!("t={now:.2} player {victim} hurt by {amount:.0}{}, hp now {hp:.0}", attacker.map_or(String::new(), |a| format!(" from player {a}")))));
+        ev.push(Event::Sound { name: "C_BHTHT.WAV".to_string(), at: Some(at), gain: 1.0 });
+        let (name, n) = if killed { ("re_ded", 2) } else { ("re_wnd", 3) };
+        ev.push(Event::Sound { name: format!("English/{name}{}.wav", 1 + roll % n), at: Some(pos), gain: 1.0 });
+        if !killed {
+            return;
+        }
+        let p = &mut self.players[victim];
+        p.respawn_at = Some(now + RESPAWN_SECONDS);
+        p.deaths += 1;
+        p.equipped_grenade = false;
+        p.charge_from = None;
+        p.throw = None;
+        p.reload_until = None;
+        p.gun_trigger = false;
+        match attacker.filter(|&a| a != victim) {
+            Some(a) => {
+                self.players[a].kills += 1;
+                self.announce(a, kill_text, 1.2);
+                self.announce(victim, &format!("KILLED BY PLAYER {}", a + 1), RESPAWN_SECONDS);
+            }
+            None => self.announce(victim, "YOU KILLED YOURSELF", RESPAWN_SECONDS),
+        }
+        ev.push(Event::Log(format!("t={now:.2} player {victim} died")));
+    }
+
+    /// A dead player comes back at the spawn point farthest from the players still standing, with
+    /// the starting loadout and their score
+    fn respawn(&mut self, slot: usize) {
+        let others: Vec<V3> = (0..self.players.len())
+            .filter(|&i| i != slot && self.players[i].active && self.players[i].respawn_at.is_none())
+            .map(|i| self.players[i].player.pos)
+            .collect();
+        let nearest = |s: &V3| others.iter().map(|o| dist3(*s, *o)).fold(f32::INFINITY, f32::min);
+        let here = self.players[slot].player.pos;
+        let spawn = self.spawns.iter().copied().fold(None, |best: Option<(V3, f32)>, s| {
+            let d = nearest(&s);
+            if best.is_none_or(|b| d > b.1) { Some((s, d)) } else { best }
+        }).map_or(here, |b| b.0);
+        let (kills, deaths) = (self.players[slot].kills, self.players[slot].deaths);
+        let look = self.players[slot].look;
+        self.players[slot] = self.new_player(spawn);
+        let p = &mut self.players[slot];
+        (p.kills, p.deaths, p.look) = (kills, deaths, look);
     }
 
     /// Work out which rooms a player is in and which are solid to them. The view is the
@@ -1165,5 +1338,84 @@ mod tests {
         // And the blast shook both, whoever threw it
         let shaken: Vec<usize> = events.iter().filter_map(|e| match e { Event::PlayerBlast { player, .. } => Some(*player), _ => None }).collect();
         assert_eq!(shaken, vec![0, 1]);
+    }
+
+    /// Two players facing each other across the box room, 250 units apart, with players able to hurt each other
+    fn duel() -> Sim {
+        let mut sim = demo();
+        sim.pvp = true;
+        sim.spawns = vec![[0.0, 0.0, -350.0], [0.0, 0.0, 350.0]];
+        sim.add_player([0.0, 0.0, -100.0]);
+        sim
+    }
+
+    fn aim(pitch: f32) -> Input {
+        let mut i = Input { fire: true, ..holding() };
+        i.set_look(0.0, pitch);
+        i
+    }
+
+    #[test]
+    fn a_bullet_hurts_the_player_it_hits_by_where_it_hits() {
+        // Level with the eyes is the head, and a head shot kills
+        let mut sim = duel();
+        sim.tick(&[aim(0.0), holding()], TICK);
+        assert_eq!(sim.players[1].hp, 0.0);
+        assert!(sim.players[1].respawn_at.is_some());
+        assert_eq!((sim.players[0].kills, sim.players[1].deaths), (1, 1));
+        assert!(sim.players[1].message.0.contains("KILLED BY PLAYER 1"));
+
+        // Aimed at the chest, it takes a third
+        let mut sim = duel();
+        sim.tick(&[aim(-14.6), holding()], TICK);
+        assert_eq!(sim.players[1].hp, 100.0 - combat::damage(combat::BodyPart::Torso));
+        assert!(sim.players[1].respawn_at.is_none());
+        assert_eq!(sim.players[0].target_hp, Some(sim.players[1].hp));
+
+        // Over their head and into the wall, it hurts nobody
+        let mut sim = duel();
+        sim.tick(&[aim(8.0), holding()], TICK);
+        assert_eq!(sim.players[1].hp, 100.0);
+    }
+
+    #[test]
+    fn nothing_hurts_a_player_when_players_cannot_be_hurt() {
+        let mut sim = duel();
+        sim.pvp = false;
+        sim.tick(&[aim(0.0), holding()], TICK);
+        assert_eq!(sim.players[1].hp, 100.0);
+    }
+
+    #[test]
+    fn a_dead_player_is_still_until_they_come_back_at_a_spawn_with_everything_restored() {
+        let mut sim = duel();
+        sim.tick(&[aim(0.0), holding()], TICK);
+        let walk = Input { forward: true, fire: true, grenade: true, ..holding() };
+        for _ in 0..60 {
+            sim.tick(&[holding(), walk], TICK);
+        }
+        let dead = &sim.players[1];
+        assert_eq!((dead.player.pos[0], dead.player.pos[2]), (0.0, -100.0));
+        assert_eq!(dead.ammo, 30);
+        assert!(!dead.equipped_grenade);
+        run(&mut sim, &holding(), RESPAWN_SECONDS);
+        let back = &sim.players[1];
+        assert!(back.respawn_at.is_none());
+        assert_eq!(back.hp, PLAYER_HP);
+        // The spawn point farthest from the player still standing at (0, -350)
+        assert_eq!((back.player.pos[0], back.player.pos[2]), (0.0, 350.0));
+        assert_eq!((back.kills, back.deaths), (0, 1));
+    }
+
+    #[test]
+    fn a_grenade_hurts_the_players_it_reaches_and_credits_the_thrower() {
+        let mut sim = duel();
+        sim.thrown.push(Thrown { grenade: Grenade { pos: [0.0, 100.0, -90.0], vel: [0.0; 3], fuse: 0.0, spin: 0.0, at_rest: true }, owner: 0 });
+        let events = sim.tick(&[holding(), holding()], TICK);
+        assert!(events.iter().any(|e| matches!(e, Event::Blast { .. })));
+        assert_eq!(sim.players[1].hp, 0.0);
+        assert_eq!(sim.players[0].kills, 1);
+        // So close that the thrower is caught too: that is a death, but not a kill
+        assert_eq!((sim.players[0].kills, sim.players[0].deaths), (1, 1));
     }
 }

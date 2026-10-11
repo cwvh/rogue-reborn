@@ -131,6 +131,9 @@ room, or the level's spawn points after the first `--max-players` for a level. B
 together (the same `cargo build`): the server turns away a client built from a different commit,
 because the two must move a player the same way. Snapshots go out 30 times a second (`--snapshot-rate`
 changes it), and other players, the characters and grenades are drawn a little in the past, moving smoothly between them.
+Players can hurt each other on a server (`rrsrv --no-pvp` turns it off): a head shot kills, a body
+shot takes a third, a grenade by how close it is, and a player who dies comes back after three seconds
+at the spawn point farthest from the others, with a full loadout. Playing alone, nothing can hurt you.
 A snapshot is sent as only what has changed since the latest one the client says it has, or in full
 if there is none, so a quiet game costs about a hundred bytes a snapshot.
 
