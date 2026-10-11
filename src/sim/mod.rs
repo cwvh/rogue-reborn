@@ -54,9 +54,9 @@ pub struct Throw {
 /// What the player is doing during one tick
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Input {
-    /// Where the player looks, in degrees
-    pub yaw: f32,
-    pub pitch: f32,
+    /// Where the player looks, in 65536ths of a turn (see `set_look`)
+    pub yaw: u16,
+    pub pitch: u16,
     pub forward: bool,
     pub back: bool,
     pub left: bool,
@@ -77,6 +77,30 @@ pub struct Input {
     /// Set when the player is not in control, because the view is flying free: the point in
     /// map space it is at. When control returns, the player drops in there.
     pub observer: Option<V3>,
+}
+
+/// An angle in degrees, in 65536ths of a turn (about 0.0055 degrees), wrapping around a full turn
+pub fn quantize(degrees: f32) -> u16 {
+    ((degrees / 360.0).rem_euclid(1.0) * 65536.0).round() as u32 as u16
+}
+
+/// The angle in degrees, from 0 up to a full turn. Exact, since 360/65536 is a short binary fraction.
+pub fn dequantize(angle: u16) -> f32 {
+    angle as f32 * (360.0 / 65536.0)
+}
+
+impl Input {
+    /// Look this way (degrees). The sim only ever sees the angles to the nearest 65536th of a
+    /// turn, so a recorded or sent input is exactly the one the sim used.
+    pub fn set_look(&mut self, yaw: f32, pitch: f32) {
+        self.yaw = quantize(yaw);
+        self.pitch = quantize(pitch);
+    }
+
+    /// Where the player looks, in degrees: yaw from 0 to 360, and pitch from -180 to 180
+    pub fn look(&self) -> (f32, f32) {
+        (dequantize(self.yaw), dequantize(self.pitch) - if self.pitch >= 0x8000 { 360.0 } else { 0.0 })
+    }
 }
 
 /// Something that happened in a tick
@@ -380,7 +404,8 @@ impl Sim {
         self.gun_trigger = gun_trigger;
         self.time += dt;
 
-        let (forward_cam, right_cam) = (forward(input.yaw, input.pitch), right(input.yaw));
+        let (yaw, pitch) = input.look();
+        let (forward_cam, right_cam) = (forward(yaw, pitch), right(yaw));
         if input.use_key && controlled {
             self.use_door(forward_cam, &mut ev);
         }
@@ -465,7 +490,7 @@ impl Sim {
 
     /// Walk the player, at speeds that come from the animations so the feet do not slide
     fn move_player(&mut self, input: &Input, dt: f32, right_cam: V3) {
-        let yaw_rad = input.yaw.to_radians();
+        let yaw_rad = input.look().0.to_radians();
         let fwd_flat = [-yaw_rad.sin(), 0.0, -yaw_rad.cos()];
         let (w, a, s_, d, run) = (input.forward, input.left, input.back, input.right, input.run);
         let scale = self.speed_scale;
@@ -905,9 +930,7 @@ mod tests {
         let script = |sim: &mut Sim| -> Vec<String> {
             let mut log = Vec::new();
             for tick in 0..900 {
-                let input = Input {
-                    yaw: (tick as f32 * 0.7).sin() * 90.0,
-                    pitch: (tick as f32 * 0.3).sin() * 20.0,
+                let mut input = Input {
                     forward: tick % 200 < 120,
                     left: tick % 90 < 20,
                     run: tick % 300 < 200,
@@ -916,6 +939,7 @@ mod tests {
                     reload: tick % 400 == 399,
                     ..Input::default()
                 };
+                input.set_look((tick as f32 * 0.7).sin() * 90.0, (tick as f32 * 0.3).sin() * 20.0);
                 log.extend(sim.tick(&input, TICK).iter().map(|e| format!("{e:?}")));
             }
             log

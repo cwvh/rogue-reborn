@@ -716,8 +716,6 @@ fn main() {
 
         // The game runs in fixed ticks, however fast the frames come
         let mut input = sim::Input {
-            yaw: camera.yaw,
-            pitch: camera.pitch,
             forward: keys.contains(&Key::W),
             back: keys.contains(&Key::S),
             left: keys.contains(&Key::A),
@@ -730,7 +728,9 @@ fn main() {
             grenade: grenade_pressed,
             toggle_culling: culling_pressed,
             observer: (!first_person).then(|| [camera.position[0], camera.position[1], -camera.position[2]]),
+            ..sim::Input::default()
         };
+        input.set_look(camera.yaw, camera.pitch);
         shown = input;
         tick_budget += step_dt;
         let mut events: Vec<sim::Event> = Vec::new();
@@ -754,8 +754,7 @@ fn main() {
                     eprintln!("DESYNC: {d}");
                 }
                 // The view follows the recorded player
-                camera.yaw = tick_input.yaw;
-                camera.pitch = tick_input.pitch;
+                (camera.yaw, camera.pitch) = tick_input.look();
                 first_person = tick_input.observer.is_none();
                 if let Some(o) = tick_input.observer {
                     camera.position = [o[0], o[1], -o[2]];
