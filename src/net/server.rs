@@ -12,8 +12,8 @@ use crate::sim::{Event, Input, Sim, TICK};
 
 type V3 = [f32; 3];
 
-/// A snapshot is sent every this many ticks: 20 a second
-pub const SNAPSHOT_EVERY: u32 = 3;
+/// Snapshots are sent every this many ticks unless the server is told otherwise: 30 a second
+pub const SNAPSHOT_EVERY: u32 = 2;
 
 /// A client that has said nothing for this long (seconds) is gone
 const TIMEOUT: f64 = 5.0;
@@ -95,12 +95,18 @@ pub struct Server {
     /// Events not everyone has confirmed: the tick, the number, what
     events: VecDeque<(u32, u32, Event)>,
     next_event: u32,
+    snapshot_every: u32,
 }
 
 impl Server {
     pub fn new(sim: Sim, setup: Setup, build: &str, spawns: Vec<V3>) -> Server {
         assert!(!spawns.is_empty(), "players need somewhere to start");
-        Server { sim, setup, build: build.to_string(), spawns, spawned: 0, remotes: Vec::new(), tick: 0, next_tick_at: None, events: VecDeque::new(), next_event: 1 }
+        Server { sim, setup, build: build.to_string(), spawns, spawned: 0, remotes: Vec::new(), tick: 0, next_tick_at: None, events: VecDeque::new(), next_event: 1, snapshot_every: SNAPSHOT_EVERY }
+    }
+
+    /// Send snapshots this many times a second (the nearest the 60 ticks a second allow)
+    pub fn set_snapshot_rate(&mut self, hz: f32) {
+        self.snapshot_every = ((1.0 / TICK) / hz.max(1.0)).round().max(1.0) as u32;
     }
 
     pub fn players(&self) -> usize {
@@ -211,7 +217,7 @@ impl Server {
             self.sim.remove_player(r.slot);
         }
 
-        if self.tick % SNAPSHOT_EVERY == 0 {
+        if self.tick % self.snapshot_every == 0 {
             for i in 0..self.remotes.len() {
                 self.send_snapshot(i, link);
             }

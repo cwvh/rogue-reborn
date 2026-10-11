@@ -129,7 +129,8 @@ rr --connect 127.0.0.1:27960 --first-person --textured
 `rrsrv` listens on UDP port 27960 (`--port` changes it). It places `--npcs` characters for the box
 room, or the level's spawn points after the first `--max-players` for a level. Build `rr` and `rrsrv`
 together (the same `cargo build`): the server turns away a client built from a different commit,
-because the two must move a player the same way.
+because the two must move a player the same way. Snapshots go out 30 times a second (`--snapshot-rate`
+changes it), and other players are drawn a little in the past, moving smoothly between them.
 
 Each player's own movement happens at once on their screen and is checked by the server, which
 moves them back, rarely and by little, if it disagreed. Everything else is the server's word:

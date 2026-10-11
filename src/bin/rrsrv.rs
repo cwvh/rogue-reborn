@@ -31,6 +31,8 @@ struct Args {
     /// Stop after this many seconds and say how things stand
     duration: Option<f64>,
     quiet: bool,
+    /// Snapshots sent to each client a second
+    snapshot_rate: f32,
     sim_latency: f64,
     sim_jitter: f64,
     sim_loss: f32,
@@ -40,7 +42,7 @@ fn parse_args() -> Args {
     let mut a = Args {
         port: 27960, demo: false, map: None, level: None, npcs: demo::MAX_NPCS, max_players: 4, seed: 0x5eed,
         model: PathBuf::from("data/character/team_hrt/blue_M_a.CRP"), no_models: false, duration: None, quiet: false,
-        sim_latency: 0.0, sim_jitter: 0.0, sim_loss: 0.0,
+        snapshot_rate: 30.0, sim_latency: 0.0, sim_jitter: 0.0, sim_loss: 0.0,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -57,6 +59,7 @@ fn parse_args() -> Args {
             "--no-models" => a.no_models = true,
             "--duration" => a.duration = Some(value("--duration").parse().unwrap_or_else(|_| usage("--duration expects seconds"))),
             "--quiet" => a.quiet = true,
+            "--snapshot-rate" => a.snapshot_rate = value("--snapshot-rate").parse().unwrap_or_else(|_| usage("--snapshot-rate expects snapshots a second")),
             "--sim-latency" => a.sim_latency = value("--sim-latency").parse::<f64>().unwrap_or_else(|_| usage("--sim-latency expects milliseconds")) / 1000.0,
             "--sim-jitter" => a.sim_jitter = value("--sim-jitter").parse::<f64>().unwrap_or_else(|_| usage("--sim-jitter expects milliseconds")) / 1000.0,
             "--sim-loss" => a.sim_loss = value("--sim-loss").parse::<f32>().unwrap_or_else(|_| usage("--sim-loss expects a percentage")) / 100.0,
@@ -72,7 +75,7 @@ fn usage(problem: &str) -> ! {
         eprintln!("rrsrv: {problem}");
     }
     eprintln!("usage: rrsrv [--demo | --level NAME | --map PATH] [--port N] [--max-players N] [--npcs N] [--seed N]");
-    eprintln!("             [--model FILE] [--no-models] [--duration SECONDS] [--quiet]");
+    eprintln!("             [--model FILE] [--no-models] [--duration SECONDS] [--quiet] [--snapshot-rate HZ]");
     eprintln!("             [--sim-latency MS] [--sim-jitter MS] [--sim-loss PERCENT]   (to make the connection worse)");
     std::process::exit(if problem.is_empty() { 0 } else { 2 });
 }
@@ -155,6 +158,7 @@ fn main() {
     });
     let n_npcs = setup.npcs.len();
     let mut server = Server::new(sim, setup, build, player_spawns);
+    server.set_snapshot_rate(args.snapshot_rate);
 
     let mut link = Impaired::new(
         UdpLink::bind(&format!("0.0.0.0:{}", args.port)).unwrap_or_else(|e| {

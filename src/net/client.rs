@@ -13,6 +13,18 @@ use crate::net::link::{Addr, Link};
 use crate::net::proto::{INPUTS_PER_PACKET, Setup, Snapshot, ToClient, ToServer};
 use crate::sim::{Event, Input, Sim, TICK};
 
+type V3 = [f32; 3];
+
+/// Where one other player was in a snapshot: their slot, position and look
+pub type Seen = (usize, V3, (u16, u16));
+
+/// How many snapshot intervals behind the newest snapshot other players are shown, so that
+/// there is nearly always a later snapshot to be moving toward
+const VIEW_DELAY: f64 = 2.0;
+
+/// The most snapshots kept to look back through
+const HISTORY: usize = 24;
+
 /// How often (seconds) a client that is not in yet asks again
 const RETRY: f64 = 0.25;
 
@@ -53,6 +65,13 @@ pub struct Client {
     pub correction: f32,
     /// Snapshots received
     pub snapshots: u32,
+    /// The other players in the latest snapshots, by server tick
+    history: VecDeque<(u32, Vec<Seen>)>,
+    /// When (client time) the newest snapshot arrived
+    arrived: f64,
+    /// The server tick that other players are shown at, which runs at the pace of the clock
+    view_tick: Option<f64>,
+    view_at: f64,
 }
 
 impl Client {
@@ -61,6 +80,7 @@ impl Client {
             server, token, build: build.to_string(), status: Status::Connecting, setup: None, slot: 0, seq: 1,
             recent: VecDeque::new(), pending: VecDeque::new(), last_snapshot: 0, event_seen: 0, heard: 0.0,
             asked: f64::NEG_INFINITY, correction: 0.0, snapshots: 0,
+            history: VecDeque::new(), arrived: 0.0, view_tick: None, view_at: 0.0,
         }
     }
 
@@ -148,6 +168,7 @@ impl Client {
         if let Some(snap) = self.listen(now, link) {
             self.last_snapshot = snap.tick;
             self.snapshots += 1;
+            self.remember(now, &snap);
             self.reconcile(sim, &snap);
             events = snap.events.into_iter().map(|(_, e)| e).collect();
         }
@@ -179,6 +200,41 @@ impl Client {
         events
     }
 
+    fn remember(&mut self, now: f64, snap: &Snapshot) {
+        self.arrived = now;
+        let seen = snap.players.iter().map(|p| (p.slot as usize, p.pos, p.look)).collect();
+        self.history.push_back((snap.tick, seen));
+        while self.history.len() > HISTORY {
+            self.history.pop_front();
+        }
+    }
+
+    /// The other players as they are shown at time `now`: a little behind the newest snapshot,
+    /// moving smoothly between the two that surround that moment, however unevenly they came.
+    /// Call it once a frame.
+    pub fn others(&mut self, now: f64) -> Vec<Seen> {
+        let Some(newest) = self.history.back().map(|h| h.0) else { return Vec::new() };
+        let interval = match self.history.len() {
+            0 | 1 => 3.0,
+            n => (newest - self.history[n - 2].0).max(1) as f64,
+        };
+        // Where the server is now, as far as can be told, less the delay
+        let target = newest as f64 + (now - self.arrived) / TICK as f64 - interval * VIEW_DELAY;
+        let t = match self.view_tick {
+            Some(t) if (target - t).abs() < 15.0 => {
+                // Run with the clock, and drift toward the target so a late packet does not jerk the view
+                let dt = now - self.view_at;
+                let advanced = t + dt / TICK as f64;
+                advanced + (target - advanced) * (1.0 - (-dt * 4.0).exp())
+            }
+            _ => target,
+        };
+        let t = t.min(newest as f64);
+        self.view_tick = Some(t);
+        self.view_at = now;
+        blend(&self.history, t)
+    }
+
     /// Put what the server says into the client's copy of the game, and move the player on
     /// from where the server had them by the inputs it has not used yet
     fn reconcile(&mut self, sim: &mut Sim, snap: &Snapshot) {
@@ -198,5 +254,59 @@ impl Client {
             let a = sim.players[self.slot].player.pos;
             self.correction = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
         }
+    }
+}
+
+/// The other players at server tick `t`, between the two snapshots that surround it
+fn blend(history: &VecDeque<(u32, Vec<Seen>)>, t: f64) -> Vec<Seen> {
+    let Some(first) = history.front() else { return Vec::new() };
+    let (a, b) = match history.iter().position(|h| h.0 as f64 >= t) {
+        Some(0) => (first, first),
+        Some(i) => (&history[i - 1], &history[i]),
+        None => {
+            let last = history.back().unwrap();
+            (last, last)
+        }
+    };
+    let span = (b.0 - a.0) as f64;
+    let f = if span > 0.0 { ((t - a.0 as f64) / span).clamp(0.0, 1.0) as f32 } else { 1.0 };
+    b.1.iter().map(|&(slot, pos, look)| match a.1.iter().find(|s| s.0 == slot) {
+        // Just arrived in the game: there is nothing earlier to move from
+        None => (slot, pos, look),
+        Some(&(_, from, from_look)) => {
+            let p = [0, 1, 2].map(|i| from[i] + (pos[i] - from[i]) * f);
+            (slot, p, (turn_between(from_look.0, look.0, f), turn_between(from_look.1, look.1, f)))
+        }
+    }).collect()
+}
+
+/// A quantized angle part of the way from `a` to `b`, by the shorter way round
+fn turn_between(a: u16, b: u16, f: f32) -> u16 {
+    let delta = b.wrapping_sub(a) as i16;
+    (a as i32 + (delta as f32 * f).round() as i32) as u16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn history(points: &[(u32, f32, u16)]) -> VecDeque<(u32, Vec<Seen>)> {
+        points.iter().map(|&(t, x, yaw)| (t, vec![(1, [x, 0.0, 0.0], (yaw, 0))])).collect()
+    }
+
+    #[test]
+    fn blends_between_snapshots_and_holds_at_the_ends() {
+        let h = history(&[(10, 0.0, 0), (12, 2.0, 100), (14, 6.0, 200)]);
+        assert_eq!(blend(&h, 11.0)[0].1[0], 1.0);
+        assert_eq!(blend(&h, 13.0)[0].1[0], 4.0);
+        assert_eq!(blend(&h, 11.0)[0].2.0, 50);
+        assert_eq!(blend(&h, 5.0)[0].1[0], 0.0);
+        assert_eq!(blend(&h, 99.0)[0].1[0], 6.0);
+    }
+
+    #[test]
+    fn turns_the_short_way_round() {
+        assert_eq!(turn_between(65000, 500, 0.5), 65518);
+        assert_eq!(turn_between(500, 65000, 0.5), 65518);
     }
 }

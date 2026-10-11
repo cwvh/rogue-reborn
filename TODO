@@ -38,7 +38,7 @@ Map parser
 
 Network play
 * [net] Snapshots are the full state every time (about 1 kB for eight players and sixteen characters). Send only what changed since the snapshot the client last confirmed, with positions as small integers.
-* [net] Other players and characters are drawn where the latest snapshot put them, so they move at 20 Hz. Draw them a little in the past, between the last two snapshots.
+* [net] Interpolate thrown grenades and the characters too; only other players are shown between snapshots so far.
 * [net] Players cannot hurt each other: shots and blasts pass through other players. Needs a hit shape (or the posed character), health, death and respawn.
 * [net] A player's own shots, sounds and muzzle flash wait for the server's answer (a round trip). Predict the ones that cannot be wrong, and take them back if they were.
 * [net] Hit detection ignores latency: a player has to lead a moving target by their ping. Rewind the other players and characters to what the shooter saw (lag compensation).

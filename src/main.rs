@@ -1201,12 +1201,14 @@ fn main() {
             // The other players on the server, standing about as the characters do
             if let Some(chars) = &sim.characters {
                 glDisable(0x0DE1); // GL_TEXTURE_2D
-                for (slot, p) in sim.players.iter().enumerate().filter(|(i, p)| *i != me && p.active) {
+                // Shown a little in the past, between the snapshots, so they move smoothly
+                let others = net.as_mut().map_or(Vec::new(), |(client, _)| client.others(net_clock.elapsed().as_secs_f64()));
+                for (slot, pos, look) in others.into_iter().filter(|(i, ..)| *i != me) {
                     let ghost = Npc {
                         health: combat::Health::new(),
-                        pos: p.player.pos,
-                        floor: p.player.pos[1],
-                        yaw: -sim::dequantize(p.look.0),
+                        pos,
+                        floor: pos[1],
+                        yaw: -sim::dequantize(look.0),
                         scale: [1.0; 3],
                         stagger: slot as f32 * 0.73,
                     };
