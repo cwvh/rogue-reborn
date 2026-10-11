@@ -41,8 +41,6 @@ pub struct Visibility {
     /// Each portal's corners as listed, and in drawing order
     corners: Vec<Vec<[f32; 3]>>,
     polygons: Vec<Vec<[f32; 3]>>,
-    /// The rooms on each planning level, as numbers
-    floors: Vec<HashSet<u32>>,
     /// The floor plan of each room, by number
     footprints: HashMap<u32, Vec<[f32; 4]>>,
     /// The objects of each room (indices into `map.geometries.objects`), by number
@@ -106,9 +104,6 @@ impl Visibility {
             .map(|p| p.coordinates.iter().map(|v| [v.x, v.y, v.z]).collect())
             .collect();
         let polygons = corners.iter().map(|c| ordered(c)).collect();
-        let floors = map.planning_levels.levels.iter()
-            .map(|l| l.room_names.iter().filter_map(|n| n.parse().ok()).collect())
-            .collect();
         let footprints = map.rooms.rooms.iter().zip(&numbers)
             .filter_map(|(r, n)| n.map(|n| (n, r.footprints())))
             .collect();
@@ -123,7 +118,7 @@ impl Visibility {
             }
             object_rooms.push(room);
         }
-        Self { by_room, outdoors, centres, numbers, index, corners, polygons, floors, footprints, objects, unowned, object_rooms }
+        Self { by_room, outdoors, centres, numbers, index, corners, polygons, footprints, objects, unowned, object_rooms }
     }
 
     /// Whether the map has a room with this number
@@ -170,14 +165,6 @@ impl Visibility {
         if rooms.is_empty() {
             rooms = map.rooms.locate(p, prev).and_then(number).into_iter().collect();
         }
-        // A room that is not on the player's floor cannot be the one they are in, however
-        // its volume overlaps (an upstairs hall over a downstairs one)
-        if let Some(floor) = map.planning_levels.level_index_at(p[1]).and_then(|i| self.floors.get(i)) {
-            let here: Vec<u32> = rooms.iter().copied().filter(|n| floor.contains(n)).collect();
-            if !here.is_empty() {
-                rooms = here;
-            }
-        }
         rooms.sort();
         rooms
     }
@@ -202,11 +189,11 @@ impl Visibility {
                 }
                 let corners = &self.corners[i];
                 let touched = touch.iter().any(|&t| distance_to_polygon(corners, t) <= TOUCH);
-                // Positive beyond the portal. The player is on their room's side, which
-                // says which that is; only standing in the doorway are they on neither, and
-                // then the room's middle decides (it can sit on the wrong side in a big or
-                // L-shaped room, so it is the fallback).
-                let reference = if touched { centre } else { touch.first().copied().unwrap_or(centre) };
+                // Positive beyond the portal. The player is on their room's side, which says
+                // which that is, even in the doorway (exactly in the plane there is no side,
+                // and portal_plane gives none). The room's middle is only a fallback: in a big
+                // or L-shaped room it can sit on the far side of a portal.
+                let reference = touch.first().copied().unwrap_or(centre);
                 let beyond = portal_plane(corners, reference);
                 let entry = match neighbours.iter_mut().position(|n| n.room == other) {
                     Some(at) => at,
@@ -287,9 +274,9 @@ impl Visibility {
             };
             let Some(rect) = rect else { continue };
             *budget -= 1;
-            // Seen from afar the camera is on this room's side of the portal. Standing in
-            // the doorway it is on neither, so the room's own middle says which side is which.
-            let near_side = if touched { self.centres.get(&node.room).copied().unwrap_or(eye) } else { eye };
+            // The camera is on this room's side of the portal, in the doorway too (exactly in
+            // its plane there is no side, and portal_plane gives none)
+            let near_side = eye;
             let mut child = PlanNode {
                 room: other,
                 plane: portal_plane(corners, near_side),
@@ -559,6 +546,29 @@ mod tests {
         let beside = rooms_beside(&blocked);
         assert!(!beside.contains(&121), "shut, it is not: {beside:?}");
         assert!(beside.contains(&120), "the other doorways are unaffected");
+    }
+
+    // On rm11 the courtyard (room 1, a shell around the whole building, whose middle is far
+    // past the doorway) meets room 100 at the opening p100_01 in the plane z = 34237. Walking
+    // in from the courtyard the player is within reach of the opening, and room 100's floor
+    // just past it must stay solid.
+    #[test]
+    fn the_floor_beyond_a_doorway_stays_solid_when_the_room_is_big() {
+        let path = std::path::Path::new("data/map/rm11/rm11.map");
+        if !path.exists() {
+            eprintln!("skipping: {} not found", path.display());
+            return;
+        }
+        let map = crate::map::read(path).expect("rm11 loads");
+        let vis = Visibility::new(&map);
+        let feet = [33113.0, 32677.0, 34208.0];
+        let eye = [feet[0], feet[1] + 155.0, feet[2]];
+        let rooms = vis.solid_rooms(&map, &[1], &[], &[feet, eye]);
+        let r100 = rooms.iter().find(|r| r.room == 100).expect("100 is next to 1");
+        let counts = |p: [f32; 3]| r100.keep.iter().any(|k| k[0] * p[0] + k[1] * p[1] + k[2] * p[2] + k[3] >= 0.0);
+        assert!(counts([33113.0, 32667.0, 34238.0]), "the floor just past the opening");
+        assert!(counts([33113.0, 32667.0, 35000.0]), "and further in");
+        assert!(!counts([33113.0, 32667.0, 34000.0]), "but not the courtyard side");
     }
 
     #[test]

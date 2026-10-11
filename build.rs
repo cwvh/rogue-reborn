@@ -4,7 +4,9 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     // The commit being built, which debug dumps record
+    // HEAD itself only changes on a checkout; each commit appends to its log
     println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/logs/HEAD");
     if let Some(hash) = Command::new("git").args(["rev-parse", "--short", "HEAD"]).output().ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())

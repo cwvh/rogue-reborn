@@ -428,7 +428,12 @@ impl CollisionWorld {
         let mut best: Option<f32> = None;
         for &ti in &self.cells[self.row(z) * self.cols + self.col(x)] {
             let t = &self.tris[ti as usize];
-            if !self.solid(t) || t.n[1] < ny_min {
+            // Floors hold whichever room they belong to. Rooms overlap in walls and
+            // ceilings, where a stray surface traps or blocks the player, but a floor under
+            // the feet is never in the way, and a big hall is often several rooms with no
+            // portal between them, so the room next door has to be walkable before the
+            // player is deep inside it.
+            if t.off || t.n[1] < ny_min {
                 continue;
             }
             if let Some(y) = height_on_triangle(t, x, z) {

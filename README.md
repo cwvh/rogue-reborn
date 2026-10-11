@@ -107,7 +107,9 @@ and `portal-edges` (a level's rooms and portals), `obj-list`, `dyn-info` (doors 
 
 For rooms and portals: `portal-list` (every portal's rooms, position and size), `room-boxes`
 (each room's level volumes, and which rooms hold a point) and `floor-scan` / `floor-probe`
-(check that the floor stays solid around a spot once only the rooms near the player collide).
+(check that the floor stays solid around a spot once only the rooms near the player collide) and
+`floor-walk` (walks a grid and finds steps from one room's floor onto the next where the floor
+would drop out).
 
 `scripts/` holds checks for changes to the renderer:
 
