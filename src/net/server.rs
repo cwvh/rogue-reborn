@@ -32,6 +32,9 @@ const MAX_QUEUE: usize = 6;
 /// If an input is missing but this many later ones are waiting, the missing one is given up on
 const GIVE_UP_AFTER: usize = 3;
 
+/// The furthest back (ticks) that a shot is judged against where the others were: half a second
+const MAX_REWIND: f32 = 30.0;
+
 /// The most ticks run in one update, if the server has fallen behind
 const MAX_CATCH_UP: u32 = 10;
 
@@ -40,7 +43,7 @@ struct Remote {
     token: u32,
     slot: usize,
     /// Inputs that have arrived and are not used yet, by number
-    queue: BTreeMap<u32, Input>,
+    queue: BTreeMap<u32, (Input, u32)>,
     /// The number of the next input to use, once the first has arrived
     next_seq: Option<u32>,
     /// What the player did last, which goes on if their inputs stop coming
@@ -60,8 +63,8 @@ struct Remote {
 
 impl Remote {
     /// The input for this tick
-    fn take(&mut self) -> Input {
-        let Some(mut next) = self.next_seq else { return self.last_input.held() };
+    fn take(&mut self) -> (Input, u32) {
+        let Some(mut next) = self.next_seq else { return (self.last_input.held(), 0) };
         // Too far behind: drop the oldest and catch up
         while self.queue.len() > MAX_QUEUE {
             self.queue.pop_first();
@@ -76,15 +79,15 @@ impl Remote {
             None
         };
         match seq.and_then(|s| self.queue.remove(&s).map(|i| (s, i))) {
-            Some((s, input)) => {
+            Some((s, (input, view))) => {
                 self.next_seq = Some(s + 1);
                 self.applied_seq = s;
                 self.last_input = input;
-                input
+                (input, view)
             }
             None => {
                 self.next_seq = Some(next);
-                self.last_input.held()
+                (self.last_input.held(), 0)
             }
         }
     }
@@ -104,6 +107,8 @@ pub struct Server {
     events: VecDeque<(u32, u32, Event)>,
     next_event: u32,
     snapshot_every: u32,
+    /// Whether a shot is judged against where the others were when the shooter saw them
+    lag_compensation: bool,
     /// How many snapshots have been sent, and how many bytes they came to
     pub snapshots_sent: u64,
     pub snapshot_bytes: u64,
@@ -114,12 +119,18 @@ impl Server {
         assert!(!spawns.is_empty(), "players need somewhere to start");
         let mut sim = sim;
         sim.spawns = spawns.clone();
-        Server { sim, setup, build: build.to_string(), spawns, spawned: 0, remotes: Vec::new(), tick: 0, next_tick_at: None, events: VecDeque::new(), next_event: 1, snapshot_every: SNAPSHOT_EVERY, snapshots_sent: 0, snapshot_bytes: 0 }
+        Server { sim, setup, build: build.to_string(), spawns, spawned: 0, remotes: Vec::new(), tick: 0, next_tick_at: None, events: VecDeque::new(), next_event: 1, snapshot_every: SNAPSHOT_EVERY, lag_compensation: true, snapshots_sent: 0, snapshot_bytes: 0 }
     }
 
     /// Send snapshots this many times a second (the nearest the 60 ticks a second allow)
     pub fn set_snapshot_rate(&mut self, hz: f32) {
         self.snapshot_every = ((1.0 / TICK) / hz.max(1.0)).round().max(1.0) as u32;
+    }
+
+    /// Judge shots against where the others were when the shooter saw them (the default), or
+    /// where they are now
+    pub fn set_lag_compensation(&mut self, on: bool) {
+        self.lag_compensation = on;
     }
 
     pub fn players(&self) -> usize {
@@ -177,16 +188,19 @@ impl Server {
                 });
                 self.accept(link, from, token, slot);
             }
-            ToServer::Input { token, ack_snapshot, first_seq, inputs } => {
+            ToServer::Input { token, ack_snapshot, first_seq, view, inputs } => {
                 let Some(r) = self.remotes.iter_mut().find(|r| r.addr == from && r.token == token) else { return };
                 r.heard = now;
                 r.acked = r.acked.max(ack_snapshot);
+                let count = inputs.len() as u32;
                 for (i, input) in inputs.into_iter().enumerate() {
                     let seq = first_seq.wrapping_add(i as u32);
+                    // The view moved on a tick for each input
+                    let view = if view == 0 { 0 } else { view.saturating_sub((count - 1 - i as u32) * 16) };
                     let next = *r.next_seq.get_or_insert(seq);
                     // Old news, or nonsense from far in the future
                     if seq.wrapping_sub(next) < 1 << 16 {
-                        r.queue.insert(seq, input);
+                        r.queue.insert(seq, (input, view));
                     }
                 }
                 while r.in_flight.front().is_some_and(|&(tick, _)| tick <= ack_snapshot) {
@@ -211,9 +225,15 @@ impl Server {
     /// One tick of the game
     fn step(&mut self, now: f64, link: &mut impl Link) -> Vec<Event> {
         let mut inputs = vec![Input::default(); self.sim.players.len()];
+        let mut rewind = vec![0.0; inputs.len()];
         for r in self.remotes.iter_mut() {
-            inputs[r.slot] = r.take();
+            let (input, view) = r.take();
+            inputs[r.slot] = input;
+            if self.lag_compensation && view > 0 {
+                rewind[r.slot] = (self.tick as f32 - view as f32 / 16.0).clamp(0.0, MAX_REWIND);
+            }
         }
+        self.sim.rewind = rewind;
         let events = self.sim.tick(&inputs, TICK);
         self.tick += 1;
         for e in &events {

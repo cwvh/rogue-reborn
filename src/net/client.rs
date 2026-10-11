@@ -220,6 +220,7 @@ impl Client {
             token: self.token,
             ack_snapshot: self.last_snapshot,
             first_seq: self.recent.front().map_or(seq, |(s, _)| *s),
+            view: (self.view_tick.unwrap_or(self.last_snapshot as f64 - 4.0).max(1.0) * 16.0) as u32,
             inputs: self.recent.iter().map(|(_, i)| *i).collect(),
         };
         link.send(self.server, &msg.encode());

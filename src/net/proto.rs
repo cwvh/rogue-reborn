@@ -18,7 +18,7 @@ use crate::sim::{Event, Input, MAX_PLAYERS, Sim, Throw};
 type V3 = [f32; 3];
 
 /// Bumped whenever the messages change, so that a client and server that disagree notice
-pub const PROTOCOL: u8 = 2;
+pub const PROTOCOL: u8 = 3;
 
 const MAGIC: u16 = 0x5252;
 
@@ -65,8 +65,10 @@ pub enum ToServer {
     /// stranger cannot speak for it. `build` says which version of the game it is.
     Connect { token: u32, build: String },
     /// What the player did. `inputs` are those numbered `first_seq` and on, newest last.
-    /// `ack_snapshot` is the tick of the latest snapshot seen.
-    Input { token: u32, ack_snapshot: u32, first_seq: u32, inputs: Vec<Input> },
+    /// `ack_snapshot` is the tick of the latest snapshot seen. `view` is the server tick, in
+    /// sixteenths, that the newest input's player was looking at the others as of, or 0 if
+    /// that is not known: a shot is judged against where the others were then.
+    Input { token: u32, ack_snapshot: u32, first_seq: u32, view: u32, inputs: Vec<Input> },
     /// Leave
     Leave { token: u32 },
 }
@@ -751,11 +753,12 @@ impl ToServer {
                 w.u32(*token);
                 w.string(build);
             }
-            ToServer::Input { token, ack_snapshot, first_seq, inputs } => {
+            ToServer::Input { token, ack_snapshot, first_seq, view, inputs } => {
                 header(&mut w, 1);
                 w.u32(*token);
                 w.u32(*ack_snapshot);
                 w.u32(*first_seq);
+                w.u32(*view);
                 w.u8(inputs.len() as u8);
                 let mut before = Before::default();
                 for i in inputs {
@@ -776,7 +779,7 @@ impl ToServer {
         let msg = match kind {
             0 => ToServer::Connect { token: r.u32()?, build: r.string()? },
             1 => {
-                let (token, ack_snapshot, first_seq) = (r.u32()?, r.u32()?, r.u32()?);
+                let (token, ack_snapshot, first_seq, view) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
                 let n = r.u8()? as usize;
                 ensure!(n <= 32, "too many inputs");
                 let mut before = Before::default();
@@ -784,7 +787,7 @@ impl ToServer {
                 for _ in 0..n {
                     inputs.push(r.input(&mut before)?);
                 }
-                ToServer::Input { token, ack_snapshot, first_seq, inputs }
+                ToServer::Input { token, ack_snapshot, first_seq, view, inputs }
             }
             2 => ToServer::Leave { token: r.u32()? },
             k => bail!("no such message as {k}"),
@@ -936,7 +939,7 @@ mod tests {
     fn every_message_survives_the_trip() {
         let messages = [
             ToServer::Connect { token: 42, build: "abc1234".to_string() },
-            ToServer::Input { token: 42, ack_snapshot: 897, first_seq: 5000, inputs: (0..5).map(|i| {
+            ToServer::Input { token: 42, ack_snapshot: 897, first_seq: 5000, view: 14400, inputs: (0..5).map(|i| {
                 let mut x = Input { forward: i % 2 == 0, fire: i > 2, run: true, ..Input::default() };
                 x.set_look(i as f32 * 10.0, -5.0);
                 x

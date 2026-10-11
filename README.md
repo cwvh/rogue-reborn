@@ -134,6 +134,9 @@ changes it), and other players, the characters and grenades are drawn a little i
 Players can hurt each other on a server (`rrsrv --no-pvp` turns it off): a head shot kills, a body
 shot takes a third, a grenade by how close it is, and a player who dies comes back after three seconds
 at the spawn point farthest from the others, with a full loadout. Playing alone, nothing can hurt you.
+A shot is judged against where the other players were when the shooter saw them (the client says
+which moment that was, up to half a second back), so there is no need to lead a target by your
+ping; `rrsrv --no-lag-compensation` judges against where they are now instead.
 A snapshot is sent as only what has changed since the latest one the client says it has, or in full
 if there is none, so a quiet game costs about a hundred bytes a snapshot.
 

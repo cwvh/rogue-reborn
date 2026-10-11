@@ -10,6 +10,7 @@
 pub mod characters;
 pub mod movement;
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::collision::{CollisionWorld, Player, SolidRoom};
@@ -39,6 +40,9 @@ pub const RESPAWN_SECONDS: f32 = 3.0;
 
 /// How wide a player is to a bullet
 const HIT_RADIUS: f32 = 25.0;
+
+/// How many ticks of where players have been are kept, to aim at where they were
+const PAST_TICKS: usize = 40;
 
 /// A grenade throw: from the start of the swing to the end, and how far into it the grenade
 /// leaves the hand (0..1)
@@ -260,6 +264,11 @@ pub struct Sim {
     pub pvp: bool,
     /// Where players come back after they die
     pub spawns: Vec<V3>,
+    /// For each player, how many ticks back in time the others were when they took their shot,
+    /// as that player saw them (a server sets it before each tick; none means no looking back)
+    pub rewind: Vec<f32>,
+    /// Where each living player was at the end of each of the latest ticks, oldest first
+    past: VecDeque<Vec<Option<V3>>>,
     eye_height: f32,
     /// What a player starts with
     pub magazine: u32,
@@ -303,6 +312,8 @@ impl Sim {
             culling: config.culling,
             speed_scale: config.speed_scale,
             pvp: false,
+            rewind: Vec::new(),
+            past: VecDeque::new(),
             spawns: Vec::new(),
             eye_height,
             magazine: config.magazine,
@@ -641,7 +652,36 @@ impl Sim {
             self.track_rooms(i, input_of(i).observer);
         }
         self.apply_union_rooms();
+        if self.pvp {
+            self.past.push_back(self.players.iter().map(|p| (p.active && p.respawn_at.is_none()).then_some(p.player.pos)).collect());
+            while self.past.len() > PAST_TICKS {
+                self.past.pop_front();
+            }
+        }
         ev
+    }
+
+    /// Where a player was `back` ticks ago (between ticks, if it is not a whole number), or
+    /// where they are if `back` is nothing. None if they were not standing then.
+    fn position_then(&self, slot: usize, back: f32) -> Option<V3> {
+        let now = self.players[slot].player.pos;
+        if back <= 0.0 || self.past.is_empty() {
+            return Some(now);
+        }
+        // The newest tick in `past` is the one just finished, which is as good as now
+        let back = back.min((self.past.len() - 1) as f32);
+        let newer = self.past.len() - 1 - back.floor() as usize;
+        let at = |i: usize| self.past[i].get(slot).copied().flatten();
+        let (newer_pos, older_pos) = (at(newer), newer.checked_sub(1).and_then(at));
+        match (newer_pos, older_pos) {
+            (Some(n), Some(o)) => {
+                let f = back.fract();
+                Some([0, 1, 2].map(|k| n[k] + (o[k] - n[k]) * f))
+            }
+            (Some(n), None) if back.fract() < 0.5 => Some(n),
+            (None, Some(o)) if back.fract() >= 0.5 => Some(o),
+            _ => None,
+        }
     }
 
     /// Space or Backspace opens or closes the door the player is looking at
@@ -1035,11 +1075,12 @@ impl Sim {
         if a < 1e-9 {
             return None;
         }
+        let back = self.rewind.get(shooter).copied().unwrap_or(0.0);
         (0..self.players.len())
             .filter(|&i| i != shooter && self.players[i].active && self.players[i].respawn_at.is_none())
             .filter_map(|i| {
-                // The body is an upright cylinder
-                let feet = self.players[i].player.pos;
+                // The body is an upright cylinder, where the shooter saw it
+                let feet = self.position_then(i, back)?;
                 let (ox, oz) = (eye[0] - feet[0], eye[2] - feet[2]);
                 let b = 2.0 * (ox * dir[0] + oz * dir[2]);
                 let c = ox * ox + oz * oz - HIT_RADIUS * HIT_RADIUS;
@@ -1405,6 +1446,26 @@ mod tests {
         // The spawn point farthest from the player still standing at (0, -350)
         assert_eq!((back.player.pos[0], back.player.pos[2]), (0.0, 350.0));
         assert_eq!((back.kills, back.deaths), (0, 1));
+    }
+
+    #[test]
+    fn a_shot_is_judged_against_where_the_target_was_when_the_shooter_saw_them() {
+        // The target strafes out of the line of fire; the shooter fires at where they were
+        let strafe = |rewind: f32| {
+            let mut sim = duel();
+            let step = Input { right: true, ..holding() };
+            for _ in 0..12 {
+                sim.tick(&[holding(), step], TICK);
+            }
+            assert!(sim.players[1].player.pos[0].abs() > 60.0, "the target has moved clear: {:?}", sim.players[1].player.pos);
+            sim.rewind = vec![rewind, 0.0];
+            sim.tick(&[aim(0.0), holding()], TICK);
+            sim.players[1].hp
+        };
+        assert_eq!(strafe(0.0), PLAYER_HP, "now, they are out of the way");
+        assert_eq!(strafe(12.0), 0.0, "twelve ticks ago, they were in the way");
+        // Asking for more than is remembered gets the oldest, when they were still in the way
+        assert_eq!(strafe(500.0), 0.0);
     }
 
     #[test]
