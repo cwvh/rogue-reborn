@@ -64,6 +64,28 @@ impl Map {
     }
 }
 
+/// A standalone object model (`.qob`/`.rob`/`.sob`), such as a weapon: the
+/// same material and geometry sections as a MAP, wrapped in
+/// `BeginModel`/`EndModel` instead of the MAP header.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Debug)]
+pub struct Model {
+    pub materials: Materials,
+    pub geometries: Geometries,
+}
+
+/// Read a standalone model file
+pub fn read_model(filename: &Path) -> anyhow::Result<Model> {
+    let bytes = std::fs::read(filename).context("could not read model file")?;
+    let mut buf = Cursor::new(bytes);
+    let magic = buf.read_cstring().context("model magic")?;
+    ensure!(magic == b"BeginModel", "not a model file: '{}'", String::from_utf8_lossy(&magic));
+    let materials = Materials::read(&mut buf).context("Materials List")?;
+    let geometries = Geometries::read_in_model(&mut buf).context("Geometry List")?;
+    Ok(Model { materials, geometries })
+}
+
 // TODO replace or remove
 /// Utility function for driving the IO. Should be replaced or moved.
 pub fn read(filename: &Path) -> anyhow::Result<Map> {
@@ -248,6 +270,20 @@ impl Geometries {
     }
 }
 
+impl Geometries {
+    fn read_in_model(buf: &mut Cursor<Vec<u8>>) -> Result<Self> {
+        let (id, _name) = section_header(buf)
+            .context("geometry list section header")?;
+
+        let n = buf.read_u32::<LE>().context("missing number of objects")?;
+        let mut objects = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            objects.push(Object::read_in_model(buf)?);
+        }
+        Ok(Self { id, objects })
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "get-size", derive(GetSize))]
 #[derive(Clone, Debug)]
@@ -273,6 +309,52 @@ impl Object {
         let (object_id, object_name) = section_header(buf)
             .context("object section header")?;
 
+        Self::read_body(buf, id, name, object_id, object_name)
+    }
+
+    /// Objects in standalone model files have a single section header and
+    /// no readable collision data after the faces, so only the geometry is
+    /// read and the rest of the object is skipped by its size.
+    fn read_in_model(buf: &mut Cursor<Vec<u8>>) -> Result<Self> {
+        let start = buf.position() as usize;
+        let size = buf.get_ref().get(start..start + 4)
+            .context("model object size")?
+            .try_into().map(u32::from_le_bytes).unwrap_or(0) as usize;
+        let (id, name) = section_header(buf).context("model object section header")?;
+
+        let n = buf.read_u32::<LE>().context("vertex count")?;
+        let mut vertices = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            vertices.push(Vertex::read(buf)?);
+        }
+
+        let n = buf.read_u32::<LE>().context("objects data count")?;
+        let mut object_datas = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            object_datas.push(ObjectData::read(buf)?);
+        }
+
+        buf.set_position((start + 4 + size) as u64);
+        Ok(Self {
+            id,
+            object_id: id,
+            object_name: name.clone(),
+            name,
+            vertices,
+            object_datas,
+            collisions: Collisions { vertices: Vec::new(), faces: Vec::new() },
+            tags: Vec::new(),
+            ind: Vec::new(),
+        })
+    }
+
+    fn read_body(
+        buf: &mut Cursor<Vec<u8>>,
+        id: u32,
+        name: String,
+        object_id: u32,
+        object_name: String,
+    ) -> Result<Self> {
         let n = buf.read_u32::<LE>().context("vertex count")?;
         let mut vertices = Vec::with_capacity(n as usize);
         for _ in 0..n {
@@ -1328,6 +1410,25 @@ pub struct Room {
 }
 
 impl Room {
+    /// Whether a map-space point is inside one of the room's level volumes.
+    ///
+    /// Each level is a box (an AABB placed at the level's transform position).
+    /// Many levels are thin floor slabs, so `y_slack` widens the box vertically;
+    /// pass something near the player's body height.
+    pub fn contains(&self, p: [f32; 3], y_slack: f32) -> bool {
+        self.sherman_levels.iter().flat_map(|l| &l.tm_with_aabb).any(|b| {
+            // Into the box's local space: the transform axes are orthonormal
+            let o = &b.tm.position;
+            let d = [p[0] - o.x, p[1] - o.y, p[2] - o.z];
+            let dot = |v: &Vec3f| d[0] * v.x + d[1] * v.y + d[2] * v.z;
+            let l = [dot(&b.tm.x_axis), dot(&b.tm.y_axis), dot(&b.tm.z_axis)];
+            let a = &b.aabb;
+            l[0] >= a[0] && l[0] <= a[3]
+                && l[1] >= a[1] - y_slack && l[1] <= a[4] + y_slack
+                && l[2] >= a[2] && l[2] <= a[5]
+        })
+    }
+
     fn read(buf: &mut Cursor<Vec<u8>>) -> Result<Self> {
         let (section_id, section_name) = section_header_short(buf)
             .context("room section header short")?;
@@ -1662,4 +1763,41 @@ where
 /// this is 0xC3 0xA9 byte sequence in UTF-8.
 fn latin1_to_utf8(s: &[u8]) -> String {
     s.iter().map(|&c| c as char).collect()
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_mp5k_model() {
+        let p = Path::new("data/model/rsw_mp5k.qob");
+        if !p.exists() {
+            return;
+        }
+        let m = read_model(p).expect("mp5k parses");
+        assert_eq!(m.materials.materials[0].filename, "rsw_mp5k.bmp");
+        let tris: usize = m.geometries.objects.iter()
+            .flat_map(|o| &o.object_datas).map(|d| d.faces.face_indices.len()).sum();
+        assert!(tris > 50, "{tris} triangles");
+    }
+
+    #[test]
+    fn reads_every_qob_model() {
+        let Ok(dir) = std::fs::read_dir("data/model") else { return };
+        let (mut ok, mut bad) = (0, Vec::new());
+        for f in dir.flatten().map(|e| e.path()) {
+            if f.extension().is_some_and(|e| e.eq_ignore_ascii_case("qob")) {
+                match read_model(&f) {
+                    Ok(_) => ok += 1,
+                    Err(e) => bad.push(format!("{}: {e:#}", f.display())),
+                }
+            }
+        }
+        eprintln!("{ok} models parsed, {} failed", bad.len());
+        for b in bad.iter().take(5) {
+            eprintln!("  {b}");
+        }
+        assert!(bad.is_empty());
+    }
 }

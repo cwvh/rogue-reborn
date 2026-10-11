@@ -3,8 +3,10 @@ use std::path::Path;
 use glfw::{Action, Context, Key, WindowEvent};
 use rogue_reborn::rsb;
 
-#[link(name = "GL")]
-extern "C" {
+#[cfg_attr(windows, link(name = "opengl32"))]
+#[cfg_attr(target_os = "macos", link(name = "OpenGL", kind = "framework"))]
+#[cfg_attr(not(any(windows, target_os = "macos")), link(name = "GL"))]
+unsafe extern "C" {
     fn glViewport(x: i32, y: i32, width: i32, height: i32);
     fn glClearColor(r: f32, g: f32, b: f32, a: f32);
     fn glClear(mask: u32);

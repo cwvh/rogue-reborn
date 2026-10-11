@@ -1,0 +1,13 @@
+# Text files are LF in the repository and in the working copy on every machine,
+# whatever core.autocrlf says (Git for Windows sets it to true system-wide).
+* text=auto eol=lf
+
+# Game data and generated images are binary: never convert line endings in them.
+# The data comes from a case-insensitive filesystem and mixes .RSB and .rsb, and
+# attribute patterns are case-sensitive, so each letter matches either case.
+*.[rR][sS][bB] binary
+*.[mM][aA][pP] binary
+*.[wW][aA][vV] binary
+*.[pP][nN][gG] binary
+*.[tT][gG][aA] binary
+*.[bB][mM][pP] binary

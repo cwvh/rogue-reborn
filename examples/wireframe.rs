@@ -1,11 +1,17 @@
-use rogue_reborn::map;
-use rogue_reborn::rsb;
 use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
+use rogue_reborn::{map, rsb};
+use rogue_reborn::collision::{CollisionWorld, Params, Player};
+use rogue_reborn::{actor, combat, crp, motion, skeleton, sound, tga, weapon};
+use rogue_reborn::ambience;
+use rogue_reborn::glass;
+use rogue_reborn::impact::{self, Surface};
 
-#[link(name = "GL")]
+#[cfg_attr(windows, link(name = "opengl32"))]
+#[cfg_attr(target_os = "macos", link(name = "OpenGL", kind = "framework"))]
+#[cfg_attr(not(any(windows, target_os = "macos")), link(name = "GL"))]
 unsafe extern "C" {
     fn glViewport(x: i32, y: i32, width: i32, height: i32);
     fn glClearColor(r: f32, g: f32, b: f32, a: f32);
@@ -17,10 +23,18 @@ unsafe extern "C" {
     fn glMultMatrixf(m: *const f32);
     fn glBegin(mode: u32);
     fn glEnd();
+    fn glPointSize(size: f32);
     fn glVertex3f(x: f32, y: f32, z: f32);
     fn glRotatef(angle: f32, x: f32, y: f32, z: f32);
     fn glTranslatef(x: f32, y: f32, z: f32);
     fn glScalef(x: f32, y: f32, z: f32);
+    fn glPushMatrix();
+    fn glLineWidth(width: f32);
+    fn glDepthMask(flag: u8);
+    fn glPolygonOffset(factor: f32, units: f32);
+    fn glColor4f(r: f32, g: f32, b: f32, a: f32);
+    fn glBlendFunc(sfactor: u32, dfactor: u32);
+    fn glPopMatrix();
     fn glColor3f(r: f32, g: f32, b: f32);
     fn glTexCoord2f(s: f32, t: f32);
     fn glTexParameteri(target: u32, pname: u32, param: i32);
@@ -38,7 +52,174 @@ unsafe extern "C" {
         pixels: *const std::ffi::c_void
     );
     fn glDisable(cap: u32);
-    fn glSwapBuffers();
+    fn glReadPixels(
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        format: u32,
+        type_: u32,
+        pixels: *mut std::ffi::c_void
+    );
+    fn glPixelStorei(pname: u32, param: i32);
+}
+
+// Command-line options; mainly for repeatable headless screenshots
+#[derive(Default)]
+struct Args {
+    /// A level by name, such as rm11 or citystreet_large, found under data/map
+    level: Option<String>,
+    list_levels: bool,
+    map: Option<PathBuf>,
+    screenshot: Option<PathBuf>,
+    pos: Option<[f32; 3]>,
+    yaw: Option<f32>,
+    pitch: Option<f32>,
+    textured: bool,
+    portals: bool,
+    collisions: bool,
+    first_person: bool,
+    info: bool,
+    spawn_zone: Option<String>,
+    seed: Option<u64>,
+    model: Option<PathBuf>,
+    no_models: bool,
+    no_sound: bool,
+    /// Master volume, 0.0..=1.0
+    volume: Option<f32>,
+    actor: Option<String>,
+    model_yaw: Option<f32>,
+    no_blink: bool,
+    eyes_closed: bool,
+    anim: Option<String>,
+    anim_fps: Option<f32>,
+    /// Frame rate cap (also turns vsync off)
+    max_fps: Option<f32>,
+    anim_frame: Option<f32>,
+    // Mission spawn point to use, counting from 1
+    spawn: Option<usize>,
+    speed_scale: Option<f32>,
+    // Multiplies the playback rate of the movement animations (default 1.5)
+    anim_scale: Option<f32>,
+    // Overrides for the player's movement set: slot=motion (walk, run, back, left, right, idle, fire, reload)
+    player_anims: Vec<(String, String)>,
+    third_person: bool,
+    weapon_offset: Option<[f32; 3]>,
+    /// Draw the weapon in front of the camera in first person (the original game had no such view)
+    viewmodel: bool,
+    /// Bullet holes drawn for the surface hit, with splinters, sparks and dust, instead of the game sprites
+    realistic_decals: bool,
+    /// Treat every wall as this surface (wood, metal, concrete, earth, soft), to preview bullet holes
+    decal_surface: Option<Surface>,
+    /// Where the held weapon sits in the view, in gun lengths: right, up, forward
+    viewmodel_offset: Option<[f32; 3]>,
+    view_orbit: f32,
+    view_dist: Option<f32>,
+    hold: Option<String>,
+    // Hold W for this many frames and print the position trace
+    walk: Option<u32>,
+}
+
+fn parse_args() -> Args {
+    let mut args = Args::default();
+    let mut it = std::env::args().skip(1);
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--map" => args.map = it.next().map(PathBuf::from),
+            "--level" => args.level = it.next(),
+            "--list-levels" => args.list_levels = true,
+            "--screenshot" => args.screenshot = it.next().map(PathBuf::from),
+            "--pos" => {
+                let v: Vec<f32> = it.next().unwrap_or_default()
+                    .split(',').filter_map(|n| n.parse().ok()).collect();
+                if v.len() == 3 {
+                    args.pos = Some([v[0], v[1], v[2]]);
+                } else {
+                    eprintln!("--pos expects x,y,z");
+                }
+            }
+            "--yaw" => args.yaw = it.next().and_then(|v| v.parse().ok()),
+            "--pitch" => args.pitch = it.next().and_then(|v| v.parse().ok()),
+            "--textured" => args.textured = true,
+            "--portals" => args.portals = true,
+            "--collisions" => args.collisions = true,
+            "--info" => args.info = true,
+            "--spawn-zone" => args.spawn_zone = it.next(),
+            "--model" => args.model = it.next().map(PathBuf::from),
+            "--no-models" => args.no_models = true,
+            "--no-sound" => args.no_sound = true,
+            "--volume" => args.volume = it.next().and_then(|v| v.parse().ok()),
+            "--actor" => args.actor = it.next(),
+            "--model-yaw" => args.model_yaw = it.next().and_then(|v| v.parse().ok()),
+            "--no-blink" => args.no_blink = true,
+            "--eyes-closed" => args.eyes_closed = true,
+            "--anim" => args.anim = it.next(),
+            "--max-fps" => args.max_fps = it.next().and_then(|v| v.parse().ok()).filter(|f: &f32| *f > 0.0),
+            "--anim-fps" => args.anim_fps = it.next().and_then(|v| v.parse().ok()),
+            "--third-person" => args.third_person = true,
+            "--view-orbit" => args.view_orbit = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0),
+            "--view-dist" => args.view_dist = it.next().and_then(|v| v.parse().ok()),
+            "--viewmodel" => args.viewmodel = true,
+            "--realistic-decals" => args.realistic_decals = true,
+            "--decal-surface" => {
+                args.decal_surface = match it.next().unwrap_or_default().to_ascii_lowercase().as_str() {
+                    "wood" => Some(Surface::Wood),
+                    "metal" => Some(Surface::Metal),
+                    "concrete" => Some(Surface::Concrete),
+                    "earth" => Some(Surface::Earth),
+                    "soft" => Some(Surface::Soft),
+                    other => {
+                        eprintln!("--decal-surface expects wood, metal, concrete, earth or soft, not {other:?}");
+                        None
+                    }
+                };
+            }
+            "--viewmodel-offset" => {
+                let v: Vec<f32> = it.next().unwrap_or_default().split(',').filter_map(|n| n.parse().ok()).collect();
+                if v.len() == 3 { args.viewmodel_offset = Some([v[0], v[1], v[2]]); } else { eprintln!("--viewmodel-offset expects right,up,forward"); }
+            }
+            "--weapon-offset" => {
+                let v: Vec<f32> = it.next().unwrap_or_default().split(',').filter_map(|n| n.parse().ok()).collect();
+                if v.len() == 3 { args.weapon_offset = Some([v[0], v[1], v[2]]); } else { eprintln!("--weapon-offset expects x,y,z"); }
+            }
+            "--hold" => args.hold = it.next(),
+            "--player-anim" => {
+                let v = it.next().unwrap_or_default();
+                match v.split_once('=') {
+                    Some((k, m)) => args.player_anims.push((k.to_string(), m.to_string())),
+                    None => eprintln!("--player-anim expects slot=motion"),
+                }
+            }
+            "--anim-scale" => args.anim_scale = it.next().and_then(|v| v.parse().ok()),
+            "--speed-scale" => args.speed_scale = it.next().and_then(|v| v.parse().ok()),
+            "--spawn" => args.spawn = it.next().and_then(|v| v.parse().ok()),
+            "--anim-frame" => args.anim_frame = it.next().and_then(|v| v.parse().ok()),
+            "--seed" => args.seed = it.next().and_then(|v| v.parse().ok()),
+            "--first-person" => args.first_person = true,
+            "--walk" => {
+                args.walk = it.next().and_then(|v| v.parse().ok());
+                args.first_person = true;
+            }
+            other => eprintln!("ignoring unknown argument: {other}"),
+        }
+    }
+    args
+}
+
+// Read the current back buffer as top-down RGB8
+fn read_framebuffer(width: i32, height: i32) -> Vec<u8> {
+    let (w, h) = (width as usize, height as usize);
+    let mut bottom_up = vec![0u8; w * h * 3];
+    unsafe {
+        glPixelStorei(0x0D05, 1); // GL_PACK_ALIGNMENT
+        glReadPixels(0, 0, width, height, 0x1907, 0x1401, // GL_RGB, GL_UNSIGNED_BYTE
+            bottom_up.as_mut_ptr() as *mut std::ffi::c_void);
+    }
+    let mut out = Vec::with_capacity(bottom_up.len());
+    for row in bottom_up.chunks_exact(w * 3).rev() {
+        out.extend_from_slice(row);
+    }
+    out
 }
 
 struct Camera {
@@ -82,33 +263,217 @@ struct Mesh {
     radius: f32,
 }
 
+// What the player's body is doing, which picks the animation
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Movement {
+    Idle,
+    Walk,
+    Run,
+    Back,
+    StrafeLeft,
+    StrafeRight,
+    /// Standing and shooting, or reloading, with the weapon
+    Fire,
+    Reload,
+}
+
+struct PlayerMotions {
+    idle: Option<motion::Motion>,
+    walk: Option<motion::Motion>,
+    run: Option<motion::Motion>,
+    back: Option<motion::Motion>,
+    left: Option<motion::Motion>,
+    right: Option<motion::Motion>,
+    fire: Option<motion::Motion>,
+    reload: Option<motion::Motion>,
+}
+
+impl PlayerMotions {
+    fn get(&self, m: Movement) -> Option<&motion::Motion> {
+        match m {
+            Movement::Idle => &self.idle,
+            Movement::Walk => &self.walk,
+            Movement::Run => &self.run,
+            Movement::Back => &self.back,
+            Movement::StrafeLeft => &self.left,
+            Movement::StrafeRight => &self.right,
+            Movement::Fire => &self.fire,
+            Movement::Reload => &self.reload,
+        }.as_ref()
+    }
+}
+
+const RELOAD_SECONDS: f32 = 2.2;
+
+// Bones driven by the weapon hold rather than the locomotion cycle
+fn is_upper_body(name: &str) -> bool {
+    matches!(name, "Chest" | "LeftCollar" | "RightCollar" | "LeftUpArm" | "LeftLowArm" | "LeftHand"
+        | "RightUpArm" | "RightLowArm" | "RightHand" | "Neck" | "Head")
+}
+
+// Ground speed (units per second) at which each animation plays at its own
+// pace without the feet sliding. These are the speeds with the least slip of
+// a planted foot, found with `SPEED=100 cargo run --release --example
+// motion-info <motion>`. A planted foot is never perfectly still, so some
+// slip is left.
+fn nominal_speed(m: Movement) -> f32 {
+    match m {
+        Movement::Idle | Movement::Fire | Movement::Reload => 1.0,
+        Movement::Walk => 257.0,
+        Movement::Run => 440.0,
+        Movement::Back => 126.0,
+        Movement::StrafeLeft => 139.0,
+        Movement::StrafeRight => 139.0,
+    }
+}
+
+// Ground speed the player actually moves at. Matches the game where known
+// (tuned by the user with --speed-scale); otherwise the animation's own pace.
+fn ground_speed(m: Movement) -> f32 {
+    match m {
+        Movement::Run => 735.0,
+        Movement::Walk => 514.0,
+        Movement::Back => 378.0,
+        Movement::StrafeLeft | Movement::StrafeRight => 348.0,
+        other => nominal_speed(other),
+    }
+}
+
+// The listener for positional sounds, in map space (camera space has Z flipped)
+fn listener_of(camera: &Camera) -> sound::Listener {
+    let r = camera.get_right();
+    sound::Listener {
+        pos: [camera.position[0], camera.position[1], -camera.position[2]],
+        right: [r[0], r[1], -r[2]],
+    }
+}
+
+// Pick the movement from the held keys
+fn movement_from_keys(forward: bool, back: bool, left: bool, right: bool, run: bool) -> Movement {
+    if forward {
+        if run { Movement::Run } else { Movement::Walk }
+    } else if back {
+        Movement::Back
+    } else if left && !right {
+        Movement::StrafeLeft
+    } else if right && !left {
+        Movement::StrafeRight
+    } else {
+        Movement::Idle
+    }
+}
+
+// The weapon model as flat triangle corner arrays, ready to draw
+struct WeaponDraw {
+    verts: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    texture: Option<u32>,
+    muzzle: [f32; 3],
+    /// Middle of the model's bounding box, and its longest side
+    center: [f32; 3],
+    length: f32,
+}
+
+// Draw the weapon model in the current matrix, with a muzzle flash if asked
+fn draw_weapon(wd: &WeaponDraw, textured: bool, flash: bool) {
+    unsafe {
+        if let (true, Some(tex)) = (textured, wd.texture) {
+            glEnable(0x0DE1);
+            glBindTexture(0x0DE1, tex);
+            glColor4f(1.0, 1.0, 1.0, 1.0);
+        } else {
+            glDisable(0x0DE1);
+            glColor4f(0.7, 0.7, 0.75, 1.0);
+        }
+        glBegin(0x0004); // GL_TRIANGLES
+        for (v, uv) in wd.verts.iter().zip(&wd.uvs) {
+            glTexCoord2f(uv[0], uv[1]);
+            glVertex3f(v[0], v[1], v[2]);
+        }
+        glEnd();
+        // Muzzle flash: a short burst of lines out of the barrel
+        if flash {
+            glDisable(0x0DE1);
+            glColor4f(1.0, 0.85, 0.3, 1.0);
+            let m = wd.muzzle;
+            glBegin(0x0001); // GL_LINES
+            for (dx, dy, dz) in [(0.0, -22.0, 0.0), (7.0, -6.0, 0.0), (-7.0, -6.0, 0.0), (0.0, -6.0, 7.0), (0.0, -6.0, -7.0)] {
+                glVertex3f(m[0], m[1], m[2]);
+                glVertex3f(m[0] + dx, m[1] + dy, m[2] + dz);
+            }
+            glEnd();
+        }
+    }
+}
+
 fn main() {
     // Load the map
-    let map_path = Path::new("data/map/m00/citystreet_large.map");
+    // let map_path = Path::new("data/map/m00/demolitions_area.MAP");
+    // let map_path = Path::new("data/map/rm11/rm11.map");
+    // let map_path = Path::new("data/map/rm02/rm02.map");
+    let args = parse_args();
+    if args.list_levels {
+        for (dir, name, _) in list_levels() {
+            println!("{name:24} data/map/{dir}");
+        }
+        return;
+    }
+    let map_buf = match (&args.map, &args.level) {
+        (Some(path), level) => {
+            if level.is_some() {
+                eprintln!("--map and --level both given: using --map");
+            }
+            path.clone()
+        }
+        (None, Some(name)) => find_level(name).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }),
+        (None, None) => PathBuf::from("data/map/m00/citystreet_large.map"),
+    };
+    let map_path = map_buf.as_path();
     let map_num = extract_map_num(map_path).unwrap_or_else(|| String::from("m00"));
     let level = map::read(map_path)
         .expect("Failed to load map");
 
     // Build a flattened mesh from the MAP geometry
     let mesh = build_mesh(&level);
-    // Precompute room/object indices and AABBs for collisions and filtering
-    let rt_index = build_runtime_index(&level);
+    // Collision world built from the render triangles (MAP space)
+    let mut world = CollisionWorld::from_map(&level, Params::default());
+    // Glass panes, which break when shot; their shards fall for a moment afterwards
+    let panes = glass::panes(&level);
+    let mut broken_at: Vec<Option<f32>> = vec![None; panes.len()];
+    let mut fractures: Vec<glass::Fracture> = Vec::new();
+
+    if args.info {
+        println!("rooms={} objects={} portals={} planning_levels={} collision_triangles={}",
+            level.rooms.rooms.len(), level.geometries.objects.len(),
+            level.portals.portals.len(), level.planning_levels.levels.len(),
+            world.triangle_count());
+        return;
+    }
+
+    const WIDTH: i32 = 1024;
+    const HEIGHT: i32 = 768;
 
     // Initialize GLFW
     let mut glfw = glfw::init_no_callbacks().unwrap();
     let (mut window, events) = glfw
-        .create_window(1024, 768, "Wireframe Viewer", glfw::WindowMode::Windowed)
+        .create_window(WIDTH as _, HEIGHT as _, "Wireframe Viewer", glfw::WindowMode::Windowed)
         .expect("Failed to create GLFW window");
     window.make_current();
+    // vsync gives steady pacing; --max-fps replaces it with an explicit cap
+    glfw.set_swap_interval(if args.max_fps.is_some() { glfw::SwapInterval::None } else { glfw::SwapInterval::Sync(1) });
     window.set_key_polling(true);
     window.set_cursor_pos_polling(true);
     window.set_framebuffer_size_polling(true);
     window.set_scroll_polling(true);
+    window.set_mouse_button_polling(true);
     gl::load_with(|s| window.get_proc_address(s) as *const _);
 
     // OpenGL setup
     unsafe {
-        glViewport(0, 0, 1024, 768);
+        glViewport(0, 0, WIDTH, HEIGHT);
         glClearColor(0.1, 0.1, 0.1, 1.0);
         glEnable(0x0B71); // GL_DEPTH_TEST
         glPolygonMode(0x0408, 0x1B01); // GL_FRONT_AND_BACK, GL_LINE
@@ -116,26 +481,334 @@ fn main() {
 
     // Camera setup: start at mission-provided location
     let mut camera = Camera::new();
+
     // negate z_lh because original coordinates were RH for Direct3D
+    // TODO: pull a player spawn from the map itself
     camera.position = [33924.6_f32, 33307.0_f32, -30028.3_f32];   // CSL
-    let mut last_cursor_pos: Option<(f64, f64)> = None;
+    // Spawn priority: --pos, --spawn-zone, a random mission spawn point, then
+    // the fallback position above
+    let mission_spawns = find_mission_spawns(map_path);
+    let mut own_spawn = None;
+    let spawn = if args.pos.is_some() {
+        None
+    } else if let Some(zone) = args.spawn_zone.as_deref() {
+        find_zone_spawn(map_path, zone, &world).inspect(|s| println!("spawning in zone {zone} at {s:?}"))
+    } else if mission_spawns.is_empty() {
+        None
+    } else {
+        let i = args.spawn.map_or_else(|| pick_index(mission_spawns.len(), args.seed), |n| n.clamp(1, mission_spawns.len()) - 1);
+        let p = mission_spawns[i];
+        // Mission y is a little above the floor; stand on the floor
+        let floor = world.ground_at(p[0], p[2], p[1] + 100.0).unwrap_or(p[1]);
+        println!("spawning at mission spawn point {} of {}: {p:?}", i + 1, mission_spawns.len());
+        own_spawn = Some(i);
+        Some([p[0], floor, p[2]])
+    };
+    if let Some(spawn) = spawn {
+        camera.position = [spawn[0], spawn[1] + world.params().eye_height, -spawn[2]];
+    }
+    // Character models standing at every other mission spawn point
+    let model_path = args.model.clone()
+        .unwrap_or_else(|| PathBuf::from("data/character/team_hrt/blue_M_a.CRP"));
+    let character = {
+        match crp::read(&model_path) {
+            Ok(c) => {
+                println!("loaded {} ({} vertices, {} triangles)", c.name, c.vertices.len(),
+                    c.parts.iter().map(|p| p.triangles.len()).sum::<usize>());
+                Some(c)
+            }
+            Err(e) => { eprintln!("could not load {}: {e:#}", model_path.display()); None }
+        }
+    };
+    // Skeleton and skinning for posed models
+    let find_file = |dir: &Path, stem: &str, ext: &str| -> Option<PathBuf> {
+        std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|p| {
+            p.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext))
+                && p.file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase() == stem.to_lowercase())
+        })
+    };
+    let rig = (|| {
+        let c = character.as_ref()?;
+        let dir = model_path.parent()?;
+        let stem = model_path.file_stem()?.to_string_lossy().to_string();
+        let skel = skeleton::read(&find_file(dir, &stem, "skl").or_else(|| { eprintln!("no skeleton beside {}", model_path.display()); None })?).ok()?;
+        let skin = c.skin(&skel).or_else(|| { eprintln!("mesh does not match skeleton"); None })?;
+        Some((skel, skin))
+    })();
+    let load_motion = |name: &str| -> Option<motion::Motion> {
+        let m = motion::read(&find_file(Path::new("data/motion"), name, "dam").or_else(|| { eprintln!("no motion named {name}"); None })?).ok();
+        m
+    };
+    // The player carries the MP5K, so uses the SMG-holding movement set
+    let slot_motion = |slot: &str, default: &str| {
+        let name = args.player_anims.iter().rev().find(|(k, _)| k == slot).map_or(default, |(_, m)| m.as_str());
+        load_motion(name)
+    };
+    let player_motions = PlayerMotions {
+        idle: slot_motion("idle", "up_cyc_mp5k"),
+        walk: slot_motion("walk", "tmu_wk1"),
+        run: slot_motion("run", "tmu_rn"),
+        back: slot_motion("back", "tmu_bk1"),
+        left: slot_motion("left", "tms_l2"),
+        right: slot_motion("right", "tms_r2"),
+        fire: slot_motion("fire", "fire_up_mp5k"),
+        reload: slot_motion("reload", "twru_s9"),
+    };
+
+    // Motions other characters play: idle (or --anim), injury reactions and deaths
+    let idle_name = args.anim.clone().unwrap_or_else(|| "up_none_cyc".to_string());
+    let mut npc_motions: HashMap<String, motion::Motion> = HashMap::new();
+    for name in [idle_name.as_str(), "thiu_ab", "thiu_cb", "thiu_cf", "thiu_cl", "thiu_cr", "thiu_hb", "thiu_hf",
+        "thiu_la", "thiu_ll", "thiu_ra", "thiu_rl", "thdu_1", "thdu_2", "thdu_3", "thdu_4", "thdh_1", "thdh_2"] {
+        if let Some(m) = load_motion(name) {
+            npc_motions.insert(name.to_string(), m);
+        }
+    }
+
+    // The MP5K: definition, model and texture
+    let weapon_def = weapon::read(Path::new("data/kit/pw_mp5k.wpn")).ok();
+    let weapon_draw = weapon_def.as_ref().and_then(|w| {
+        let model = map::read_model(&Path::new("data/model").join(&w.model)).ok()?;
+        let mut verts = Vec::new();
+        let mut uvs = Vec::new();
+        for object in &model.geometries.objects {
+            for od in &object.object_datas {
+                let n = od.faces.face_indices.len().min(od.faces.texture_indices.len());
+                for k in 0..n {
+                    let (i0, i1, i2) = od.faces.face_indices[k];
+                    let (t0, t1, t2) = od.faces.texture_indices[k];
+                    for (i, t) in [(i0, t0), (i1, t1), (i2, t2)] {
+                        let v = &object.vertices[i as usize];
+                        verts.push([v.x, v.y, v.z]);
+                        let uv = &od.texture_vertices.uv_coords[t as usize];
+                        uvs.push([uv.u, uv.v]);
+                    }
+                }
+            }
+        }
+        let material = model.materials.materials.first()?.filename.clone();
+        let stem = Path::new(&material).file_stem()?.to_string_lossy().to_string();
+        let texture = find_file(Path::new("data/texture"), &stem, "rsb")
+            .and_then(|p| rsb::read(&p).ok())
+            .and_then(|t| upload_rsb_to_gl(&t));
+        println!("loaded weapon {} ({} triangles, texture {})", w.model, verts.len() / 3, if texture.is_some() { "ok" } else { "missing" });
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for v in &verts {
+            for a in 0..3 {
+                lo[a] = lo[a].min(v[a]);
+                hi[a] = hi[a].max(v[a]);
+            }
+        }
+        let center = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+        let length = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f32::max).max(1.0);
+        Some(WeaponDraw { verts, uvs, texture, muzzle: w.muzzle, center, length })
+    });
+
+    // Bullet holes: the game own sprites, or with --realistic-decals pictures drawn for each surface
+    const HOLE_VARIANTS: usize = 6;
+    let mut hole_tex: HashMap<(Surface, usize), u32> = HashMap::new();
+    if args.realistic_decals {
+        for surface in [Surface::Concrete, Surface::Wood, Surface::Metal, Surface::Earth, Surface::Soft] {
+            for v in 0..HOLE_VARIANTS {
+                let seed = 0x1000 + (v as u64) * 7919 + surface as u64 * 104729;
+                let px = impact::hole_texture(surface, seed);
+                if let Some(id) = upload_rgba_to_gl(impact::TEXTURE_SIZE as u32, impact::TEXTURE_SIZE as u32, &px) {
+                    hole_tex.insert((surface, v), id);
+                }
+            }
+        }
+    } else {
+        for (surface, stem) in [(Surface::Wood, "SP_wood_hit_1"), (Surface::Concrete, "Bullet_hole_simple_1")] {
+            let sprite = find_file(Path::new("data/texture"), stem, "rsb").and_then(|p| rsb::read(&p).ok());
+            if let Some(t) = sprite {
+                let mut px = t.to_rgba8();
+                impact::key_alpha(&mut px, t.width as usize, t.height as usize);
+                if let Some(id) = upload_rgba_to_gl(t.width as u32, t.height as u32, &px) {
+                    hole_tex.insert((surface, 0), id);
+                }
+            }
+        }
+    }
+    // Soft clouds for dust and a bright sprite for the flash of a spark
+    let cloud_tex = find_file(Path::new("data/texture"), "TGAdirt_cloud", "rsb").and_then(|p| rsb::read(&p).ok()).and_then(|t| upload_rsb_to_gl(&t));
+    // The flash sprite sits on a flat colour, which would show as a square, so key it out
+    let flash_tex = find_file(Path::new("data/texture"), "Sparks1", "rsb").and_then(|p| rsb::read(&p).ok()).and_then(|t| {
+        let mut px = t.to_rgba8();
+        impact::key_alpha(&mut px, t.width as usize, t.height as usize);
+        upload_rgba_to_gl(t.width as u32, t.height as u32, &px)
+    });
+    let mut decals: Vec<impact::Decal> = Vec::new();
+    let mut effects = impact::Effects::default();
+    const MAX_DECALS: usize = 300;
+
+    // Where the weapon sits relative to the right hand. Calibrated so that in the
+    // weapon-ready idle pose the gun points the way the body faces (the model's
+    // forward is -Y and up is +Z, so it turns -90 degrees about X to face +Z with
+    // +Y up); from then on it just follows the hand. `--weapon-offset` shifts the
+    // grip, in body space at that pose.
+    let weapon_attach: Option<(usize, skeleton::Transform)> = (|| {
+        let (skel, _) = rig.as_ref()?;
+        let hand = skel.bones.iter().position(|b| b.name == "RightHand")?;
+        let (root, rots) = player_motions.get(Movement::Idle)?.sample(0.0);
+        let q = skel.pose([0.0, root[1], 0.0], &rots)[hand].rot;
+        let conj = [-q[0], -q[1], -q[2], q[3]];
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        Some((hand, skeleton::Transform {
+            rot: motion::quat_mul(conj, [-h, 0.0, 0.0, h]),
+            pos: motion::quat_rotate(conj, args.weapon_offset.unwrap_or([0.0, 0.0, 0.0])),
+        }))
+    })();
+
+    // One GL texture per part, from the character's own directory
+    let part_textures: Vec<Option<u32>> = character.as_ref().map_or_else(Vec::new, |c| {
+        let dir = model_path.parent().unwrap_or(Path::new("."));
+        let mut cache: HashMap<String, Option<u32>> = HashMap::new();
+        c.parts.iter().map(|part| {
+            *cache.entry(part.material.clone()).or_insert_with(|| {
+                let id = load_character_texture(dir, &part.material);
+                if id.is_none() {
+                    println!("no texture for {}", part.material);
+                }
+                id
+            })
+        }).collect()
+    });
+    // Team members whose faces the models wear: --actor picks one, otherwise
+    // they are dealt out in turn
+    let mut actors = actor::read_all(Path::new("data/actor"));
+    if let Some(name) = &args.actor {
+        actors.retain(|a| a.id.eq_ignore_ascii_case(name));
+        if actors.is_empty() {
+            eprintln!("no actor named {name}");
+        }
+    }
+    // GL textures for each actor's HRT face: (main, blink)
+    let faces_dir = Path::new("data/texture/faces");
+    let face_textures: Vec<(Option<u32>, Option<u32>)> = actors.iter().map(|a| {
+        let load = |p: &Path| rsb::read(p).ok().and_then(|t| upload_rsb_to_gl(&t));
+        let found = a.hrt_face.as_deref().and_then(|f| actor::find_face_textures(faces_dir, f));
+        match found {
+            Some((main, blink)) => (load(&main), blink.and_then(|b| load(&b))),
+            None => (None, None),
+        }
+    }).collect();
+
+    struct ModelSpot {
+        health: combat::Health,
+        pos: [f32; 3],
+        floor: f32,
+        yaw: f32,
+        actor: Option<usize>,
+        blink_offset: f32,
+    }
+    let mut model_spots: Vec<ModelSpot> = Vec::new();
+    if let (false, Some(c)) = (args.no_models, &character) {
+        let feet_to_origin = -c.bounds().0[1];
+        for (n, (i, p)) in mission_spawns.iter().enumerate().filter(|(i, _)| own_spawn != Some(*i)).enumerate() {
+            let floor = world.ground_at(p[0], p[2], p[1] + 100.0).unwrap_or(p[1]);
+            let actor = (!actors.is_empty()).then(|| n % actors.len());
+            let scale_y = actor.map_or(1.0, |a| actors[a].scale[1]);
+            model_spots.push(ModelSpot {
+                health: combat::Health::new(),
+                pos: [p[0], floor + feet_to_origin * scale_y, p[2]],
+                floor,
+                // Spread facing directions deterministically by spawn index
+                yaw: args.model_yaw.unwrap_or(i as f32 * 137.5),
+                actor,
+                blink_offset: i as f32 * 0.73,
+            });
+        }
+    }
+
+    // Pose a character for its state: idling, reacting to a hit or dead
+    let npc_verts = |npc: &ModelSpot, now: f32| -> Vec<[f32; 3]> {
+        let (Some(c), Some((skel, skin))) = (&character, &rig) else { return Vec::new() };
+        let (name, frame, looping): (&str, f32, bool) = match npc.health.state {
+            combat::NpcState::Idle => (
+                idle_name.as_str(),
+                args.anim_frame.unwrap_or_else(|| now * args.anim_fps.unwrap_or(30.0) + npc.blink_offset * 9.0),
+                true,
+            ),
+            combat::NpcState::Reacting { motion, start } => (motion, (now - start) * 30.0, false),
+            combat::NpcState::Dead { motion, start } => (motion, (now - start) * 30.0, false),
+        };
+        let Some(mot) = npc_motions.get(name).or_else(|| npc_motions.get(idle_name.as_str())) else {
+            return c.vertices.clone();
+        };
+        let frames = mot.frames.max(1) as f32;
+        let f = if looping { frame % frames } else { frame.min(frames - 1.0) };
+        let (root, rots) = mot.sample(f);
+        // Hit and death motions carry the body along with them
+        let k0 = mot.keys[0].root;
+        let (dx, dz) = if looping { (0.0, 0.0) } else { (root[0] - k0[0], root[2] - k0[2]) };
+        skin.apply(&skel.pose([dx, root[1], dz], &rots))
+    };
+    let placement = |npc: &ModelSpot| combat::Placement {
+        pos: [npc.pos[0], if rig.is_some() { npc.floor } else { npc.pos[1] }, npc.pos[2]],
+        yaw_deg: npc.yaw,
+        scale: npc.actor.map_or([1.0; 3], |a| actors[a].scale),
+    };
+
+    if let Some(p) = args.pos { camera.position = p; }
+    if let Some(y) = args.yaw { camera.yaw = y; }
+    if let Some(p) = args.pitch { camera.pitch = p.clamp(-89.0, 89.0); }
+
+    let mut last_cursor_pos = None;
     window.set_cursor_mode(CursorMode::Disabled);
 
     let mut render_time = Instant::now();
-    let mut prev_frame = Instant::now();
+    let mut last_step = Instant::now();
 
-    let mut keys = std::collections::HashSet::new();
-    let mut textures: HashMap<String, u32> = HashMap::new();
-    let mut textured = false;
-    let mut first_person = false;
-    let mut planning_level_index: usize = 0;
-    let mut show_portals = false;
-    let mut show_collisions = false;
-    let eye_height: f32 = 25.0;
-
-    // Base movement speed scales with map size
-    // let base_speed = (mesh.radius / 200.0).max(0.01);
+    let mut keys = HashSet::new();
+    let mut textures = HashMap::new();
+    let mut textured = args.textured;
+    let mut first_person = args.first_person;
+    let mut planning_level_index = 0;
+    let mut show_portals = args.portals;
+    let mut show_collisions = args.collisions;
+    let mut blink_enabled = !args.no_blink;
+    // Combat state; times are in game seconds
+    let mut game_time = 0.0f32;
+    // Sound is optional: no output device just means silence
+    let mut sound = if args.no_sound { None } else { sound::Sound::open("data/sound") };
+    if let Some(snd) = sound.as_mut() {
+        snd.master = args.volume.unwrap_or(1.0).clamp(0.0, 1.0);
+    }
+    // The level's ambient loops and spot sounds, which follow the rooms the player is in
+    let mut ambience = ambience::read(&map_path.with_extension("ass"))
+        .map(ambience::Ambience::new)
+        .filter(|_| sound.is_some());
+    // Full auto: a sustained firing sound that runs while the trigger is held
+    let mut firing_sound: Option<rodio::Player> = None;
+    let mut was_reloading = false;
+    let mut step_phase = 0i32;
+    let mut trigger = false;
+    // Right mouse button held: walk instead of the default run
+    let mut walk_held = false;
+    let (mag_size, mut reserve) = weapon_def.as_ref().map_or((30, 900), |w| (w.magazine, w.reserve));
+    let mut ammo = mag_size;
+    let mut reload_until: Option<f32> = None;
+    let mut next_shot = 0.0f32;
+    let mut kills = 0u32;
+    let mut message = (String::new(), 0.0f32);
+    let mut target_hp: Option<f32> = None;
+    let mut flash_until = 0.0f32;
+    // Last shot: start, end, whether it struck a character, and when it fades
+    let mut tracer: Option<([f32; 3], [f32; 3], bool, f32)> = None;
+    let mut rng = args.seed.unwrap_or(0x5eed) | 1;
+    let mut third_person = args.third_person;
+    let mut movement = Movement::Idle;
+    let mut player_frame = 0.0f32;
+    let start_time = Instant::now();
+    let eye_height = world.params().eye_height;
+    // Player body in MAP space; the camera is at the eyes with Z negated
+    let mut player = Player::new([
+        camera.position[0],
+        camera.position[1] - eye_height,
+        -camera.position[2],
+    ]);
     let base_speed = 7.5;
+    let mut frames_drawn = 0u32;
 
     while !window.should_close() {
         glfw.poll_events();
@@ -144,7 +817,9 @@ fn main() {
             match event {
                 WindowEvent::Key(key, _, action, _) => {
                     match (key, action) {
-                        (Key::Escape, Action::Press) | (Key::Q, Action::Press) => window.set_should_close(true), // Escape or 'q' to quit
+                        (Key::Escape, Action::Press) => {
+                            window.set_should_close(true)
+                        }
                         (Key::T, Action::Press) => {
                             textured = !textured;
                         }
@@ -159,21 +834,27 @@ fn main() {
                         (Key::C, Action::Press) => {
                             show_collisions = !show_collisions;
                         }
+                        (Key::B, Action::Press) => {
+                            blink_enabled = !blink_enabled;
+                        }
                         (Key::F, Action::Press) => {
+                            third_person = !third_person;
+                        }
+                        (Key::R, Action::Press) => {
+                            // Reload: takes time, then fills the magazine from the reserve
+                            if first_person && reload_until.is_none() && ammo < mag_size && reserve > 0 {
+                                reload_until = Some(game_time + RELOAD_SECONDS);
+                            }
+                        }
+                        (Key::F1, Action::Press) => {
                             first_person = !first_person;
                             if first_person {
-                                let room_idx = select_current_room(&rt_index, &level, camera.position[0], camera.position[2]);
-                                if let Some(gy) = find_ground_y_indexed(
-                                    &level,
-                                    &rt_index,
-                                    room_idx,
+                                // Drop in from wherever the camera is
+                                player = Player::new([
                                     camera.position[0],
-                                    camera.position[2],
-                                    camera.position[1],
-                                    None,
-                                ) {
-                                    camera.position[1] = gy + eye_height;
-                                }
+                                    camera.position[1] - eye_height,
+                                    -camera.position[2],
+                                ]);
                             }
                         }
                         (k, Action::Press) => {
@@ -198,12 +879,18 @@ fn main() {
                 WindowEvent::FramebufferSize(width, height) => {
                     unsafe { glViewport(0, 0, width, height); }
                 }
+                WindowEvent::MouseButton(glfw::MouseButton::Button1, action, _) => {
+                    trigger = action != Action::Release;
+                }
+                WindowEvent::MouseButton(glfw::MouseButton::Button2, action, _) => {
+                    walk_held = action != Action::Release;
+                }
                 WindowEvent::Scroll(_x, y) => {
                     if !first_person {
                         let scroll = y as f32;
                         if scroll != 0.0 {
                             let dir = camera.get_forward();
-                            let zoom_speed = base_speed * 5.0;
+                            let zoom_speed = base_speed * 10.0;
                             camera.position[0] += dir[0] * zoom_speed * scroll;
                             camera.position[1] += dir[1] * zoom_speed * scroll;
                             camera.position[2] += dir[2] * zoom_speed * scroll;
@@ -214,55 +901,306 @@ fn main() {
             }
         }
 
-        // WASD movement (hold LeftShift to move faster)
+        if let Some(n) = args.walk {
+            // --hold picks the keys to press: W A S D, and R for walk (right mouse button)
+            let held = args.hold.as_deref().unwrap_or("W").to_ascii_uppercase();
+            trigger = frames_drawn < n && held.contains('F');
+            // L starts a reload on the first frame (for testing the animation)
+            if held.contains('L') && frames_drawn == 0 {
+                ammo = 10;
+                reload_until = Some(game_time + RELOAD_SECONDS);
+            }
+            walk_held = frames_drawn < n && held.contains('R');
+            for (ch, key) in [('W', Key::W), ('A', Key::A), ('S', Key::S), ('D', Key::D)] {
+                if frames_drawn < n && held.contains(ch) { keys.insert(key); } else { keys.remove(&key); }
+            }
+            if frames_drawn % 10 == 0 {
+                println!("frame {frames_drawn:4} feet=({:.1}, {:.1}, {:.1}) on_ground={} movement={movement:?} anim_frame={player_frame:.1}",
+                    player.pos[0], player.pos[1], player.pos[2], player.on_ground);
+            }
+        }
+
+        // WASD movement (free-fly: hold LeftShift to move faster)
         let mut speed = base_speed;
         if keys.contains(&Key::LeftShift) {
             speed *= 5.0;
         }
-        let prev_pos = camera.position;
         let right = camera.get_right();
         let yaw_rad = camera.yaw.to_radians();
         let fwd_flat = [-yaw_rad.sin(), 0.0, -yaw_rad.cos()];
+        // Desired horizontal displacement for this frame, in camera space
+        let mut mv = [0.0f32; 2];
         if keys.contains(&Key::W) {
-            camera.position[0] += fwd_flat[0] * speed;
-            camera.position[2] += fwd_flat[2] * speed;
+            mv[0] += fwd_flat[0] * speed;
+            mv[1] += fwd_flat[2] * speed;
         }
         if keys.contains(&Key::S) {
-            camera.position[0] -= fwd_flat[0] * speed;
-            camera.position[2] -= fwd_flat[2] * speed;
+            mv[0] -= fwd_flat[0] * speed;
+            mv[1] -= fwd_flat[2] * speed;
         }
         if keys.contains(&Key::A) {
-            camera.position[0] -= (right[0] * speed) / 2.0;
-            camera.position[2] -= (right[2] * speed) / 2.0;
+            mv[0] -= (right[0] * speed) / 2.0;
+            mv[1] -= (right[2] * speed) / 2.0;
         }
         if keys.contains(&Key::D) {
-            camera.position[0] += (right[0] * speed) / 2.0;
-            camera.position[2] += (right[2] * speed) / 2.0;
+            mv[0] += (right[0] * speed) / 2.0;
+            mv[1] += (right[2] * speed) / 2.0;
         }
 
-        // Resolve wall collisions in first-person mode
-        if first_person {
-            let room_idx = select_current_room(&rt_index, &level, camera.position[0], camera.position[2]);
-            let foot_y = camera.position[1] - eye_height;
-            let adjusted = resolve_walls_indexed(&level, &rt_index, room_idx, prev_pos, camera.position, foot_y, 30.0);
-            camera.position[0] = adjusted[0];
-            camera.position[2] = adjusted[2];
+        // Time since the previous step, measured here so it covers render and vsync
+        let raw_dt = last_step.elapsed().as_secs_f32();
+        let real_dt = raw_dt.min(0.05);
+        last_step = Instant::now();
+        let step_dt = if args.walk.is_some() { 1.0 / 60.0 } else { real_dt };
+        game_time += step_dt;
+        // Finish a reload
+        if reload_until.is_some_and(|t| game_time >= t) {
+            let take = (mag_size - ammo).min(reserve);
+            ammo += take;
+            reserve -= take;
+            reload_until = None;
         }
-
-        // Snap to ground in first-person mode
-        if first_person {
-            let room_idx = select_current_room(&rt_index, &level, camera.position[0], camera.position[2]);
-            if let Some(ground_y) = find_ground_y_indexed(
-                &level,
-                &rt_index,
-                room_idx,
-                camera.position[0],
-                camera.position[2],
-                camera.position[1],
-                None,
-            ) {
-                camera.position[1] = ground_y + eye_height;
+        // Injury reactions end and the character goes back to idling
+        for npc in model_spots.iter_mut() {
+            if let combat::NpcState::Reacting { motion, start } = npc.health.state {
+                let frames = npc_motions.get(motion).map_or(1, |m| m.frames) as f32;
+                if (game_time - start) * 30.0 >= frames {
+                    npc.health.state = combat::NpcState::Idle;
+                }
             }
+        }
+
+        if first_person {
+            // Speeds are map units per second, scaled by dt so the walk speed
+            // does not depend on the frame rate
+            let dt = step_dt;
+            // Walking speeds come from the animations so the feet do not slide;
+            // free-fly keeps its fast debug speeds
+            let (w, a, s_, d, run) = (
+                keys.contains(&Key::W), keys.contains(&Key::A), keys.contains(&Key::S),
+                keys.contains(&Key::D), !walk_held,
+            );
+            let scale = args.speed_scale.unwrap_or(1.0);
+            let fwd_speed = scale * if w == s_ { 0.0 }
+                else if w { ground_speed(if run { Movement::Run } else { Movement::Walk }) }
+                else { -ground_speed(Movement::Back) };
+            let side_speed = scale * if a == d { 0.0 }
+                else if d { ground_speed(Movement::StrafeRight) } else { -ground_speed(Movement::StrafeLeft) };
+            let mut vel = [
+                fwd_flat[0] * fwd_speed + right[0] * side_speed,
+                fwd_flat[2] * fwd_speed + right[2] * side_speed,
+            ];
+            // Moving diagonally is no faster than the faster of the two
+            let (len, cap) = ((vel[0] * vel[0] + vel[1] * vel[1]).sqrt(), fwd_speed.abs().max(side_speed.abs()));
+            if len > cap && len > 0.0 {
+                vel = [vel[0] / len * cap, vel[1] / len * cap];
+            }
+
+            let before = player.pos;
+            world.step(&mut player, [vel[0] * dt, -vel[1] * dt], dt);
+
+            // Choose the animation from what the player is trying to do, and
+            // play it at the pace the player actually moved (a wall stops it)
+            let wanted = movement_from_keys(
+                keys.contains(&Key::W), keys.contains(&Key::S),
+                keys.contains(&Key::A), keys.contains(&Key::D),
+                !walk_held,
+            );
+            let moved = ((player.pos[0] - before[0]).powi(2) + (player.pos[2] - before[2]).powi(2)).sqrt() / dt.max(1e-4);
+            // A wall stops the walking animation; standing still can fire or reload
+            let walking = wanted != Movement::Idle && moved >= 5.0;
+            let now = if walking {
+                wanted
+            } else if reload_until.is_some() {
+                Movement::Reload
+            } else if trigger && ammo > 0 {
+                Movement::Fire
+            } else {
+                Movement::Idle
+            };
+            if now != movement {
+                movement = now;
+                player_frame = 0.0;
+            }
+            let rate = if matches!(movement, Movement::Idle | Movement::Fire | Movement::Reload) { 1.0 } else { (moved / (ground_speed(movement) * args.speed_scale.unwrap_or(1.0))).clamp(0.5, 3.0) * args.anim_scale.unwrap_or(1.5) };
+            let frames = player_motions.get(movement).map_or(1, |m| m.frames.max(1)) as f32;
+            player_frame = if let (Movement::Reload, Some(t)) = (movement, reload_until) {
+                // Spread the reload animation across the whole reload time
+                (1.0 - (t - game_time) / RELOAD_SECONDS).clamp(0.0, 1.0) * (frames - 1.0)
+            } else {
+                (player_frame + rate * 30.0 * dt) % frames
+            };
+            // A footstep at the start of each half of a walk or run cycle
+            let phase = (player_frame / (frames / 2.0).max(1.0)) as i32;
+            if phase != step_phase {
+                step_phase = phase;
+                if walking && player.on_ground {
+                    if let Some(snd) = sound.as_mut() {
+                        snd.play(if movement == Movement::Run { "F_HRCON1.WAV" } else { "F_HWCON1.WAV" }, 1.0);
+                    }
+                }
+            }
+            camera.position = [
+                player.pos[0],
+                player.pos[1] + eye_height,
+                -player.pos[2],
+            ];
+
+            // Shooting: a ray from the eye along the view, stopped by walls
+            if trigger && reload_until.is_none() && ammo == 0 && reserve > 0 {
+                reload_until = Some(game_time + RELOAD_SECONDS);
+            }
+            if trigger && reload_until.is_none() && ammo > 0 && game_time >= next_shot {
+                ammo -= 1;
+                next_shot = game_time + 60.0 / 800.0; // the MP5K fires about 800 rounds a minute
+                flash_until = game_time + 0.05;
+
+                let eye = [player.pos[0], player.pos[1] + eye_height, player.pos[2]];
+                let f = camera.get_forward();
+                let dir = [f[0], f[1], -f[2]]; // camera space to MAP space
+                let mut wall = world.raycast(eye, dir, 20000.0);
+
+                let mut best: Option<(usize, combat::Hit)> = None;
+                if let (Some(c), Some((skel, skin))) = (&character, &rig) {
+                    for (i, npc) in model_spots.iter().enumerate() {
+                        if npc.health.is_dead() {
+                            continue;
+                        }
+                        let verts = npc_verts(npc, game_time);
+                        if let Some(h) = combat::raycast_character(c, skel, skin, &verts, &placement(npc), eye, dir) {
+                            if best.map_or(true, |(_, b)| h.distance < b.distance) {
+                                best = Some((i, h));
+                            }
+                        }
+                    }
+                }
+
+                // Glass in the way breaks and lets the bullet through
+                loop {
+                    let glass_hit = panes.iter().enumerate()
+                        .filter(|(i, _)| broken_at[*i].is_none())
+                        .filter_map(|(i, p)| p.raycast(eye, dir).map(|d| (i, d)))
+                        .min_by(|a, b| a.1.total_cmp(&b.1));
+                    let Some((gi, gd)) = glass_hit else { break };
+                    // Something solid, or a character, is in front of the glass
+                    if wall.is_some_and(|w| w < gd - 0.5) || best.as_ref().is_some_and(|(_, h)| h.distance < gd) {
+                        break;
+                    }
+                    broken_at[gi] = Some(game_time);
+                    world.switch_off(&panes[gi].name);
+                    rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                    let at = [eye[0] + dir[0] * gd, eye[1] + dir[1] * gd, eye[2] + dir[2] * gd];
+                    fractures.push(glass::shatter(&panes[gi], at, dir, rng));
+                    println!("t={game_time:.2} shot broke glass {}", panes[gi].name);
+                    if let Some(snd) = sound.as_mut() {
+                        snd.play_at("C_GBRKMD.WAV", panes[gi].center(), listener_of(&camera), 1.0);
+                    }
+                    wall = world.raycast(eye, dir, 20000.0);
+                }
+
+                let start = [eye[0] + dir[0] * 30.0, eye[1] + dir[1] * 30.0 - 8.0, eye[2] + dir[2] * 30.0];
+                match best {
+                    Some((i, hit)) if wall.map_or(true, |w| hit.distance <= w) => {
+                        rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                        let result = model_spots[i].health.apply_hit(&hit, game_time, (rng >> 33) as u32);
+                        target_hp = Some(model_spots[i].health.hp);
+                        println!("t={game_time:.2} shot hit character {i}: {:?} from the {:?}, {:?}, hp now {}", hit.part, hit.facing, result, model_spots[i].health.hp);
+                        message = (match result {
+                            combat::HitResult::Killed => {
+                                kills += 1;
+                                if hit.part == combat::BodyPart::Head { "HEAD SHOT KILL".to_string() } else { "KILLED".to_string() }
+                            }
+                            _ => format!("HIT {:?}", hit.part).to_uppercase(),
+                        }, game_time + 1.2);
+                        if let Some(snd) = sound.as_mut() {
+                            let listener = listener_of(&camera);
+                            snd.play_at("C_BHTHT.WAV", hit.point, listener, 1.0);
+                            // Voices: a grunt when hurt, a cry when killed
+                            let (name, n) = if matches!(result, combat::HitResult::Killed) { ("re_ded", 2) } else { ("re_wnd", 3) };
+                            let pick = 1 + (rng >> 40) as u32 % n;
+                            snd.play_at(&format!("English/{name}{pick}.wav"), model_spots[i].pos, listener, 1.0);
+                        }
+                        tracer = Some((start, hit.point, true, game_time + 0.1));
+                    }
+                    _ => {
+                        // The bullet struck the level: leave a hole and throw some debris
+                        if let Some(hit) = wall.and_then(|_| world.raycast_hit(eye, dir, 20000.0)) {
+                            let point = [eye[0] + dir[0] * hit.dist, eye[1] + dir[1] * hit.dist, eye[2] + dir[2] * hit.dist];
+                            let surface = hit.material
+                                .and_then(|m| level.materials.materials.get(m))
+                                .map_or(Surface::Concrete, |m| Surface::classify(&m.filename));
+                            let surface = args.decal_surface.unwrap_or(surface);
+                            let material = hit.material.and_then(|m| level.materials.materials.get(m)).map_or("?", |m| m.filename.as_str());
+                            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                            let mut sparked = false;
+                            if args.realistic_decals {
+                                sparked = effects.impact(surface, point, hit.normal, dir, rng);
+                            }
+                            println!("t={game_time:.2} shot hit {surface:?} ({material}) at {:.0} units{}", hit.dist, if sparked { ", sparks" } else { "" });
+                            if surface != Surface::Glass {
+                                let (art, variant) = if args.realistic_decals {
+                                    (surface, (rng >> 33) as usize % HOLE_VARIANTS)
+                                } else {
+                                    (if surface == Surface::Wood { Surface::Wood } else { Surface::Concrete }, 0)
+                                };
+                                if hole_tex.contains_key(&(art, variant)) {
+                                    let roll = ((rng >> 20) & 0xFFFF) as f32 / 65536.0;
+                                    decals.push(impact::Decal::new(point, hit.normal, art, args.realistic_decals, variant, roll));
+                                    if decals.len() > MAX_DECALS {
+                                        decals.remove(0);
+                                    }
+                                }
+                            }
+                            if let Some(snd) = sound.as_mut() {
+                                let name = match surface {
+                                    _ if sparked => if rng & 1 == 0 { "C_BLRIC1.WAV" } else { "C_BLRIC2.WAV" },
+                                    Surface::Wood => "C_BLWOD.WAV",
+                                    Surface::Metal => if rng & 1 == 0 { "C_BLMTTK.WAV" } else { "C_BLMTTN.WAV" },
+                                    Surface::Earth => "C_BLEAR.WAV",
+                                    _ => "C_BLCON.WAV",
+                                };
+                                snd.play_at(name, point, listener_of(&camera), 1.0);
+                            }
+                        }
+                        let d = wall.unwrap_or(5000.0);
+                        tracer = Some((start, [eye[0] + dir[0] * d, eye[1] + dir[1] * d, eye[2] + dir[2] * d], false, game_time + 0.1));
+                    }
+                }
+            }
+        } else {
+            // mv is per-frame at 60 FPS; scale so free-fly speed does not depend on frame rate
+            camera.position[0] += mv[0] * step_dt * 60.0;
+            camera.position[2] += mv[1] * step_dt * 60.0;
+        }
+
+        // Reload sound when a reload starts (by key or running dry)
+        if reload_until.is_some() && !was_reloading {
+            if let Some(snd) = sound.as_mut() {
+                snd.play("C_SBMAG1.WAV", 1.0);
+            }
+        }
+        was_reloading = reload_until.is_some();
+
+        // Full auto: the firing sound runs while the trigger is held with rounds to fire,
+        // then stops with a closing crack
+        let firing = first_person && trigger && reload_until.is_none() && ammo > 0;
+        if let Some(snd) = sound.as_mut() {
+            if firing && firing_sound.is_none() {
+                firing_sound = snd.play_loop("C_SB5KB.WAV", 1.0);
+            } else if !firing && firing_sound.take().is_some() {
+                snd.play("C_SB5KR.WAV", 1.0);
+            }
+        }
+
+        // Ambient sound for the rooms around the player's feet
+        if let (Some(snd), Some(amb)) = (sound.as_mut(), ambience.as_mut()) {
+            let listener = listener_of(&camera);
+            let feet = [listener.pos[0], listener.pos[1] - eye_height, listener.pos[2]];
+            let rooms: Vec<&str> = level.rooms.rooms.iter()
+                .filter(|r| r.contains(feet, 50.0))
+                .map(|r| r.section_name.as_str())
+                .collect();
+            amb.update(snd, &rooms, listener, game_time, step_dt);
         }
 
         // Compute dynamic aspect and clip planes
@@ -272,8 +1210,7 @@ fn main() {
         let z_far = (mesh.radius * 10.0 + 100.0).max(z_near + 1.0);
 
         // Frame timing for FPS
-        let frame_dt = prev_frame.elapsed().as_secs_f32();
-        let fps = if frame_dt > 0.0 { 1.0 / frame_dt } else { 0.0 };
+        let fps = if raw_dt > 0.0 { 1.0 / raw_dt } else { 0.0 };
 
         render_time = Instant::now();
         unsafe {
@@ -284,7 +1221,20 @@ fn main() {
 
             glMatrixMode(0x1700); // GL_MODELVIEW
             glLoadIdentity();
-            apply_camera(&camera);
+            // Third person: pull the view back behind and above the player's eyes
+            let view = if first_person && third_person {
+                // Orbit the view around the player to see them from the side
+                let f = Camera { position: [0.0; 3], yaw: camera.yaw + args.view_orbit, pitch: camera.pitch }.get_forward();
+                let dist = args.view_dist.unwrap_or(220.0);
+                Camera {
+                    position: [camera.position[0] - f[0] * dist, camera.position[1] - f[1] * dist + 40.0, camera.position[2] - f[2] * dist],
+                    yaw: camera.yaw + args.view_orbit,
+                    pitch: camera.pitch,
+                }
+            } else {
+                Camera { position: camera.position, yaw: camera.yaw, pitch: camera.pitch }
+            };
+            apply_camera(&view);
             glScalef(1.0, 1.0, -1.0);
 
             // Combined
@@ -302,6 +1252,10 @@ fn main() {
                 let use_filter = false; // !level.planning_levels.levels.is_empty();
                 // Iterate map geometry by material groups
                 for object in &level.geometries.objects {
+                    // Panes are drawn in place below
+                    if panes.iter().any(|g| g.name == object.name) {
+                        continue;
+                    }
                     for od in &object.object_datas {
                         if use_filter {
                             let rooms = &level.planning_levels.levels[planning_level_index].room_names;
@@ -333,21 +1287,15 @@ fn main() {
                                 let uv1 = &od.texture_vertices.uv_coords[t1 as usize];
                                 let uv2 = &od.texture_vertices.uv_coords[t2 as usize];
 
-                                // Flip V to match OpenGL texture origin
                                 if textured {
-                                    glTexCoord2f(uv0.u, 1.0 - uv0.v);
+                                    glTexCoord2f(uv0.u, uv0.v); glVertex3f(p0.x, p0.y, p0.z);
+                                    glTexCoord2f(uv1.u, uv1.v); glVertex3f(p1.x, p1.y, p1.z);
+                                    glTexCoord2f(uv2.u, uv2.v); glVertex3f(p2.x, p2.y, p2.z);
+                                } else {
+                                    glVertex3f(p0.x, p0.y, p0.z);
+                                    glVertex3f(p1.x, p1.y, p1.z);
+                                    glVertex3f(p2.x, p2.y, p2.z);
                                 }
-                                glVertex3f(p0.x, p0.y, p0.z);
-
-                                if textured {
-                                    glTexCoord2f(uv1.u, 1.0 - uv1.v);
-                                }
-                                glVertex3f(p1.x, p1.y, p1.z);
-
-                                if textured {
-                                    glTexCoord2f(uv2.u, 1.0 - uv2.v);
-                                }
-                                glVertex3f(p2.x, p2.y, p2.z);
                             }
                             glEnd();
                         }
@@ -355,98 +1303,184 @@ fn main() {
                 }
             }
 
-            /*
-            // Draw either textured geometry or wireframe triangles
-            if textured {
-                // Textured mode
-                glEnable(0x0DE1); // GL_TEXTURE_2D
-                glPolygonMode(0x0408, 0x1B02); // GL_FRONT_AND_BACK, GL_FILL
-
-                // Determine which room names are active for this planning level (if any)
-                let use_filter = false; // !level.planning_levels.levels.is_empty();
-                // Iterate map geometry by material groups
-                for object in &level.geometries.objects {
-                    for od in &object.object_datas {
-                        if use_filter {
-                            let rooms = &level.planning_levels.levels[planning_level_index].room_names;
-                            if !rooms.iter().any(|r| r == &object.name) {
-                                continue;
-                            }
-                        }
-                        let mat_index = od.mn as usize;
-                        if let Some(tex_id) = ensure_texture(&level.materials, mat_index, &map_num, &mut textures) {
-                            // TODO put all faces with same tex-id together so I can bind once
-                            glBindTexture(0x0DE1, tex_id); // GL_TEXTURE_2D
-
-                            // Faces and UVs are parallel arrays
-                            let face_count = od.faces.face_indices.len().min(od.faces.texture_indices.len());
-                            if face_count == 0 {
-                                continue;
-                            }
-
-                            glBegin(0x0004); // GL_TRIANGLES
-                            for i in 0..face_count {
-                                let (i0, i1, i2) = od.faces.face_indices[i];
-                                let (t0, t1, t2) = od.faces.texture_indices[i];
-
-                                let p0 = &object.vertices[i0 as usize];
-                                let p1 = &object.vertices[i1 as usize];
-                                let p2 = &object.vertices[i2 as usize];
-
-                                let uv0 = &od.texture_vertices.uv_coords[t0 as usize];
-                                let uv1 = &od.texture_vertices.uv_coords[t1 as usize];
-                                let uv2 = &od.texture_vertices.uv_coords[t2 as usize];
-
-                                // Flip V to match OpenGL texture origin
-                                glTexCoord2f(uv0.u, 1.0 - uv0.v);
-                                glVertex3f(p0.x, p0.y, p0.z);
-
-                                glTexCoord2f(uv1.u, 1.0 - uv1.v);
-                                glVertex3f(p1.x, p1.y, p1.z);
-
-                                glTexCoord2f(uv2.u, 1.0 - uv2.v);
-                                glVertex3f(p2.x, p2.y, p2.z);
-                            }
-                            glEnd();
-                        }
-                    }
-                }
-            } else {
-                // Wireframe mode, filtered by current planning level rooms
+            // Characters at the spawn points, posed for what they are doing
+            if let Some(c) = &character {
                 glDisable(0x0DE1); // GL_TEXTURE_2D
-                glPolygonMode(0x0408, 0x1B01); // GL_FRONT_AND_BACK, GL_LINE
+                let clock = start_time.elapsed().as_secs_f32();
+                for spot in &model_spots {
+                    let posed = npc_verts(spot, game_time);
+                    let verts: &[[f32; 3]] = if posed.is_empty() { &c.vertices } else { &posed };
+                    let y = if posed.is_empty() { spot.pos[1] } else { spot.floor };
+                    glPushMatrix();
+                    glTranslatef(spot.pos[0], y, spot.pos[2]);
+                    glRotatef(spot.yaw, 0.0, 1.0, 0.0);
+                    let scale = spot.actor.map_or([1.0; 3], |a| actors[a].scale);
+                    glScalef(scale[0], scale[1], scale[2]);
+                    // Eyes shut for 0.15 s every 4 s, staggered per model; the dead keep them shut
+                    let blinking = args.eyes_closed || spot.health.is_dead()
+                        || (blink_enabled && (clock + spot.blink_offset) % 4.0 < 0.15);
+                    let face = spot.actor.map(|a| face_textures[a]).and_then(|(main, blink)| {
+                        if blinking { blink.or(main) } else { main }
+                    });
+                    draw_character(c, verts, &part_textures, face, textured);
+                    glPopMatrix();
+                }
+                glColor4f(1.0, 1.0, 1.0, 1.0);
+            }
 
-                // Determine which room names are active for this planning level (if any)
-                let use_filter = false; // !level.planning_levels.levels.is_empty();
-                for object in &level.geometries.objects {
-                    if use_filter {
-                        let rooms = &level.planning_levels.levels[planning_level_index].room_names;
-                        if !rooms.iter().any(|r| r == &object.name) {
-                            continue;
+            // The player's own body, shown in third person
+            if let (true, true, Some(c), Some((skel, skin))) = (first_person, third_person, &character, &rig) {
+                if let Some(mot) = player_motions.get(movement) {
+                    let (root, mut rots) = mot.sample(player_frame.min(mot.frames.saturating_sub(1) as f32));
+                    // Moving: legs from the locomotion cycle, upper body keeps the gun hold
+                    if matches!(movement, Movement::Walk | Movement::Run | Movement::Back | Movement::StrafeLeft | Movement::StrafeRight) {
+                        if let Some(hold) = player_motions.get(Movement::Idle) {
+                            let (_, hold_rots) = hold.sample(0.0);
+                            for b in &skel.bones {
+                                if is_upper_body(&b.name) {
+                                    if let (Some(r), Some(h)) = (rots.get_mut(b.anim_index), hold_rots.get(b.anim_index)) { *r = *h; }
+                                }
+                            }
                         }
                     }
+                    let pose = skel.pose([0.0, root[1], 0.0], &rots);
+                    let verts = skin.apply(&pose);
+                    let clock = start_time.elapsed().as_secs_f32();
+                    let blinking = args.eyes_closed || (blink_enabled && clock % 4.0 < 0.15);
+                    let face = (!actors.is_empty()).then(|| face_textures[0]).and_then(|(main, blink)| {
+                        if blinking { blink.or(main) } else { main }
+                    });
+                    glPushMatrix();
+                    glTranslatef(player.pos[0], player.pos[1], player.pos[2]);
+                    // The body faces where the player looks (model forward is +Z)
+                    glRotatef(-camera.yaw, 0.0, 1.0, 0.0);
+                    let scale = actors.first().map_or([1.0; 3], |a| a.scale);
+                    glScalef(scale[0], scale[1], scale[2]);
+                    draw_character(c, &verts, &part_textures, face, textured);
 
-                    for od in &object.object_datas {
-                        let face_count = od.faces.face_indices.len();
-                        if face_count == 0 {
-                            continue;
-                        }
-
-                        glBegin(0x0004); // GL_TRIANGLES
-                        for &(i0, i1, i2) in &od.faces.face_indices {
-                            let p0 = &object.vertices[i0 as usize];
-                            let p1 = &object.vertices[i1 as usize];
-                            let p2 = &object.vertices[i2 as usize];
-
-                            glVertex3f(p0.x, p0.y, p0.z);
-                            glVertex3f(p1.x, p1.y, p1.z);
-                            glVertex3f(p2.x, p2.y, p2.z);
-                        }
-                        glEnd();
+                    // The MP5K in the right hand
+                    if let (Some(wd), Some((hand, off))) = (&weapon_draw, &weapon_attach) {
+                        glPushMatrix();
+                        glMultMatrixf(pose[*hand].matrix().as_ptr());
+                        glMultMatrixf(off.matrix().as_ptr());
+                        draw_weapon(wd, textured, game_time < flash_until);
+                        glPopMatrix();
                     }
+                    glPopMatrix();
+                    glColor4f(1.0, 1.0, 1.0, 1.0);
                 }
             }
-            */
+
+            // Bullet holes on the walls, then the debris thrown from them
+            effects.update(step_dt);
+            if textured && !decals.is_empty() {
+                glEnable(0x0DE1); // GL_TEXTURE_2D
+                glEnable(0x0BE2); // GL_BLEND
+                glBlendFunc(0x0302, 0x0303); // SRC_ALPHA, ONE_MINUS_SRC_ALPHA
+                glEnable(0x8037); // GL_POLYGON_OFFSET_FILL: keeps the hole from flickering against the wall
+                glPolygonOffset(-2.0, -2.0);
+                glDepthMask(0);
+                glColor4f(1.0, 1.0, 1.0, 1.0);
+                for d in &decals {
+                    let Some(&id) = hole_tex.get(&(d.surface, d.variant)) else { continue };
+                    glBindTexture(0x0DE1, id);
+                    glBegin(0x0007); // GL_QUADS
+                    // The top row of the picture is its top edge
+                    for (c, uv) in d.corners().iter().zip([[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]) {
+                        glTexCoord2f(uv[0], uv[1]);
+                        glVertex3f(c[0], c[1], c[2]);
+                    }
+                    glEnd();
+                }
+                glDepthMask(1);
+                glDisable(0x8037);
+                glDisable(0x0BE2);
+            }
+            if !effects.particles.is_empty() || !effects.puffs.is_empty() {
+                let right = listener_of(&camera).right;
+                glEnable(0x0BE2); // GL_BLEND
+                glDepthMask(0);
+                // Soft clouds and the flash of a spark, as sprites facing the camera
+                for puff in &effects.puffs {
+                    let (tex, additive) = match puff.kind {
+                        impact::PuffKind::Dust => (cloud_tex, false),
+                        impact::PuffKind::Flash => (flash_tex, true),
+                    };
+                    let Some(id) = tex else { continue };
+                    glEnable(0x0DE1);
+                    glBindTexture(0x0DE1, id);
+                    glBlendFunc(0x0302, if additive { 1 } else { 0x0303 }); // SRC_ALPHA, ONE or ONE_MINUS_SRC_ALPHA
+                    let a = puff.alpha() * if additive { 1.0 } else { 0.35 };
+                    glColor4f(puff.color[0], puff.color[1], puff.color[2], a);
+                    let h = puff.current_size() / 2.0;
+                    let (p, u) = (puff.pos, [0.0, 1.0, 0.0]);
+                    glBegin(0x0007); // GL_QUADS
+                    for (dx, dy, tu, tv) in [(-1.0, -1.0, 0.0, 1.0), (1.0, -1.0, 1.0, 1.0), (1.0, 1.0, 1.0, 0.0), (-1.0, 1.0, 0.0, 0.0)] {
+                        glTexCoord2f(tu, tv);
+                        glVertex3f(p[0] + right[0] * dx * h + u[0] * dy * h, p[1] + right[1] * dx * h + u[1] * dy * h, p[2] + right[2] * dx * h + u[2] * dy * h);
+                    }
+                    glEnd();
+                }
+                // Splinters, then sparks that glow over everything, then chips
+                glDisable(0x0DE1);
+                for sparks in [false, true] {
+                    glBlendFunc(0x0302, if sparks { 1 } else { 0x0303 });
+                    glLineWidth(if sparks { 1.5 } else { 2.0 });
+                    glBegin(0x0001); // GL_LINES
+                    for pt in effects.particles.iter().filter(|p| (p.kind == impact::Kind::Spark) == sparks && p.kind != impact::Kind::Chip) {
+                        let (a, b) = (pt.tail(), pt.pos);
+                        glColor4f(pt.color[0], pt.color[1], pt.color[2], pt.alpha());
+                        glVertex3f(a[0], a[1], a[2]);
+                        glVertex3f(b[0], b[1], b[2]);
+                    }
+                    glEnd();
+                }
+                glBlendFunc(0x0302, 0x0303);
+                glPointSize(2.5);
+                glBegin(0x0000); // GL_POINTS
+                for pt in effects.particles.iter().filter(|p| p.kind == impact::Kind::Chip) {
+                    glColor4f(pt.color[0], pt.color[1], pt.color[2], pt.alpha());
+                    glVertex3f(pt.pos[0], pt.pos[1], pt.pos[2]);
+                }
+                glEnd();
+                glLineWidth(1.0);
+                glDepthMask(1);
+                glDisable(0x0BE2);
+                glColor4f(1.0, 1.0, 1.0, 1.0);
+            }
+
+            // Glass: intact panes, then the pieces of broken ones falling away
+            for f in fractures.iter_mut() {
+                f.update(step_dt, &|x, z, y| world.ground_at(x, z, y + 30.0));
+            }
+            fractures.retain(|f| !f.done());
+            for (pane, _) in panes.iter().zip(&broken_at).filter(|(_, b)| b.is_none()) {
+                draw_glass(&level.materials, pane.material, &map_num, &mut textures, textured, pane.opacity, pane.tris.iter().map(|t| (t.p, t.uv)));
+            }
+            for f in &fractures {
+                draw_fracture(&level.materials, &map_num, &mut textures, textured, f);
+            }
+
+            // Bullet trail and impact
+            if let Some((a, b, hit, until)) = tracer {
+                if game_time < until {
+                    glDisable(0x0DE1);
+                    glColor4f(1.0, 0.9, 0.4, 1.0);
+                    glBegin(0x0001); // GL_LINES
+                    glVertex3f(a[0], a[1], a[2]);
+                    glVertex3f(b[0], b[1], b[2]);
+                    glEnd();
+                    if hit { glColor4f(1.0, 0.1, 0.1, 1.0); } else { glColor4f(0.9, 0.9, 0.9, 1.0); }
+                    let r = 6.0;
+                    glBegin(0x0001);
+                    for (dx, dy, dz) in [(r, 0.0, 0.0), (0.0, r, 0.0), (0.0, 0.0, r)] {
+                        glVertex3f(b[0] - dx, b[1] - dy, b[2] - dz);
+                        glVertex3f(b[0] + dx, b[1] + dy, b[2] + dz);
+                    }
+                    glEnd();
+                    glColor4f(1.0, 1.0, 1.0, 1.0);
+                }
+            }
 
             // Render portals overlay when toggled
             if show_portals {
@@ -464,59 +1498,49 @@ fn main() {
                 glColor3f(1.0, 1.0, 1.0); // restore default for next pass
             }
 
-            // Render collisions (vertices and face normals) overlay when toggled
+            // Brushes and some collision hints that augment level geometry
             if show_collisions {
                 glDisable(0x0DE1); // GL_TEXTURE_2D
                 glColor3f(1.0, 0.0, 0.0);
-
                 for object in &level.geometries.objects {
-                    // Connect collision vertices in order as a line strip
-                    let verts = &object.collisions.vertices;
-                    if verts.len() >= 2 {
-                        glBegin(0x0003); // GL_LINE_STRIP
-                        for v in verts {
-                            glVertex3f(v.x, v.y, v.z);
-                        }
-                        glEnd();
+                    glPointSize(7.5);
+                    glBegin(0x0000); // GL_POINTS
+                    for v in &object.collisions.vertices {
+                        glVertex3f(v.x, v.y, v.z)
                     }
-
-                    // Draw face normals as short line segments
-                    if !object.collisions.faces.is_empty() {
-                        glBegin(0x0001); // GL_LINES
-                        for face in &object.collisions.faces {
-                            let nx = face.x;
-                            let ny = face.y;
-                            let nz = face.z;
-                            let d = face.distance_origin_to_face;
-
-                            let len = (nx * nx + ny * ny + nz * nz).sqrt();
-                            if len > 1e-6 {
-                                // Closest point on plane to origin for n·p + d = 0:
-                                // p0 = -d * n / |n|^2
-                                let inv_len2 = 1.0 / (len * len);
-                                let px = -d * nx * inv_len2;
-                                let py = -d * ny * inv_len2;
-                                let pz = -d * nz * inv_len2;
-
-                                // Unit normal direction for the segment
-                                let dirx = nx / len;
-                                let diry = ny / len;
-                                let dirz = nz / len;
-
-                                let scale = 200.0f32;
-                                let ex = px + dirx * scale;
-                                let ey = py + diry * scale;
-                                let ez = pz + dirz * scale;
-
-                                glVertex3f(px, py, pz);
-                                glVertex3f(ex, ey, ez);
-                            }
-                        }
-                        glEnd();
-                    }
+                    glEnd();
                 }
-
                 glColor3f(1.0, 1.0, 1.0); // restore default for next pass
+            }
+        }
+
+        // The held weapon in front of the camera, over the scene
+        if let (true, true, false, Some(wd)) = (args.viewmodel, first_person, third_person, &weapon_draw) {
+            let l = wd.length;
+            let [ox, oy, oz] = args.viewmodel_offset.unwrap_or([0.45, -0.45, 1.5]);
+            // Recoil pushes the gun back at the player; a reload dips it out of view
+            let kick = ((flash_until - game_time) / 0.05).clamp(0.0, 1.0) * 0.04 * l;
+            let dip = reload_until.map_or(0.0, |t| {
+                let p = (1.0 - (t - game_time) / RELOAD_SECONDS).clamp(0.0, 1.0);
+                (p * std::f32::consts::PI).sin() * 0.8 * l
+            });
+            unsafe {
+                // Its own depth range, so the gun never sinks into a wall
+                glClear(0x00000100); // GL_DEPTH_BUFFER_BIT
+                glMatrixMode(0x1701); // GL_PROJECTION
+                glLoadIdentity();
+                glu_perspective(45.0, aspect, l * 0.05, l * 20.0); // narrower than the world, as in most shooters
+                glMatrixMode(0x1700); // GL_MODELVIEW
+                glLoadIdentity();
+                glTranslatef(ox * l, oy * l - dip, -oz * l + kick);
+                // Angle the barrel slightly in toward the middle of the view
+                glRotatef(20.0, 0.0, 1.0, 0.0);
+                // Model space (forward -Y, up +Z) to view space (forward -Z, up +Y)
+                glRotatef(180.0, 0.0, 1.0, 0.0);
+                glRotatef(-90.0, 1.0, 0.0, 0.0);
+                glTranslatef(-wd.center[0], -wd.center[1], -wd.center[2]);
+                draw_weapon(wd, textured, game_time < flash_until);
+                glColor4f(1.0, 1.0, 1.0, 1.0);
             }
         }
         // println!("render_time:{:?}", render_time.elapsed());
@@ -530,16 +1554,295 @@ fn main() {
         };
         let fps_text = format!("FPS: {:.1}", fps);
         let render_text = format!("RENDER: {:.2} MS", render_ms);
+        if first_person {
+            let mut status = vec![
+                format!("KILLS: {kills}"),
+                if reload_until.is_some() { "RELOADING".to_string() } else { format!("AMMO: {ammo}/{reserve}") },
+            ];
+            if let Some(hp) = target_hp {
+                status.insert(0, format!("TARGET: {hp:.0}"));
+            }
+            let msg = if game_time < message.1 { message.0.as_str() } else { "" };
+            let marker = tracer.is_some_and(|t| t.2 && game_time < t.3);
+            draw_hud(w, h, &status, msg, marker);
+        }
         draw_debug_text(w, h, &[&level_text, &fps_text, &render_text]);
 
+        // Screenshot mode: capture after a couple of frames so textures are
+        // uploaded and the context has settled, then exit.
+        frames_drawn += 1;
+        if let Some(path) = &args.screenshot {
+            if frames_drawn >= args.walk.map_or(3, |n| n.max(3)) {
+                let (fw, fh) = window.get_framebuffer_size();
+                let rgb = read_framebuffer(fw, fh);
+                match rogue_reborn::png::write_png(path, fw as u32, fh as u32, &rgb) {
+                    Ok(()) => println!("wrote {} ({fw}x{fh})", path.display()),
+                    Err(e) => eprintln!("failed to write screenshot: {e}"),
+                }
+                break;
+            }
+        }
+
         window.swap_buffers();
-        prev_frame = Instant::now();
+        if let Some(max) = args.max_fps {
+            // Sleep most of the remaining frame time, then spin for accuracy
+            let target = std::time::Duration::from_secs_f32(1.0 / max);
+            loop {
+                let left = target.saturating_sub(last_step.elapsed());
+                if left.is_zero() {
+                    break;
+                }
+                if left > std::time::Duration::from_millis(2) {
+                    std::thread::sleep(left - std::time::Duration::from_millis(1));
+                } else {
+                    std::hint::spin_loop();
+                }
+            }
+        }
     }
 }
 
+// Spawn at the centre of a named zone from the multiplayer mission file
+// (data/mission/<MAP>_MUL.mis). Zones appear there as two MAP-space points
+// followed by the quoted zone name, e.g. "ZONE_RM11_COURTYARD". Returns the
+// feet position in MAP space, standing on the floor under the zone's centre.
+fn find_zone_spawn(map_path: &Path, zone: &str, world: &CollisionWorld) -> Option<[f32; 3]> {
+    let stem = map_path.file_stem()?.to_string_lossy().to_uppercase();
+    let mission = Path::new("data/mission").join(format!("{stem}_MUL.mis"));
+    let text = std::fs::read_to_string(mission).ok()?;
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let name = format!("\"ZONE_{stem}_{zone}\"");
+    let at = lines.iter().position(|l| l.starts_with(&name))?;
+    if at < 2 {
+        return None;
+    }
+    let point = |l: &str| -> Option<[f32; 3]> {
+        let v: Vec<f32> = l.split_whitespace().map_while(|n| n.parse().ok()).collect();
+        (v.len() >= 3).then(|| [v[0], v[1], v[2]])
+    };
+    let (a, b) = (point(lines[at - 2])?, point(lines[at - 1])?);
+    let (x, y, z) = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0, (a[2] + b[2]) / 2.0);
+    let floor = world.ground_at(x, z, y + 100.0).unwrap_or(y);
+    Some([x, floor, z])
+}
+
+// Collect the adversarial spawn points (MAP space) from every mission file in
+// data/mission that names this map. The "Number of spawn points" line is
+// followed by that many "x y z" lines. Variants of a mission (_MUL, _MULT)
+// repeat the same points, so duplicates are dropped.
+fn find_mission_spawns(map_path: &Path) -> Vec<[f32; 3]> {
+    let mut points: Vec<[f32; 3]> = Vec::new();
+    let Some(map_name) = map_path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+        return points;
+    };
+    let Ok(dir) = std::fs::read_dir("data/mission") else { return points };
+    let mut files: Vec<PathBuf> = dir.flatten().map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("mis")))
+        .collect();
+    files.sort();
+
+    for file in files {
+        let Ok(bytes) = std::fs::read(&file) else { continue };
+        let text = String::from_utf8_lossy(&bytes);
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+
+        // The first quoted string in the file is the map filename
+        let named = lines.iter().find_map(|l| {
+            let rest = l.strip_prefix('"')?;
+            Some(rest[..rest.find('"')?].to_string())
+        });
+        if !named.is_some_and(|n| n.eq_ignore_ascii_case(&map_name)) {
+            continue;
+        }
+
+        let Some(at) = lines.iter().position(|l| l.contains("Number of spawn points")) else { continue };
+        let count: usize = lines[at].split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        for l in lines.iter().skip(at + 1).take(count) {
+            let v: Vec<f32> = l.split_whitespace().map_while(|n| n.parse().ok()).collect();
+            if v.len() >= 3 {
+                let p = [v[0], v[1], v[2]];
+                if !points.contains(&p) {
+                    points.push(p);
+                }
+            }
+        }
+    }
+    points
+}
+
+// Pick an index in 0..n; random unless a seed is given (splitmix64)
+fn pick_index(n: usize, seed: Option<u64>) -> usize {
+    let seed = seed.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |d| d.as_nanos() as u64)
+    });
+    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    (z % n as u64) as usize
+}
+
+// Load the texture for a material name such as "art_h_torso.bmp" from a
+// character directory: the .rsb of the same name, or for .tga materials the
+// .tga itself. File names differ in case from the references.
+fn load_character_texture(dir: &Path, material: &str) -> Option<u32> {
+    let want = Path::new(material);
+    let stem = want.file_stem()?.to_string_lossy().to_lowercase();
+    let is_tga = want.extension().is_some_and(|e| e.eq_ignore_ascii_case("tga"));
+    let path = std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|p| {
+        let ext = if is_tga { "tga" } else { "rsb" };
+        p.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext))
+            && p.file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase() == stem)
+    })?;
+    if is_tga {
+        let t = tga::read(&path).ok()?;
+        upload_rgba_to_gl(t.width, t.height, &t.rgba)
+    } else {
+        upload_rsb_to_gl(&rsb::read(&path).ok()?)
+    }
+}
+
+// Draw one posed character: `verts` are its (possibly animated) vertex
+// positions and `face` replaces the HRT placeholder face texture.
+fn draw_character(c: &crp::Crp, verts: &[[f32; 3]], part_textures: &[Option<u32>], face: Option<u32>, textured: bool) {
+    unsafe {
+    // Opaque parts first, then glass (.tga materials) blended over them
+    for glass_pass in [false, true] {
+    for (pi, part) in c.parts.iter().enumerate() {
+        let is_glass = part.material.to_ascii_lowercase().ends_with(".tga");
+        if is_glass != glass_pass { continue; }
+        // The HRT placeholder face is replaced by the team member's own
+        let is_face = part.material.eq_ignore_ascii_case("hrt_face.bmp");
+        let tex = if is_face { face } else { None }
+            .or(part_textures.get(pi).copied().flatten());
+        let uvs = part.corner_uvs.as_ref();
+        if is_glass && textured { glEnable(0x0BE2); glBlendFunc(0x0302, 0x0303); } // GL_BLEND, SRC_ALPHA, ONE_MINUS_SRC_ALPHA
+        // Solid mode shows the texture; wireframe shows flat colour lines
+        if let (true, Some(id), Some(_)) = (textured, tex, uvs) {
+            glEnable(0x0DE1); // GL_TEXTURE_2D
+            glBindTexture(0x0DE1, id);
+            glColor4f(1.0, 1.0, 1.0, 1.0);
+        } else {
+            glDisable(0x0DE1);
+            if textured && is_glass {
+                // Glass with no texture file: faint tinted pane
+                glColor4f(0.45, 0.55, 0.65, 0.2);
+            } else if textured {
+                glColor4f(0.3, 0.35, 0.4, 1.0);
+            } else {
+                let (r, g, b) = material_colour(&part.material);
+                glColor4f(r, g, b, 1.0);
+            }
+        }
+        glBegin(0x0004); // GL_TRIANGLES
+        for (k, t) in part.triangles.iter().enumerate() {
+            for (j, &i) in t.iter().enumerate() {
+                if let Some(uvs) = uvs {
+                    glTexCoord2f(uvs[k][j][0], uvs[k][j][1]);
+                }
+                let v = &verts[i as usize];
+                glVertex3f(v[0], v[1], v[2]);
+            }
+        }
+        glEnd();
+        if is_glass { glDisable(0x0BE2); }
+    }
+    }
+    }
+}
+
+// Draw blended glass triangles (world space corners and UVs) with a material's texture
+fn draw_glass(
+    materials: &map::Materials,
+    material: usize,
+    map_num: &str,
+    textures: &mut HashMap<String, u32>,
+    textured: bool,
+    alpha: f32,
+    tris: impl Iterator<Item = ([[f32; 3]; 3], [[f32; 2]; 3])>,
+) {
+    unsafe {
+        glEnable(0x0BE2); // GL_BLEND
+        glBlendFunc(0x0302, 0x0303); // SRC_ALPHA, ONE_MINUS_SRC_ALPHA
+        match (textured, ensure_texture(materials, material, map_num, textures)) {
+            (true, Some(id)) => {
+                glEnable(0x0DE1);
+                glBindTexture(0x0DE1, id);
+                glColor4f(1.0, 1.0, 1.0, alpha);
+            }
+            _ => {
+                glDisable(0x0DE1);
+                glColor4f(0.6, 0.8, 0.9, alpha.max(0.3));
+            }
+        }
+        glBegin(0x0004); // GL_TRIANGLES
+        for (p, uv) in tris {
+            for k in 0..3 {
+                glTexCoord2f(uv[k][0], uv[k][1]);
+                glVertex3f(p[k][0], p[k][1], p[k][2]);
+            }
+        }
+        glEnd();
+        glDisable(0x0BE2);
+        glColor4f(1.0, 1.0, 1.0, 1.0);
+    }
+}
+
+// Draw a broken pane: its pieces with a glint along their edges, and the flying flecks
+fn draw_fracture(materials: &map::Materials, map_num: &str, textures: &mut HashMap<String, u32>, textured: bool, f: &glass::Fracture) {
+    unsafe {
+        glEnable(0x0BE2); // GL_BLEND
+        glBlendFunc(0x0302, 0x0303); // SRC_ALPHA, ONE_MINUS_SRC_ALPHA
+        let tex = if textured { ensure_texture(materials, f.material, map_num, textures) } else { None };
+        for s in &f.shards {
+            let (corners, alpha) = (s.corners(), s.alpha());
+            if let Some(id) = tex {
+                glEnable(0x0DE1);
+                glBindTexture(0x0DE1, id);
+                glColor4f(1.0, 1.0, 1.0, alpha * f.opacity);
+            } else {
+                glDisable(0x0DE1);
+                glColor4f(0.6, 0.8, 0.9, alpha * 0.4);
+            }
+            glBegin(0x0006); // GL_TRIANGLE_FAN
+            for (c, uv) in corners.iter().zip(s.uvs()) {
+                glTexCoord2f(uv[0], uv[1]);
+                glVertex3f(c[0], c[1], c[2]);
+            }
+            glEnd();
+            // Edges catch the light
+            glDisable(0x0DE1);
+            glColor4f(0.9, 0.97, 1.0, alpha * 0.75);
+            glBegin(0x0002); // GL_LINE_LOOP
+            for c in &corners {
+                glVertex3f(c[0], c[1], c[2]);
+            }
+            glEnd();
+        }
+        glPointSize(2.5);
+        glBegin(0x0000); // GL_POINTS
+        for fl in &f.flecks {
+            glColor4f(0.95, 0.98, 1.0, fl.alpha());
+            glVertex3f(fl.pos[0], fl.pos[1], fl.pos[2]);
+        }
+        glEnd();
+        glDisable(0x0BE2);
+        glColor4f(1.0, 1.0, 1.0, 1.0);
+    }
+}
+
+// Stable, distinguishable colour for a material name
+fn material_colour(name: &str) -> (f32, f32, f32) {
+    let h = name.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
+    let c = |shift: u32| 0.35 + 0.65 * ((h >> shift) & 0xff) as f32 / 255.0;
+    (c(0), c(8), c(16))
+}
+
 fn build_mesh(level: &map::Map) -> Mesh {
-    let mut vertices: Vec<[f32; 3]> = Vec::new();
-    let mut indices: Vec<[u32; 3]> = Vec::new();
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
 
     let mut min = [f32::INFINITY; 3];
     let mut max = [f32::NEG_INFINITY; 3];
@@ -601,246 +1904,6 @@ fn build_mesh(level: &map::Map) -> Mesh {
     }
 }
 
-// Precomputed room/object indices and AABBs for collision/filtering
-struct RuntimeIndex {
-    // room section_name -> index in rooms.rooms
-    room_name_to_idx: HashMap<String, usize>,
-    // For each room index, the object indices belonging to it
-    room_objects: Vec<Vec<usize>>,
-    // For each room index, XY AABB [min_x, min_z, max_x, max_z]
-    room_aabb_xy: Vec<[f32; 4]>,
-    // For each planning level index, the set of room names active at that level
-    planning_rooms: Vec<HashSet<String>>,
-}
-
-fn build_runtime_index(level: &map::Map) -> RuntimeIndex {
-    // Build room name -> idx
-    let mut room_name_to_idx = HashMap::new();
-    for (i, room) in level.rooms.rooms.iter().enumerate() {
-        room_name_to_idx.insert(room.section_name.clone(), i);
-    }
-
-    // Build planning level room name sets
-    let mut planning_rooms = Vec::with_capacity(level.planning_levels.levels.len());
-    for pl in &level.planning_levels.levels {
-        let mut set = HashSet::with_capacity(pl.room_names.len());
-        for rn in &pl.room_names {
-            set.insert(rn.clone());
-        }
-        planning_rooms.push(set);
-    }
-
-    // For each room, collect object indices and compute XY AABB
-    let mut room_objects = vec![Vec::<usize>::new(); level.rooms.rooms.len()];
-    let mut room_aabb_xy = vec![[f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY]; level.rooms.rooms.len()];
-
-    for (oi, obj) in level.geometries.objects.iter().enumerate() {
-        if let Some(&ri) = room_name_to_idx.get(&obj.name) {
-            room_objects[ri].push(oi);
-            // Update room XY AABB from object vertices
-            let mut min_x = room_aabb_xy[ri][0];
-            let mut min_z = room_aabb_xy[ri][1];
-            let mut max_x = room_aabb_xy[ri][2];
-            let mut max_z = room_aabb_xy[ri][3];
-            for v in &obj.vertices {
-                if v.x < min_x { min_x = v.x; }
-                if v.z < min_z { min_z = v.z; }
-                if v.x > max_x { max_x = v.x; }
-                if v.z > max_z { max_z = v.z; }
-            }
-            room_aabb_xy[ri] = [min_x, min_z, max_x, max_z];
-        }
-    }
-
-    RuntimeIndex {
-        room_name_to_idx,
-        room_objects,
-        room_aabb_xy,
-        planning_rooms,
-    }
-}
-
-fn aabb_xy_contains(aabb: [f32; 4], x: f32, z: f32) -> bool {
-    x >= aabb[0] && x <= aabb[2] && z >= aabb[1] && z <= aabb[3]
-}
-
-// Pick the current room by XY containment among rooms active for the planning level
-fn select_current_room(idx: &RuntimeIndex, level: &map::Map, x: f32, z: f32) -> Option<usize> {
-    let z = -z;     // flip because the aabb are in D3D space
-    for (ri, _room) in level.rooms.rooms.iter().enumerate() {
-        if aabb_xy_contains(idx.room_aabb_xy[ri], x, z) {
-            println!("I think you are in room {ri} ; aabb={:?} ; x/z={x}/{z}", idx.room_aabb_xy[ri]);
-            return Some(ri);
-        }
-    }
-    println!("no AABB intersected {x}/{z}");
-    None
-}
-
-// Choose a per-room floor height matching the planning level's global hint
-fn room_planning_floor(level: &map::Map, room_idx: usize, planning_level_idx: usize) -> Option<f32> {
-    if planning_level_idx >= level.planning_levels.levels.len() || room_idx >= level.rooms.rooms.len() {
-        return None;
-    }
-    let hint = level.planning_levels.levels[planning_level_idx].floor_height;
-    let mut best: Option<f32> = None;
-    let mut best_diff = f32::INFINITY;
-    for h in &level.rooms.rooms[room_idx].level_heights {
-        let d = (h.height - hint).abs();
-        if d < best_diff {
-            best_diff = d;
-            best = Some(h.height);
-        }
-    }
-    best
-}
-
-// Compute set of object indices for collisions/detection given room or planning level
-fn object_indices_for_scope(idx: &RuntimeIndex, level: &map::Map, room_idx: Option<usize>) -> Vec<usize> {
-    if let Some(ri) = room_idx {
-        return idx.room_objects.get(ri).cloned().unwrap_or_default();
-    }
-    // Fallback: all objects
-    (0..level.geometries.objects.len()).collect()
-}
-
-/**
- * Walkable-surface detection via Object.collisions with room/planning filters.
- * Approximates ground height at (x,z) from up-facing collision planes.
- * If target_floor is provided, prefer planes whose solved Y is near that floor.
- */
-fn find_ground_y_indexed(
-    level: &map::Map,
-    idx: &RuntimeIndex,
-    room_idx: Option<usize>,
-    x: f32,
-    z: f32,
-    current_y: f32,
-    target_floor: Option<f32>,
-) -> Option<f32> {
-    let max_slope_deg = 50.0f32;
-    let ny_thresh = max_slope_deg.to_radians().cos();
-    const FLOOR_BAND: f32 = 200.0;
-
-    let mut best_below_any: Option<f32> = None;
-    let mut best_above_any: Option<f32> = None;
-    let mut best_below_banded: Option<f32> = None;
-    let mut best_above_banded: Option<f32> = None;
-
-    let obj_indices = object_indices_for_scope(idx, level, room_idx);
-    for &oi in &obj_indices {
-        let object = &level.geometries.objects[oi];
-        for face in &object.collisions.faces {
-            let mut nx = face.x;
-            let mut ny = face.y;
-            let mut nz = face.z;
-            let mut d = face.distance_origin_to_face;
-
-            let len = (nx * nx + ny * ny + nz * nz).sqrt();
-            if len <= 1e-6 {
-                continue;
-            }
-            nx /= len;
-            ny /= len;
-            nz /= len;
-            d /= len;
-
-            if ny < ny_thresh || ny.abs() < 1e-6 {
-                continue;
-            }
-
-            // Plane in standard form: n dot p + d = 0
-            // Solve for y given x,z: y = (-d - nx*x - nz*z) / ny
-            let y = (-d - nx * x - nz * z) / ny;
-
-            let in_band = match target_floor {
-                Some(t) => (y - t).abs() <= FLOOR_BAND,
-                None => false,
-            };
-
-            if y <= current_y {
-                if best_below_any.map_or(true, |v| y > v) {
-                    best_below_any = Some(y);
-                }
-                if in_band && best_below_banded.map_or(true, |v| y > v) {
-                    best_below_banded = Some(y);
-                }
-            } else {
-                if best_above_any.map_or(true, |v| y < v) {
-                    best_above_any = Some(y);
-                }
-                if in_band && best_above_banded.map_or(true, |v| y < v) {
-                    best_above_banded = Some(y);
-                }
-            }
-        }
-    }
-
-    let banded = best_below_banded.or(best_above_banded);
-    if banded.is_some() { banded } else { best_below_any.or(best_above_any) }
-}
-
-// Collision resolution against wall planes from Object.collisions with filtering.
-fn resolve_walls_indexed(
-    level: &map::Map,
-    idx: &RuntimeIndex,
-    room_idx: Option<usize>,
-    old_pos: [f32; 3],
-    mut new_pos: [f32; 3],
-    y_ref: f32,
-    radius: f32,
-) -> [f32; 3] {
-    let ny_wall_max = 0.3f32;
-    let obj_indices = object_indices_for_scope(idx, level, room_idx);
-
-    for _ in 0..2 {
-        let mut corrected = false;
-
-        for &oi in &obj_indices {
-            let object = &level.geometries.objects[oi];
-            for face in &object.collisions.faces {
-                let mut nx = face.x;
-                let mut ny = face.y;
-                let mut nz = face.z;
-                let mut d = face.distance_origin_to_face;
-
-                let len = (nx * nx + ny * ny + nz * nz).sqrt();
-                if len <= 1e-6 { continue; }
-                nx /= len; ny /= len; nz /= len; d /= len;
-
-                // Only consider near-vertical planes as walls
-                if ny.abs() > ny_wall_max {
-                    continue;
-                }
-
-                // Signed distances to the plane (n·p + d)
-                let s_old = nx * old_pos[0] + ny * y_ref + nz * old_pos[2] + d;
-                let s_new = nx * new_pos[0] + ny * y_ref + nz * new_pos[2] + d;
-
-                // If we moved from the back side (<= -radius) to front side (> -radius), resolve penetration
-                if s_old <= -radius && s_new > -radius {
-                    let penetration = s_new + radius;
-                    // Push back along the horizontal component of the normal
-                    let hx = nx;
-                    let hz = nz;
-                    let hlen = (hx * hx + hz * hz).sqrt();
-                    if hlen > 1e-5 && penetration > 0.0 {
-                        new_pos[0] -= (hx / hlen) * penetration;
-                        new_pos[2] -= (hz / hlen) * penetration;
-                        corrected = true;
-                    }
-                }
-            }
-        }
-
-        if !corrected {
-            break;
-        }
-    }
-
-    new_pos
-}
-
 // Camera transformation for OpenGL 1.x
 fn apply_camera(camera: &Camera) {
     unsafe {
@@ -868,24 +1931,51 @@ fn glu_perspective(fov_y: f32, aspect: f32, z_near: f32, z_far: f32) {
 }
 
 
-/**
- * Find the nearest planning-level floor height to the given Y.
- */
-fn nearest_planning_floor(level: &map::Map, y: f32) -> Option<f32> {
-    let mut best: Option<f32> = None;
-    let mut best_diff = f32::INFINITY;
-    for pl in &level.planning_levels.levels {
-        let diff = (pl.floor_height - y).abs();
-        if diff < best_diff {
-            best_diff = diff;
-            best = Some(pl.floor_height);
-        }
-    }
-    best
-}
-
-
 // 2D debug text (stroke lines) overlay
+
+// Heads-up display: crosshair at the centre, status lines bottom-left and a
+// message under the crosshair. Leaves the 2D projection set; the debug text
+// that follows re-enables depth testing.
+fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_marker: bool) {
+    unsafe {
+        glMatrixMode(0x1701); // GL_PROJECTION
+        glLoadIdentity();
+        ortho_2d(0.0, win_w.max(1) as f32, 0.0, win_h.max(1) as f32);
+        glMatrixMode(0x1700); // GL_MODELVIEW
+        glLoadIdentity();
+        glDisable(0x0B71); // GL_DEPTH_TEST
+        glDisable(0x0DE1); // GL_TEXTURE_2D
+
+        let (cx, cy) = (win_w as f32 / 2.0, win_h as f32 / 2.0);
+        if hit_marker { glColor3f(1.0, 0.2, 0.2); } else { glColor3f(1.0, 1.0, 1.0); }
+        glBegin(0x0001); // GL_LINES
+        for (dx0, dy0, dx1, dy1) in [(-12.0, 0.0, -4.0, 0.0), (4.0, 0.0, 12.0, 0.0), (0.0, -12.0, 0.0, -4.0), (0.0, 4.0, 0.0, 12.0)] {
+            glVertex3f(cx + dx0, cy + dy0, 0.0);
+            glVertex3f(cx + dx1, cy + dy1, 0.0);
+        }
+        glEnd();
+
+        glColor3f(1.0, 1.0, 1.0);
+        let scale = 14.0f32;
+        let adv = scale * 0.8;
+        for (i, line) in status.iter().enumerate() {
+            let mut x = 12.0;
+            for ch in line.chars() {
+                draw_glyph(ch, x, 12.0 + i as f32 * scale * 1.5, scale);
+                x += adv;
+            }
+        }
+        if !message.is_empty() {
+            glColor3f(1.0, 0.85, 0.3);
+            let mut x = cx - adv * message.chars().count() as f32 / 2.0;
+            for ch in message.chars() {
+                draw_glyph(ch, x, cy - 50.0, scale);
+                x += adv;
+            }
+        }
+        glColor3f(1.0, 1.0, 1.0);
+    }
+}
 
 fn draw_debug_text(win_w: i32, win_h: i32, lines: &[&str]) {
     unsafe {
@@ -965,6 +2055,24 @@ fn draw_glyph(ch: char, x: f32, y: f32, scale: f32) {
             'N' => Some([0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11]),
             'D' => Some([0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E]),
             'M' => Some([0x11, 0x1B, 0x15, 0x11, 0x11, 0x11, 0x11]),
+            'A' => Some([0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11]),
+            'B' => Some([0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E]),
+            'C' => Some([0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E]),
+            'G' => Some([0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F]),
+            'H' => Some([0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11]),
+            'I' => Some([0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E]),
+            'J' => Some([0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C]),
+            'K' => Some([0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11]),
+            'O' => Some([0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E]),
+            'Q' => Some([0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D]),
+            'T' => Some([0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04]),
+            'U' => Some([0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E]),
+            'W' => Some([0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11]),
+            'X' => Some([0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11]),
+            'Y' => Some([0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04]),
+            'Z' => Some([0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F]),
+            '/' => Some([0x01, 0x01, 0x02, 0x04, 0x08, 0x10, 0x10]),
+            '-' => Some([0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00]),
             ':' => Some([0x00, 0x04, 0x00, 0x00, 0x04, 0x00, 0x00]),
             '.' => Some([0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00]),
             ' ' => Some([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
@@ -1041,30 +2149,24 @@ fn resolve_texture_path(map_num: &str, material_filename: &str) -> Option<PathBu
     // Texture name without extension (MAP refers to .bmp)
     let stem = rel.file_stem()?.to_string_lossy().into_owned();
 
-    // Rebuild the relative path keeping parent directories, swapping extension to RSB
-    let build_rel = |ext: &str| -> PathBuf {
-        if let Some(parent) = rel.parent() {
-            parent.join(format!("{stem}.{ext}"))
-        } else {
-            PathBuf::from(format!("{stem}.{ext}"))
-        }
-    };
 
-    let candidates = [
-        build_rel("RSB"),
-        build_rel("rsb"),
-    ];
+    // File names differ in case from the MAP's (the data comes from a
+    // case-insensitive filesystem), and .tga materials are stored as
+    // "TGA<name>.rsb"
+    let mut wanted = vec![format!("{stem}.rsb").to_lowercase()];
+    if rel.extension().is_some_and(|e| e.eq_ignore_ascii_case("tga")) {
+        wanted.push(format!("tga{stem}.rsb").to_lowercase());
+    }
+    let parent = rel.parent().unwrap_or(Path::new(""));
 
-    for cand in candidates.iter() {
-        // 1) data/<map_num>/...
-        let p1 = Path::new("data").join("map").join(map_num).join(cand);
-        if p1.exists() {
-            return Some(p1);
-        }
-        // 2) data/texture/...
-        let p2 = Path::new("data").join("texture").join(cand);
-        if p2.exists() {
-            return Some(p2);
+    for dir in [Path::new("data").join("map").join(map_num).join(parent), Path::new("data").join("texture").join(parent)] {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let names: Vec<(String, PathBuf)> = entries.flatten()
+            .map(|e| (e.file_name().to_string_lossy().to_lowercase(), e.path())).collect();
+        for want in &wanted {
+            if let Some((_, path)) = names.iter().find(|(n, _)| n == want) {
+                return Some(path.clone());
+            }
         }
     }
 
@@ -1072,6 +2174,46 @@ fn resolve_texture_path(map_num: &str, material_filename: &str) -> Option<PathBu
 }
 
 // Extract the map number (e.g., "m00") from a map path like data/map/m00/citystreet_large.map
+// Every level under data/map as (directory, name, path), sorted by directory then name.
+// The name is the file name without .map, whatever its case.
+fn list_levels() -> Vec<(String, String, PathBuf)> {
+    let mut out = Vec::new();
+    let Ok(dirs) = std::fs::read_dir("data/map") else { return out };
+    for dir in dirs.flatten().filter(|d| d.path().is_dir()) {
+        let Ok(files) = std::fs::read_dir(dir.path()) else { continue };
+        for f in files.flatten() {
+            let path = f.path();
+            if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("map")) {
+                let name = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                out.push((dir.file_name().to_string_lossy().into_owned(), name, path));
+            }
+        }
+    }
+    out.sort_by(|a, b| (a.0.to_lowercase(), a.1.to_lowercase()).cmp(&(b.0.to_lowercase(), b.1.to_lowercase())));
+    out
+}
+
+// Find a level by name, ignoring case; "rm11" and "rm11/rm11" both work. The error
+// says what was available.
+fn find_level(name: &str) -> Result<PathBuf, String> {
+    let levels = list_levels();
+    let want = name.trim().trim_end_matches(".map").to_lowercase().replace('\\', "/");
+    let found: Vec<&(String, String, PathBuf)> = levels.iter()
+        .filter(|(dir, n, _)| want == n.to_lowercase() || want == format!("{}/{}", dir.to_lowercase(), n.to_lowercase()))
+        .collect();
+    match found.as_slice() {
+        [one] => Ok(one.2.clone()),
+        [] => {
+            let names: Vec<&str> = levels.iter().map(|l| l.1.as_str()).collect();
+            Err(format!("no level named {name:?}; available: {}", names.join(", ")))
+        }
+        many => {
+            let paths: Vec<String> = many.iter().map(|l| l.2.display().to_string()).collect();
+            Err(format!("{name:?} matches several levels, use --map: {}", paths.join(", ")))
+        }
+    }
+}
+
 fn extract_map_num(path: &Path) -> Option<String> {
     let mut comps = path.components().map(|c| c.as_os_str());
     while let Some(c) = comps.next() {
@@ -1085,12 +2227,15 @@ fn extract_map_num(path: &Path) -> Option<String> {
 }
 
 fn upload_rsb_to_gl(tex: &rsb::Rsb) -> Option<u32> {
-    let rgba = rsb_to_rgba8(tex);
-    if rgba.is_empty() {
+    upload_rgba_to_gl(tex.width, tex.height, &tex.to_rgba8())
+}
+
+fn upload_rgba_to_gl(width: u32, height: u32, rgba: &[u8]) -> Option<u32> {
+    if rgba.len() != (width * height * 4) as usize || rgba.is_empty() {
         return None;
     }
 
-    let mut id: u32 = 0;
+    let mut id = 0;
     unsafe {
         glGenTextures(1, &mut id as *mut u32);
         glBindTexture(0x0DE1, id); // GL_TEXTURE_2D
@@ -1103,8 +2248,8 @@ fn upload_rsb_to_gl(tex: &rsb::Rsb) -> Option<u32> {
             0x0DE1,              // GL_TEXTURE_2D
             0,                   // level
             0x1908,              // GL_RGBA
-            tex.width as i32,
-            tex.height as i32,
+            width as i32,
+            height as i32,
             0,                   // border
             0x1908,              // GL_RGBA
             0x1401,              // GL_UNSIGNED_BYTE
@@ -1112,57 +2257,4 @@ fn upload_rsb_to_gl(tex: &rsb::Rsb) -> Option<u32> {
         );
     }
     Some(id)
-}
-
-fn rsb_to_rgba8(tex: &rsb::Rsb) -> Vec<u8> {
-    let size = tex.size();
-    let mut out = Vec::with_capacity(size * 4);
-
-    if tex.palette_colors.is_some() {
-        // Expect palette indices in tex.pixels
-        if let Some(colors) = &tex.palette_colors {
-            for px in &tex.pixels {
-                let idx = match px {
-                    rsb::Pixel::PaletteColorIndex(i) => *i as usize,
-                    _ => 0,
-                };
-                let c = colors.get(idx).cloned().unwrap_or(rsb::PaletteColor { r: 0, g: 0, b: 0, a: 255 });
-                out.push(c.r);
-                out.push(c.g);
-                out.push(c.b);
-                out.push(c.a);
-            }
-        }
-        return out;
-    }
-
-    // Non-paletted: expand using bitmask
-    let bm = &tex.bitmask;
-    let rbits = bm.r.max(1);
-    let gbits = bm.g.max(1);
-    let bbits = bm.b.max(1);
-    let abits = bm.a; // alpha may be 0
-
-    for px in &tex.pixels {
-        let r = px.r(bm).unwrap_or(0);
-        let g = px.g(bm).unwrap_or(0);
-        let b = px.b(bm).unwrap_or(0);
-        let a = px.a(bm).unwrap_or_else(|| if abits == 0 { 255 } else { 0 });
-
-        out.push(scale_to_u8(r, rbits));
-        out.push(scale_to_u8(g, gbits));
-        out.push(scale_to_u8(b, bbits));
-        // If alpha channel not present, a is already 255
-        out.push(if abits == 0 { a as u8 } else { scale_to_u8(a, abits) });
-    }
-
-    out
-}
-
-fn scale_to_u8(v: u32, bits: u32) -> u8 {
-    if bits == 0 {
-        return 255;
-    }
-    let max = (1u32 << bits) - 1;
-    (((v * 255) + (max / 2)) / max) as u8
 }

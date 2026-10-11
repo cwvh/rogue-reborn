@@ -1,0 +1,372 @@
+use std::fs::File;
+use std::io::{BufReader, Read};
+
+mod rsb;
+
+#[derive(Debug)]
+enum Error {
+    /// Failed to open the file
+    Open(std::io::Error),
+
+    /// Failed to read the file
+    Read(std::io::Error),
+
+    /// Failed to consume a field from the input
+    Consume(&'static str, std::io::Error),
+
+    /// Missing or wrong value for the map format version
+    BadVersion,
+
+    /// Missing or wrong value for the map magic value
+    BadMagic,
+
+    /// Failed to convert raw bytes to destination type
+    BadConversion,
+}
+
+use binrw::{binrw, binread, BinRead, BinReaderExt, NullString, io::Cursor};
+fn main() -> anyhow::Result<()> {
+    rsb::load()?;
+    /*
+    // let mut args = std::env::args().collect::<Vec<_>>();
+
+    let path = "data/map/bunkers/bunkers.map";
+    let mut reader = BufReader::new(File::open(path).map_err(Error::Open)?);
+    let mut buf = Vec::new();
+    reader.read_to_end(&mut buf).map_err(Error::Read)?;
+    let mut buf = Cursor::new(buf);
+    let header: Header = buf.read_le().unwrap();
+    println!("{:#?}", header);
+
+    let material_list: MaterialList = buf.read_le().unwrap();
+    println!("{}", material_list.materials.len());
+
+    let geometry_list: GeometryList = buf.read_le().unwrap();
+    println!("{:#?}", geometry_list);
+    */
+
+    Ok(())
+}
+
+#[binread]
+#[derive(Debug, Default)]
+struct CString {
+    #[br(temp)]
+    length: u32,
+    text: NullString,
+}
+
+#[binread]
+#[derive(Debug)]
+struct Header {
+    version: CString,
+    timestamp: u32,
+}
+
+const VERSION: &[u8] = b"BeginMapv2.1";
+
+#[binread]
+#[derive(Debug)]
+struct MaterialList {
+    header: SectionHeader,
+    count: u32,
+    #[br(count = count)]
+    materials: Vec<Material>,
+}
+
+#[binread]
+#[derive(Debug)]
+struct SectionHeader {
+    section_size: u32,
+    id: u32,
+    name: CString,
+    #[br(if(name.text == "Version".into()))]
+    value: u32,
+    #[br(if(name.text == "Version".into()))]
+    version_name: CString,
+}
+
+#[binread]
+#[derive(Debug)]
+struct Material {
+    header: SectionHeader,
+    texture_filename: CString,
+    properties: MaterialProperties,
+}
+
+#[derive(BinRead, Debug)]
+struct MaterialProperties {
+    opacity: f32,
+    emissive_strength: u32,
+    mode: TextureAddressMode,
+    ambient: Color4f,
+    diffuse: Color4f,
+    specular: Color4f,
+    specular_level: f32,
+    two_sided: Bool,
+}
+
+#[derive(BinRead, Debug)]
+#[br(repr = u8)]
+enum Bool {
+    Yes = 1,
+    No = 0,
+}
+
+#[derive(BinRead, Debug)]
+#[br(repr = u32)]
+enum TextureAddressMode {
+    Opaque = 0,
+    Wrap = 1,
+    Clamp = 3,
+}
+
+#[binread]
+#[derive(Debug)]
+struct Color4f {
+    red: f32,
+    green: f32,
+    blue: f32,
+    alpha: f32,
+}
+
+#[derive(BinRead, Debug)]
+#[br(repr = u32)]
+enum SurfaceProperty {
+    Carpet,
+    Concrete,
+    Wood,
+    Metal,
+    Asphalt,
+    Sand,
+    LowGrass,
+    HighGrass,
+    Puddle,
+    Water,
+    Drywall,
+    ThinMetal,
+    ThickMetal,
+    MetalGasTank,
+    SteamPipe,
+    ElectricalPanel,
+    Snow,
+    SafetyGlass,
+    BulletResistantGlass,
+    Ice,
+    Mud,
+    Glass,
+    Foliage,
+    Gravel,
+    GlassShards,
+    CreakyWood,
+    DeepSand,
+    BakedClay,
+    Unset = 4294967295,
+}
+
+#[binread]
+#[derive(Debug)]
+struct GeometryList {
+    header: SectionHeader,
+    // #[br(temp)]
+    count: u32,
+    // #[br(count = count)]
+    objects: Object,
+}
+
+#[binread]
+#[derive(Debug)]
+struct Vertex {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+#[binread]
+#[derive(Debug)]
+struct Object {
+    section_header: SectionHeader,
+    object_section_header: SectionHeader,
+
+    object_vertices: ObjectVertices,
+    objects_data: ObjectsData,
+
+    //collision_objects: CollisionObjects,
+
+    //object_tagging: Objectst,
+
+    //ff_count: u32,
+    //#[br(count = ff_count)]
+    //ind: Vec<Index>,
+}
+
+#[binread]
+#[derive(Debug)]
+struct ObjectVertices {
+    vertex_count: u32,
+    #[br(count = vertex_count)]
+    vertex_array: Vec<Vertex>,
+}
+
+#[binread]
+#[derive(Debug)]
+struct ObjectsData {
+    count: u32,
+    // #[br(count = count)]
+    map_objects_data_array: ObjectData,
+}
+
+#[binread]
+#[derive(Debug)]
+struct ObjectData {
+    mn: u32,
+    faces: Faces,
+    texture_vertices: TextureVertices,
+
+    /// unrendered 2D collision section
+    collision_objects: CollisionObjects,
+}
+
+#[binread]
+#[derive(Debug)]
+struct CollisionObjects {
+    verticies_count: u32,
+    #[br(count = verticies_count)]
+    collision_vertices_array: Vec<CollisionVertex>,
+
+    // face_count: u32,
+    // #[br(count = face_count)]
+    // map_collision_face_normals_array: Vec<CollisionFaceNormals>,
+}
+
+#[binread]
+#[derive(Debug)]
+// TODO: rename this to something with 'face' in the name
+struct Objectst {
+    face_count: u32,
+    #[br(count = face_count)]
+    nro_face_indicies_array: Vec<NroFaceIndices>,
+}
+
+#[binread]
+#[derive(Debug)]
+struct CollisionVertex {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+#[binread]
+#[derive(Debug)]
+struct CollisionFaceNormals {
+    x: f32,
+    y: f32,
+    z: f32,
+    /// Sign denotes normal direction
+    origin_to_face_distance: f32,
+}
+
+#[binread]
+#[derive(Debug)]
+struct TextureVertices {
+    verticies_count: u32,
+    #[br(count = verticies_count)]
+    normal_coordinates_array: Vec<NormalCoordinates>,
+    #[br(count = verticies_count)]
+    texture_uv_coordinates_array: Vec<TextureUVCoordinates>,
+    #[br(count = verticies_count)]
+    face_color_coordinates_array: Vec<Color4f>,
+}
+
+#[binread]
+#[derive(Debug)]
+struct Faces {
+    face_count: u32,
+    #[br(count = face_count)]
+    face_normal_array: Vec<FaceNormal>,
+    #[br(count = face_count)]
+    face_indices_array: Vec<FaceIndices>,
+    #[br(count = face_count)]
+    texture_indices_array: Vec<TextureIndices>,
+}
+
+#[binread]
+#[derive(Debug)]
+struct FaceNormal {
+    x: f32,
+    y: f32,
+    z: f32,
+    /// Sign is direction of normal
+    origin_to_face_distance: f32,
+}
+
+#[binread]
+#[derive(Debug)]
+struct CollisionFaceNormal {
+    x: f32,
+    y: f32,
+    z: f32,
+    /// Sign is direction of normal
+    origin_to_face_distance: f32,
+}
+
+#[binread]
+#[derive(Debug)]
+struct FaceIndices {
+    p1: u16,
+    p2: u16,
+    p3: u16,
+}
+
+#[binread]
+#[derive(Debug)]
+struct NroFaceIndices {
+    px: u16,
+    py: u16,
+    pz: u16,
+    f_index_1: u16,
+    pu: u16,
+    pv: u16,
+    pw: u16,
+    f_index_2: u16,
+}
+
+#[binread]
+#[derive(Debug)]
+struct TextureIndices {
+    p1: u16,
+    p2: u16,
+    p3: u16,
+}
+
+#[binread]
+#[derive(Debug)]
+struct NormalCoordinates {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+#[binread]
+#[derive(Debug)]
+struct TextureUVCoordinates {
+    u: f32,
+    v: f32,
+}
+
+#[binread]
+#[derive(Debug)]
+struct EIndex {
+    p1: u16,
+}
+
+#[binread]
+#[derive(Debug)]
+struct Index {
+    length: u32,
+    text: NullString,
+    mn: u32,
+    count: u32,
+    #[br(count = count)]
+    indices: Vec<EIndex>,
+}

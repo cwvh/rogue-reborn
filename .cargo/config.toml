@@ -1,0 +1,11 @@
+# Shortcuts for building on Windows with MinGW (w64devkit). The default MSVC target
+# needs Visual Studio just to build GLFW with CMake, so these use the GNU target.
+#
+#   cargo wireframe --level rm11 --first-person --textured
+#   cargo wtest
+#   cargo wcheck
+[alias]
+wireframe = "run --release --target x86_64-pc-windows-gnu --example wireframe --"
+wtest = "test --target x86_64-pc-windows-gnu"
+wcheck = "check --target x86_64-pc-windows-gnu --all-targets"
+demo = "run --release --target x86_64-pc-windows-gnu --example wireframe -- --first-person --textured --max-fps 144 --spawn 1 --realistic-decals"

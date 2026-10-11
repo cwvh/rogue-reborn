@@ -7,6 +7,21 @@ edition = "2024"
 default = []
 serde = ["dep:serde", "dep:serde_json"]
 get-size = ["dep:get-size"]
+# The raylib demo in src/main.rs; needs the raylib library (see build.rs)
+raylib = []
+
+[[bin]]
+name = "rogue-reborn"
+path = "src/main.rs"
+required-features = ["raylib"]
+
+[[example]]
+name = "map-dump"
+required-features = ["serde"]
+
+[[example]]
+name = "map-stats"
+required-features = ["get-size"]
 
 [profile.dev]
 opt-level = 1
@@ -22,6 +37,7 @@ byteorder = "1.5.0"
 get-size = { version = "0.1.4", optional = true, features = ["derive"] }
 gl = "0.14.0"
 glfw = "0.59.0"
+rodio = { version = "0.22.2", default-features = false, features = ["wav", "playback"] }
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
 

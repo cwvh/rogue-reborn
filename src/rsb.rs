@@ -128,7 +128,67 @@ impl Rsb {
     pub fn size(&self) -> usize {
         (self.width * self.height) as _
     }
+
+    /// The image as `width * height` RGBA8 pixels, top row first. Empty if a
+    /// palette is missing.
+    pub fn to_rgba8(&self) -> Vec<u8> {
+        rsb_to_rgba8(self)
+    }
 }
+
+fn rsb_to_rgba8(tex: &Rsb) -> Vec<u8> {
+    let size = tex.size();
+    let mut out = Vec::with_capacity(size * 4);
+
+    if tex.palette_colors.is_some() {
+        // Expect palette indices in tex.pixels
+        if let Some(colors) = &tex.palette_colors {
+            for px in &tex.pixels {
+                let idx = match px {
+                    Pixel::PaletteColorIndex(i) => *i as usize,
+                    _ => 0,
+                };
+                let c = colors.get(idx).cloned().unwrap_or(PaletteColor { r: 0, g: 0, b: 0, a: 255 });
+                out.push(c.r);
+                out.push(c.g);
+                out.push(c.b);
+                out.push(c.a);
+            }
+        }
+        return out;
+    }
+
+    // Non-paletted: expand using bitmask
+    let bm = &tex.bitmask;
+    let rbits = bm.r.max(1);
+    let gbits = bm.g.max(1);
+    let bbits = bm.b.max(1);
+    let abits = bm.a; // alpha may be 0
+
+    for px in &tex.pixels {
+        let r = px.r(bm).unwrap_or(0);
+        let g = px.g(bm).unwrap_or(0);
+        let b = px.b(bm).unwrap_or(0);
+        let a = px.a(bm).unwrap_or_else(|| if abits == 0 { 255 } else { 0 });
+
+        out.push(scale_to_u8(r, rbits));
+        out.push(scale_to_u8(g, gbits));
+        out.push(scale_to_u8(b, bbits));
+        // If alpha channel not present, a is already 255
+        out.push(if abits == 0 { a as u8 } else { scale_to_u8(a, abits) });
+    }
+
+    out
+}
+
+fn scale_to_u8(v: u32, bits: u32) -> u8 {
+    if bits == 0 {
+        return 255;
+    }
+    let max = (1u32 << bits) - 1;
+    (((v * 255) + (max / 2)) / max) as u8
+}
+
 
 impl std::fmt::Display for Rsb {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
