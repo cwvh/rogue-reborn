@@ -3,10 +3,10 @@
 use std::path::{Path, PathBuf};
 use rogue_reborn::collision::CollisionWorld;
 
-// Spawn at the centre of a named zone from the multiplayer mission file
+// Spawn at the center of a named zone from the multiplayer mission file
 // (data/mission/<MAP>_MUL.mis). Zones appear there as two MAP-space points
 // followed by the quoted zone name, e.g. "ZONE_RM11_COURTYARD". Returns the
-// feet position in MAP space, standing on the floor under the zone's centre.
+// feet position in MAP space, standing on the floor under the zone's center.
 pub fn find_zone_spawn(map_path: &Path, zone: &str, world: &CollisionWorld) -> Option<[f32; 3]> {
     let stem = map_path.file_stem()?.to_string_lossy().to_uppercase();
     let mission = Path::new("data/mission").join(format!("{stem}_MUL.mis"));

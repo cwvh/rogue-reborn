@@ -54,7 +54,7 @@ pub fn write_debug_dump(r: &DebugReport, rgb: &[u8], width: u32, height: u32) ->
     writeln!(t, "map: {} ({})", r.map_path.display(), r.map_num)?;
     writeln!(t, "args: {}", std::env::args().skip(1).collect::<Vec<_>>().join(" "))?;
     writeln!(t, "mode: {}{}", if r.first_person { "first person" } else { "free fly" }, if r.third_person { ", third person view" } else { "" })?;
-    writeln!(t, "toggles: textured={} room_colours={} portals={} collisions={}", r.textured, r.room_debug, r.show_portals, r.show_collisions)?;
+    writeln!(t, "toggles: textured={} room_colors={} portals={} collisions={}", r.textured, r.room_debug, r.show_portals, r.show_collisions)?;
     writeln!(t, "frame: {:.1} fps, {:.2} ms render", r.fps, r.render_ms)?;
     writeln!(t)?;
     writeln!(t, "eye (map space): {:.1}, {:.1}, {:.1}", r.eye[0], r.eye[1], r.eye[2])?;

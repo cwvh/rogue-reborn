@@ -70,7 +70,7 @@ pub fn draw_character(c: &crp::Crp, verts: &[[f32; 3]], part_textures: &[Option<
             .or(part_textures.get(pi).copied().flatten());
         let uvs = part.corner_uvs.as_ref();
         if is_glass && textured { glEnable(0x0BE2); glBlendFunc(0x0302, 0x0303); } // GL_BLEND, SRC_ALPHA, ONE_MINUS_SRC_ALPHA
-        // Solid mode shows the texture; wireframe shows flat colour lines
+        // Solid mode shows the texture; wireframe shows flat color lines
         if let (true, Some(id), Some(_)) = (textured, tex, uvs) {
             glEnable(0x0DE1); // GL_TEXTURE_2D
             glBindTexture(0x0DE1, id);
@@ -83,7 +83,7 @@ pub fn draw_character(c: &crp::Crp, verts: &[[f32; 3]], part_textures: &[Option<
             } else if textured {
                 glColor4f(0.3, 0.35, 0.4, 1.0);
             } else {
-                let (r, g, b) = material_colour(&part.material);
+                let (r, g, b) = material_color(&part.material);
                 glColor4f(r, g, b, 1.0);
             }
         }
@@ -184,8 +184,8 @@ pub fn draw_fracture(materials: &map::Materials, map_num: &str, textures: &mut H
     }
 }
 
-// Stable, distinguishable colour for a material name
-pub fn material_colour(name: &str) -> (f32, f32, f32) {
+// Stable, distinguishable color for a material name
+pub fn material_color(name: &str) -> (f32, f32, f32) {
     let h = name.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
     let c = |shift: u32| 0.35 + 0.65 * ((h >> shift) & 0xff) as f32 / 255.0;
     (c(0), c(8), c(16))
@@ -380,7 +380,7 @@ pub unsafe fn draw_plan(node: &visibility::PlanNode<'_>, level: i32, fill_mode: 
     }
 }
 
-/// A stable colour for a room's name, so the same room looks the same every run.
+/// A stable color for a room's name, so the same room looks the same every run.
 /// The rooms the player is standing in are drawn white.
 pub fn room_color(name: &str, current: bool) -> [f32; 3] {
     if current {

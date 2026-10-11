@@ -24,7 +24,7 @@ pub struct Args {
     pub pitch: Option<f32>,
     pub textured: bool,
     pub portals: bool,
-    /// Colour each room's geometry and report the rooms the player is in
+    /// Color each room's geometry and report the rooms the player is in
     pub rooms: bool,
     /// Write the F2 debug dump on the first frame and exit
     pub dump: bool,

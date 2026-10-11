@@ -2,7 +2,7 @@
 
 use crate::opengl::*;
 
-// Heads-up display: crosshair at the centre, status lines bottom-left and a
+// Heads-up display: crosshair at the center, status lines bottom-left and a
 // message under the crosshair. Leaves the 2D projection set; the debug text
 // that follows re-enables depth testing.
 pub fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_marker: bool, veil: f32) {
