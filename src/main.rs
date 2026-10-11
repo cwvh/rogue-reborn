@@ -603,7 +603,8 @@ fn main() {
                     }
                 }
                 WindowEvent::CursorPos(xpos, ypos) => {
-                    if let Some((last_x, last_y)) = last_cursor_pos {
+                    // A scripted run (--walk) is not steered by a real mouse
+                    if let (Some((last_x, last_y)), None) = (last_cursor_pos, args.walk) {
                         let dx = xpos - last_x;
                         let dy = ypos - last_y;
                         camera.yaw -= dx as f32 * 0.1;
@@ -738,6 +739,7 @@ fn main() {
                         }
                     }
                     message = (format!("DOOR {}", if door_states[i].opening { "OPENING" } else { "CLOSING" }), game_time + 1.2);
+                    println!("t={game_time:.2} door {} {}", doors[i].name, if door_states[i].opening { "opening" } else { "closing" });
                 }
                 None => message = ("NO DOOR IN REACH".to_string(), game_time + 1.0),
             }
