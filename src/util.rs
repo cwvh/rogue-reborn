@@ -1,4 +1,15 @@
-//! Small helpers: a random number generator and vector arithmetic.
+//! Small helpers: a random number generator, vector arithmetic, and finding files in the game data.
+
+use std::path::{Path, PathBuf};
+
+/// The file in `dir` with this name and extension, whatever case they are in. The game's
+/// data comes from a case-insensitive filesystem, so the names do not match in case.
+pub fn find_file(dir: &Path, stem: &str, ext: &str) -> Option<PathBuf> {
+    std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|p| {
+        p.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext))
+            && p.file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase() == stem.to_lowercase())
+    })
+}
 
 pub fn next_rng(r: &mut u64) -> u64 {
     *r ^= *r << 13;

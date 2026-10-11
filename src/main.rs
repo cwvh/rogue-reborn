@@ -3,7 +3,6 @@ mod camera;
 mod debug;
 mod draw;
 mod hud;
-mod levels;
 mod opengl;
 mod player;
 mod textures;
@@ -13,9 +12,9 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 use std::sync::Arc;
-use rogue_reborn::{map, rsb, actor, combat, crp, demo, grenade, motion, recording, skeleton, sim, sound, weapon, ambience, glass};
+use rogue_reborn::{map, rsb, actor, demo, grenade, motion, recording, skeleton, sim, sound, weapon, ambience, glass};
 use rogue_reborn::recording::{Playback, Recorder, Recording};
-use rogue_reborn::sim::characters::{Characters, Npc, Rig};
+use rogue_reborn::sim::characters::{Characters, Rig, place_npcs};
 use rogue_reborn::sim::movement::{Movement, ground_speed, movement_from_keys};
 use rogue_reborn::collision::{CollisionWorld, Params};
 use rogue_reborn::impact::{self, Surface};
@@ -27,7 +26,8 @@ use crate::player::{PlayerMotions, is_upper_body};
 use crate::draw::{WeaponDraw, draw_weapon, draw_character, draw_glass, draw_fracture, build_mesh, Which, draw_plan, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
-use crate::levels::{find_zone_spawn, find_mission_spawns, pick_index, list_levels, find_level, extract_map_num};
+use rogue_reborn::levels::{find_zone_spawn, find_mission_spawns, pick_index, list_levels, find_level, extract_map_num};
+use rogue_reborn::util::find_file;
 use crate::textures::{load_character_texture, ensure_texture};
 
 /// Soot marks a blast can leave
@@ -183,35 +183,10 @@ fn main() {
     // Character models standing at every other mission spawn point
     let model_path = args.model.clone()
         .unwrap_or_else(|| PathBuf::from("data/character/team_hrt/blue_M_a.CRP"));
-    let character = {
-        match crp::read(&model_path) {
-            Ok(c) => {
-                println!("loaded {} ({} vertices, {} triangles)", c.name, c.vertices.len(),
-                    c.parts.iter().map(|p| p.triangles.len()).sum::<usize>());
-                Some(c)
-            }
-            Err(e) => { eprintln!("could not load {}: {e:#}", model_path.display()); None }
-        }
-    };
-    // Skeleton and skinning for posed models
-    let find_file = |dir: &Path, stem: &str, ext: &str| -> Option<PathBuf> {
-        std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|p| {
-            p.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext))
-                && p.file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase() == stem.to_lowercase())
-        })
-    };
-    let rig = (|| {
-        let c = character.as_ref()?;
-        let dir = model_path.parent()?;
-        let stem = model_path.file_stem()?.to_string_lossy().to_string();
-        let skel = skeleton::read(&find_file(dir, &stem, "skl").or_else(|| { eprintln!("no skeleton beside {}", model_path.display()); None })?).ok()?;
-        let skin = c.skin(&skel).or_else(|| { eprintln!("mesh does not match skeleton"); None })?;
-        Some((skel, skin))
-    })();
-    let load_motion = |name: &str| -> Option<motion::Motion> {
-        let m = motion::read(&find_file(Path::new("data/motion"), name, "dam").or_else(|| { eprintln!("no motion named {name}"); None })?).ok();
-        m
-    };
+    // Motions other characters play: idle (or --anim), injury reactions and deaths
+    let idle_name = args.anim.clone().unwrap_or_else(|| "up_none_cyc".to_string());
+    let characters = Characters::load(&model_path, &idle_name);
+    let load_motion = rogue_reborn::sim::characters::load_motion;
     // The player carries the MP5K, so uses the SMG-holding movement set
     let slot_motion = |slot: &str, default: &str| {
         let name = args.player_anims.iter().rev().find(|(k, _)| k == slot).map_or(default, |(_, m)| m.as_str());
@@ -228,16 +203,6 @@ fn main() {
         reload: slot_motion("reload", "twru_s9"),
         throw: slot_motion("throw", "gr_ov_up"),
     };
-
-    // Motions other characters play: idle (or --anim), injury reactions and deaths
-    let idle_name = args.anim.clone().unwrap_or_else(|| "up_none_cyc".to_string());
-    let mut npc_motions: HashMap<String, motion::Motion> = HashMap::new();
-    for name in [idle_name.as_str(), "thiu_ab", "thiu_cb", "thiu_cf", "thiu_cl", "thiu_cr", "thiu_hb", "thiu_hf",
-        "thiu_la", "thiu_ll", "thiu_ra", "thiu_rl", "thdu_1", "thdu_2", "thdu_3", "thdu_4", "thdh_1", "thdh_2"] {
-        if let Some(m) = load_motion(name) {
-            npc_motions.insert(name.to_string(), m);
-        }
-    }
 
     // The MP5K: definition, model and texture
     let weapon_def = weapon::read(Path::new("data/kit/pw_mp5k.wpn")).ok();
@@ -335,7 +300,7 @@ fn main() {
     // +Y up); from then on it just follows the hand. `--weapon-offset` shifts the
     // grip, in body space at that pose.
     let weapon_attach: Option<(usize, skeleton::Transform)> = (|| {
-        let (skel, _) = rig.as_ref()?;
+        let skel = &characters.as_ref()?.rig.as_ref()?.skeleton;
         let hand = skel.bones.iter().position(|b| b.name == "RightHand")?;
         let (root, rots) = player_motions.get(Movement::Idle)?.sample(0.0);
         let q = skel.pose([0.0, root[1], 0.0], &rots)[hand].rot;
@@ -348,7 +313,7 @@ fn main() {
     })();
 
     // One GL texture per part, from the character's own directory
-    let part_textures: Vec<Option<u32>> = character.as_ref().map_or_else(Vec::new, |c| {
+    let part_textures: Vec<Option<u32>> = characters.as_ref().map(|c| &c.model).map_or_else(Vec::new, |c| {
         let dir = model_path.parent().unwrap_or(Path::new("."));
         let mut cache: HashMap<String, Option<u32>> = HashMap::new();
         c.parts.iter().map(|part| {
@@ -381,37 +346,16 @@ fn main() {
         }
     }).collect();
 
-    let mut npcs: Vec<Npc> = Vec::new();
-    // Which team member's face each character wears
-    let mut npc_actor: Vec<Option<usize>> = Vec::new();
-    if let (false, Some(c)) = (args.no_models, &character) {
-        let feet_to_origin = -c.bounds().0[1];
-        for (n, (i, p)) in mission_spawns.iter().enumerate().filter(|(i, _)| own_spawn != Some(*i)).enumerate() {
-            let floor = world.ground_at(p[0], p[2], p[1] + 100.0).unwrap_or(p[1]);
-            let actor = (!actors.is_empty()).then(|| n % actors.len());
-            let scale_y = actor.map_or(1.0, |a| actors[a].scale[1]);
-            npcs.push(Npc {
-                health: combat::Health::new(),
-                pos: [p[0], floor + feet_to_origin * scale_y, p[2]],
-                floor,
-                // Spread facing directions deterministically by spawn index
-                yaw: args.model_yaw.unwrap_or_else(|| match mission_spawns.first() {
-                    // In the demo room everyone faces the player
-                    Some(player) if args.demo => (player[0] - p[0]).atan2(player[2] - p[2]).to_degrees(),
-                    _ => i as f32 * 137.5,
-                }),
-                scale: actor.map_or([1.0; 3], |a| actors[a].scale),
-                stagger: i as f32 * 0.73,
-            });
-            npc_actor.push(actor);
-        }
-    }
-    let characters = character.map(|model| Characters {
-        model,
-        rig: rig.map(|(skeleton, skin)| Rig { skeleton, skin }),
-        motions: npc_motions,
-        idle: idle_name.clone(),
-    });
+    let (npcs, npc_actor) = match (&characters, args.no_models) {
+        (Some(c), false) => place_npcs(&mission_spawns, own_spawn.as_slice(), &world, &c.model, &actors, &|i, p| {
+            args.model_yaw.unwrap_or_else(|| match mission_spawns.first() {
+                // In the demo room everyone faces the player
+                Some(player) if args.demo => (player[0] - p[0]).atan2(player[2] - p[2]).to_degrees(),
+                _ => i as f32 * 137.5,
+            })
+        }),
+        _ => (Vec::new(), Vec::new()),
+    };
 
     if let Some(p) = args.pos { camera.position = p; }
     if let Some(y) = args.yaw { camera.yaw = y; }

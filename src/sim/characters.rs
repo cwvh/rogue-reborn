@@ -2,11 +2,15 @@
 //! detection, and the model they share.
 
 use std::collections::HashMap;
+use std::path::Path;
 
+use crate::actor::Actor;
+use crate::collision::CollisionWorld;
 use crate::combat::{self, Health, NpcState, Placement};
-use crate::crp::{Crp, Skin};
-use crate::motion::Motion;
-use crate::skeleton::Skeleton;
+use crate::crp::{self, Crp, Skin};
+use crate::motion::{self, Motion};
+use crate::skeleton::{self, Skeleton};
+use crate::util::find_file;
 
 type V3 = [f32; 3];
 
@@ -41,7 +45,49 @@ pub struct Characters {
     pub idle: String,
 }
 
+/// The motions characters play besides idling: injury reactions and deaths
+pub const REACTION_MOTIONS: [&str; 17] = [
+    "thiu_ab", "thiu_cb", "thiu_cf", "thiu_cl", "thiu_cr", "thiu_hb", "thiu_hf", "thiu_la", "thiu_ll", "thiu_ra", "thiu_rl",
+    "thdu_1", "thdu_2", "thdu_3", "thdu_4", "thdh_1", "thdh_2",
+];
+
+/// A motion from the game's data, by name
+pub fn load_motion(name: &str) -> Option<Motion> {
+    motion::read(&find_file(Path::new("data/motion"), name, "dam").or_else(|| { eprintln!("no motion named {name}"); None })?).ok()
+}
+
 impl Characters {
+    /// Read the model, its skeleton and the motions from the game's data. None when the model
+    /// cannot be read. `idle` names the motion characters idle with.
+    pub fn load(model_path: &Path, idle: &str) -> Option<Characters> {
+        let model = match crp::read(model_path) {
+            Ok(c) => {
+                println!("loaded {} ({} vertices, {} triangles)", c.name, c.vertices.len(),
+                    c.parts.iter().map(|p| p.triangles.len()).sum::<usize>());
+                c
+            }
+            Err(e) => {
+                eprintln!("could not load {}: {e:#}", model_path.display());
+                return None;
+            }
+        };
+        // Skeleton and skinning for posed models
+        let rig = (|| {
+            let dir = model_path.parent()?;
+            let stem = model_path.file_stem()?.to_string_lossy().to_string();
+            let skeleton = skeleton::read(&find_file(dir, &stem, "skl").or_else(|| { eprintln!("no skeleton beside {}", model_path.display()); None })?).ok()?;
+            let skin = model.skin(&skeleton).or_else(|| { eprintln!("mesh does not match skeleton"); None })?;
+            Some(Rig { skeleton, skin })
+        })();
+        let mut motions = HashMap::new();
+        for name in std::iter::once(idle).chain(REACTION_MOTIONS) {
+            if let Some(m) = load_motion(name) {
+                motions.insert(name.to_string(), m);
+            }
+        }
+        Some(Characters { model, rig, motions, idle: idle.to_string() })
+    }
+
     /// How many frames a motion lasts, one if it is not loaded
     pub fn frames(&self, motion: &str) -> f32 {
         self.motions.get(motion).map_or(1, |m| m.frames) as f32
@@ -88,4 +134,34 @@ impl Characters {
         let verts = self.pose(npc, now, Self::idle_frame(npc, now));
         combat::raycast_character(&self.model, &rig.skeleton, &rig.skin, &verts, &self.placement(npc), origin, dir)
     }
+}
+
+/// Stand a character at each spawn point (a point on the map's floor) but those in `skip`,
+/// dealing the team members' faces out in turn. `yaw` says which way the character at a
+/// spawn point faces, given its index and position. Also returns which team member each one is.
+pub fn place_npcs(
+    spawns: &[V3],
+    skip: &[usize],
+    world: &CollisionWorld,
+    model: &Crp,
+    actors: &[Actor],
+    yaw: &dyn Fn(usize, V3) -> f32,
+) -> (Vec<Npc>, Vec<Option<usize>>) {
+    let feet_to_origin = -model.bounds().0[1];
+    let (mut npcs, mut faces) = (Vec::new(), Vec::new());
+    for (n, (i, p)) in spawns.iter().enumerate().filter(|(i, _)| !skip.contains(i)).enumerate() {
+        let floor = world.ground_at(p[0], p[2], p[1] + 100.0).unwrap_or(p[1]);
+        let actor = (!actors.is_empty()).then(|| n % actors.len());
+        let scale_y = actor.map_or(1.0, |a| actors[a].scale[1]);
+        npcs.push(Npc {
+            health: Health::new(),
+            pos: [p[0], floor + feet_to_origin * scale_y, p[2]],
+            floor,
+            yaw: yaw(i, *p),
+            scale: actor.map_or([1.0; 3], |a| actors[a].scale),
+            stagger: i as f32 * 0.73,
+        });
+        faces.push(actor);
+    }
+    (npcs, faces)
 }

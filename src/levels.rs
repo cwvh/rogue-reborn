@@ -1,7 +1,7 @@
 //! Finding levels and their spawn points in the game data.
 
 use std::path::{Path, PathBuf};
-use rogue_reborn::collision::CollisionWorld;
+use crate::collision::CollisionWorld;
 
 // Spawn at the center of a named zone from the multiplayer mission file
 // (data/mission/<MAP>_MUL.mis). Zones appear there as two MAP-space points
