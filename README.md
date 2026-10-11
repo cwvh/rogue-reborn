@@ -102,3 +102,17 @@ The example `examples/wireframe.rs` has many more (animation, camera and weapon 
 and `portal-edges` (a level's rooms and portals), `obj-list`, `dyn-info` (doors and glass),
 `mat-list`, `room-info`, `motion-info`. `map-dump` and `map-stats` need the `serde` and
 `get-size` features.
+
+For rooms and portals: `portal-list` (every portal's rooms, position and size), `room-boxes`
+(each room's level volumes, and which rooms hold a point) and `floor-scan` / `floor-probe`
+(check that the floor stays solid around a spot once only the rooms near the player collide).
+
+`scripts/` holds checks for changes to the renderer:
+
+- `scripts/bench.sh LABEL` prints average frame times for a few fixed views.
+- `scripts/shots.sh DIR` renders a fixed set of views, and `python scripts/pngdiff.py OLD NEW`
+  counts the pixels that differ between two such runs (see the comments in `shots.sh`).
+
+For debugging a level, `--rooms` (or `G`) colours each room, `--no-cull` (or `V`) draws every
+room, `--hide-rooms 5,224` leaves rooms out, and F2 writes a screenshot and a log of where you
+are into `debug/`.

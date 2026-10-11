@@ -427,6 +427,9 @@ fn draw_weapon(wd: &WeaponDraw, textured: bool, flash: bool) {
     }
 }
 
+/// Frames to skip before timing, while textures load
+const BENCH_WARMUP: u32 = 30;
+
 fn main() {
     // Load the map
     // let map_path = Path::new("data/map/m00/demolitions_area.MAP");
@@ -793,6 +796,9 @@ fn main() {
     // Draw only the rooms the portals show (V toggles); drawn_rooms is last frame's set
     let mut culling = !args.no_cull;
     let visibility = rogue_reborn::visibility::Visibility::new(&level);
+    // Which objects are glass panes (drawn in place), and every object's index
+    let pane_objects: Vec<bool> = level.geometries.objects.iter().map(|o| panes.iter().any(|g| g.name == o.name)).collect();
+    let all_objects: Vec<usize> = (0..level.geometries.objects.len()).collect();
     let mut current_room: Option<usize> = None;
     let mut collision_rooms: Option<Vec<rogue_reborn::collision::SolidRoom>> = None;
     let mut last_render_rooms: Vec<u32> = Vec::new();
@@ -840,6 +846,8 @@ fn main() {
     ]);
     let base_speed = 7.5;
     let mut frames_drawn = 0u32;
+    // Frames timed, summed render ms and summed whole-frame ms
+    let mut bench = (0u32, 0f64, 0f64);
 
     while !window.should_close() {
         glfw.poll_events();
@@ -1264,14 +1272,14 @@ fn main() {
         // room around the camera.
         let floor_room = if first_person {
             world.floor_room([probe[0], probe[1] - 10.0, probe[2]])
-                .filter(|n| level.rooms.rooms.iter().any(|r| r.section_name == n.to_string()))
+                .filter(|&n| visibility.is_room(n))
         } else {
             None
         };
         let render_rooms: Vec<u32> = match floor_room {
             Some(n) => vec![n],
             None if first_person && !last_render_rooms.is_empty() => last_render_rooms.clone(),
-            None => current_room.and_then(|i| level.rooms.rooms[i].section_name.parse().ok()).map(|n| vec![n]).unwrap_or_else(|| player_rooms.clone()),
+            None => current_room.and_then(|i| visibility.number_of(i)).map(|n| vec![n]).unwrap_or_else(|| player_rooms.clone()),
         };
         last_render_rooms = render_rooms.clone();
         // What stops the player: their room, the rooms through its portals but only
@@ -1370,17 +1378,18 @@ fn main() {
                 // An object belongs to the room its name starts with ("204", "20_doormetal").
                 let mut draw_objects = |which: Which, planes: &[[f32; 4]]| {
                     set_clip_planes(planes);
-                    for object in &level.geometries.objects {
+                    let indices: &[usize] = match which {
+                        Which::All => &all_objects,
+                        Which::Room(n) => visibility.objects_of(n),
+                        Which::Unowned => visibility.unowned_objects(),
+                    };
+                    for &object_index in indices {
+                        let object = &level.geometries.objects[object_index];
                         // Panes are drawn in place below
-                        if panes.iter().any(|g| g.name == object.name) {
+                        if pane_objects[object_index] {
                             continue;
                         }
-                        let room = map::object_room(&object.name).filter(|n| level.rooms.rooms.iter().any(|r| r.section_name == n.to_string()));
-                        match which {
-                            Which::Room(n) if room != Some(n) => continue,
-                            Which::Unowned if room.is_some() => continue,
-                            _ => {}
-                        }
+                        let room = visibility.room_of_object(object_index);
                         if room.is_some_and(|n| args.hide_rooms.contains(&n)) {
                             continue;
                         }
@@ -1759,8 +1768,15 @@ fn main() {
         // Screenshot mode: capture after a couple of frames so textures are
         // uploaded and the context has settled, then exit.
         frames_drawn += 1;
+        // Timing for benchmarks (--walk N --hold X --max-fps 10000), after a warm-up
+        if frames_drawn > BENCH_WARMUP {
+            bench = (bench.0 + 1, bench.1 + render_ms as f64, bench.2 + raw_dt as f64 * 1000.0);
+        }
         if let Some(path) = &args.screenshot {
             if frames_drawn >= args.walk.map_or(3, |n| n.max(3)) {
+                if bench.0 > 0 {
+                    println!("timing over {} frames: render {:.3} ms, whole frame {:.3} ms", bench.0, bench.1 / bench.0 as f64, bench.2 / bench.0 as f64);
+                }
                 let (fw, fh) = window.get_framebuffer_size();
                 let rgb = read_framebuffer(fw, fh);
                 match rogue_reborn::png::write_png(path, fw as u32, fh as u32, &rgb) {
@@ -2201,7 +2217,7 @@ enum Which {
 /// marked in the stencil buffer where it can be seen, the depth there is wiped, and the
 /// room beyond is drawn only into the mark: whatever the room in front has past the
 /// portal (rooms overlap each other) cannot show in the doorway.
-unsafe fn draw_plan(node: &visibility::PlanNode, level: i32, fill_mode: u32, textured: bool, draw: &mut dyn FnMut(u32, &[[f32; 4]])) {
+unsafe fn draw_plan(node: &visibility::PlanNode<'_>, level: i32, fill_mode: u32, textured: bool, draw: &mut dyn FnMut(u32, &[[f32; 4]])) {
     const EQUAL: u32 = 0x0202;
     const KEEP: u32 = 0x1E00;
     unsafe {
@@ -2226,7 +2242,7 @@ unsafe fn draw_plan(node: &visibility::PlanNode, level: i32, fill_mode: u32, tex
             }
             let opening = || {
                 glBegin(0x0006); // GL_TRIANGLE_FAN
-                for p in &child.polygon {
+                for p in child.polygon {
                     glVertex3f(p[0], p[1], p[2]);
                 }
                 glEnd();

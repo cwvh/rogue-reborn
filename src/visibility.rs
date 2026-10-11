@@ -34,6 +34,22 @@ pub struct Visibility {
     /// The middle of each room (volume-weighted over its level boxes), to tell which
     /// side of a portal a room is on
     centres: HashMap<u32, [f32; 3]>,
+    /// The number of each room, in the order of `map.rooms.rooms`
+    numbers: Vec<Option<u32>>,
+    /// Where each room is in `map.rooms.rooms`, by number
+    index: HashMap<u32, usize>,
+    /// Each portal's corners as listed, and in drawing order
+    corners: Vec<Vec<[f32; 3]>>,
+    polygons: Vec<Vec<[f32; 3]>>,
+    /// The rooms on each planning level, as numbers
+    floors: Vec<HashSet<u32>>,
+    /// The floor plan of each room, by number
+    footprints: HashMap<u32, Vec<[f32; 4]>>,
+    /// The objects of each room (indices into `map.geometries.objects`), by number
+    objects: HashMap<u32, Vec<usize>>,
+    /// The objects that belong to no room, and the room of each object
+    unowned: Vec<usize>,
+    object_rooms: Vec<Option<u32>>,
 }
 
 impl Visibility {
@@ -83,7 +99,56 @@ impl Visibility {
                 centres.insert(number, [sum[0] / weight, sum[1] / weight, sum[2] / weight]);
             }
         }
-        Self { by_room, outdoors, centres }
+
+        let numbers: Vec<Option<u32>> = map.rooms.rooms.iter().map(|r| r.section_name.parse().ok()).collect();
+        let index: HashMap<u32, usize> = numbers.iter().enumerate().filter_map(|(i, n)| n.map(|n| (n, i))).collect();
+        let corners: Vec<Vec<[f32; 3]>> = map.portals.portals.iter()
+            .map(|p| p.coordinates.iter().map(|v| [v.x, v.y, v.z]).collect())
+            .collect();
+        let polygons = corners.iter().map(|c| ordered(c)).collect();
+        let floors = map.planning_levels.levels.iter()
+            .map(|l| l.room_names.iter().filter_map(|n| n.parse().ok()).collect())
+            .collect();
+        let footprints = map.rooms.rooms.iter().zip(&numbers)
+            .filter_map(|(r, n)| n.map(|n| (n, r.footprints())))
+            .collect();
+        let mut objects: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut unowned = Vec::new();
+        let mut object_rooms = Vec::with_capacity(map.geometries.objects.len());
+        for (i, o) in map.geometries.objects.iter().enumerate() {
+            let room = crate::map::object_room(&o.name).filter(|n| index.contains_key(n));
+            match room {
+                Some(n) => objects.entry(n).or_default().push(i),
+                None => unowned.push(i),
+            }
+            object_rooms.push(room);
+        }
+        Self { by_room, outdoors, centres, numbers, index, corners, polygons, floors, footprints, objects, unowned, object_rooms }
+    }
+
+    /// Whether the map has a room with this number
+    pub fn is_room(&self, number: u32) -> bool {
+        self.index.contains_key(&number)
+    }
+
+    /// The number of the room at this index in `map.rooms.rooms`
+    pub fn number_of(&self, index: usize) -> Option<u32> {
+        self.numbers.get(index).copied().flatten()
+    }
+
+    /// The objects (indices into `map.geometries.objects`) that belong to this room
+    pub fn objects_of(&self, room: u32) -> &[usize] {
+        self.objects.get(&room).map(Vec::as_slice).unwrap_or_default()
+    }
+
+    /// The objects that belong to no room
+    pub fn unowned_objects(&self) -> &[usize] {
+        &self.unowned
+    }
+
+    /// The room an object belongs to, if it belongs to one
+    pub fn room_of_object(&self, object: usize) -> Option<u32> {
+        self.object_rooms.get(object).copied().flatten()
     }
 
     /// The rooms the player is in, as room numbers: every room whose volume contains
@@ -92,7 +157,7 @@ impl Visibility {
     /// each has to count or its floor or walls would vanish. Standing outside, or in no
     /// volume at all, gives the outdoors or the nearest room.
     pub fn player_rooms(&self, map: &Map, p: [f32; 3], prev: Option<usize>) -> Vec<u32> {
-        let number = |i: usize| map.rooms.rooms[i].section_name.parse::<u32>().ok();
+        let number = |i: usize| self.numbers[i];
         let deep = map.rooms.well_inside(p, 0.2, 100.0);
         let mut rooms: Vec<u32> = deep.iter().filter_map(|&i| number(i)).filter(|n| !self.outdoors.contains(n)).collect();
         if rooms.is_empty() {
@@ -107,19 +172,14 @@ impl Visibility {
         }
         // A room that is not on the player's floor cannot be the one they are in, however
         // its volume overlaps (an upstairs hall over a downstairs one)
-        if let Some(floor) = map.planning_levels.level_at(p[1]) {
-            let here: Vec<u32> = rooms.iter().copied().filter(|n| floor.room_names.iter().any(|r| *r == n.to_string())).collect();
+        if let Some(floor) = map.planning_levels.level_index_at(p[1]).and_then(|i| self.floors.get(i)) {
+            let here: Vec<u32> = rooms.iter().copied().filter(|n| floor.contains(n)).collect();
             if !here.is_empty() {
                 rooms = here;
             }
         }
         rooms.sort();
         rooms
-    }
-
-    /// The room with this number
-    fn room<'a>(&self, map: &'a Map, number: u32) -> Option<&'a crate::map::Room> {
-        map.rooms.rooms.iter().find(|r| r.section_name.parse() == Ok(number))
     }
 
     /// The rooms that stop the player and bullets: the rooms drawing starts from, whole;
@@ -140,9 +200,9 @@ impl Visibility {
                 if starts.contains(&other) {
                     continue;
                 }
-                let corners: Vec<[f32; 3]> = portal.coordinates.iter().map(|v| [v.x, v.y, v.z]).collect();
+                let corners = &self.corners[i];
                 // Positive beyond the portal, where this room's middle is on the negative side
-                let beyond = portal_plane(&corners, centre);
+                let beyond = portal_plane(corners, centre);
                 let entry = match neighbours.iter_mut().position(|n| n.room == other) {
                     Some(at) => at,
                     None => {
@@ -156,7 +216,7 @@ impl Visibility {
                     None => neighbours[entry] = SolidRoom::whole(other),
                 }
                 if let Some(p) = beyond {
-                    if touch.iter().any(|&t| distance_to_polygon(&corners, t) <= TOUCH) {
+                    if touch.iter().any(|&t| distance_to_polygon(corners, t) <= TOUCH) {
                         if let Some(r) = rooms.iter_mut().find(|r| r.room == start) {
                             r.cut.push([-p[0], -p[1], -p[2], -p[3]]);
                         }
@@ -172,29 +232,13 @@ impl Visibility {
             if rooms.iter().any(|r| r.room == n) {
                 continue;
             }
-            let Some(outer) = self.room(map, n) else { continue };
-            let holds = starts.iter().filter_map(|&s| self.room(map, s)).any(|inner| inner.nested_in(outer) >= NESTED);
+            let Some(outer) = self.footprints.get(&n) else { continue };
+            let holds = starts.iter().filter_map(|s| self.footprints.get(s)).any(|inner| crate::map::nested_fraction(inner, outer) >= NESTED);
             if holds {
                 rooms.push(SolidRoom::whole(n));
             }
         }
         rooms
-    }
-
-    /// These rooms and the rooms their portals lead to
-    pub fn with_neighbours(&self, map: &Map, rooms: &[u32]) -> Vec<u32> {
-        let mut all = rooms.to_vec();
-        for room in rooms {
-            for &i in self.by_room.get(room).map(Vec::as_slice).unwrap_or_default() {
-                let p = &map.portals.portals[i];
-                let other = if p.room == *room { p.opposite_room } else { p.room };
-                if !all.contains(&other) {
-                    all.push(other);
-                }
-            }
-        }
-        all.sort();
-        all
     }
 
     /// What to draw from `start`, a room the player is in: the room, and for each portal
@@ -208,15 +252,15 @@ impl Visibility {
     /// A portal within `TOUCH` units of one of the `touch` points (the player's feet and
     /// eyes) is one the player is standing in: both rooms are drawn whole, each cut at the
     /// portal's plane.
-    pub fn plan(&self, map: &Map, start: u32, touch: &[[f32; 3]], eye: [f32; 3], clip: &dyn Fn([f32; 3]) -> [f32; 4]) -> PlanNode {
+    pub fn plan<'a>(&'a self, map: &Map, start: u32, touch: &[[f32; 3]], eye: [f32; 3], clip: &dyn Fn([f32; 3]) -> [f32; 4]) -> PlanNode<'a> {
         let mut budget = MAX_NODES;
-        let mut node = PlanNode { room: start, plane: None, polygon: Vec::new(), touched: false, children: Vec::new() };
+        let mut node = PlanNode { room: start, plane: None, polygon: &[], touched: false, children: Vec::new() };
         self.grow(map, &mut node, FULL, touch, eye, clip, &mut vec![start], &mut budget);
         node
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn grow(&self, map: &Map, node: &mut PlanNode, rect: Rect, touch: &[[f32; 3]], eye: [f32; 3], clip: &dyn Fn([f32; 3]) -> [f32; 4], path: &mut Vec<u32>, budget: &mut usize) {
+    fn grow<'a>(&'a self, map: &Map, node: &mut PlanNode<'a>, rect: Rect, touch: &[[f32; 3]], eye: [f32; 3], clip: &dyn Fn([f32; 3]) -> [f32; 4], path: &mut Vec<u32>, budget: &mut usize) {
         if path.len() > MAX_DEPTH {
             return;
         }
@@ -226,12 +270,12 @@ impl Visibility {
             if path.contains(&other) || *budget == 0 {
                 continue;
             }
-            let corners: Vec<[f32; 3]> = portal.coordinates.iter().map(|v| [v.x, v.y, v.z]).collect();
-            let touched = touch.iter().any(|&p| distance_to_polygon(&corners, p) <= TOUCH);
+            let corners = &self.corners[i];
+            let touched = touch.iter().any(|&p| distance_to_polygon(corners, p) <= TOUCH);
             let rect = if touched {
                 Some(rect)
             } else {
-                project(&corners, clip).and_then(|r| intersect(r, rect))
+                project(corners, clip).and_then(|r| intersect(r, rect))
             };
             let Some(rect) = rect else { continue };
             *budget -= 1;
@@ -240,8 +284,8 @@ impl Visibility {
             let near_side = if touched { self.centres.get(&node.room).copied().unwrap_or(eye) } else { eye };
             let mut child = PlanNode {
                 room: other,
-                plane: portal_plane(&corners, near_side),
-                polygon: ordered(&corners),
+                plane: portal_plane(corners, near_side),
+                polygon: &self.polygons[i],
                 touched,
                 children: Vec::new(),
             };
@@ -255,21 +299,21 @@ impl Visibility {
 
 /// A room to draw, and the rooms seen through its portals
 #[derive(Clone, Debug)]
-pub struct PlanNode {
+pub struct PlanNode<'a> {
     pub room: u32,
     /// The plane of the portal this room is seen through (a, b, c, d), with
     /// a*x + b*y + c*z + d >= 0 on the far side from the camera: the only side that
     /// belongs to the view. None for the room the player is in.
     pub plane: Option<[f32; 4]>,
     /// The portal's corners in drawing order, for masking the screen to its opening
-    pub polygon: Vec<[f32; 3]>,
+    pub polygon: &'a [[f32; 3]],
     /// The player is standing in this portal: the two rooms are drawn whole, each cut at
     /// the portal's plane, since no polygon on screen describes a doorway the camera is in
     pub touched: bool,
-    pub children: Vec<PlanNode>,
+    pub children: Vec<PlanNode<'a>>,
 }
 
-impl PlanNode {
+impl PlanNode<'_> {
     /// Every room in the plan, this one included
     pub fn rooms(&self, out: &mut Vec<u32>) {
         out.push(self.room);

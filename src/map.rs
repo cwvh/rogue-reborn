@@ -88,6 +88,20 @@ pub fn read_model(filename: &Path) -> anyhow::Result<Model> {
 
 // TODO replace or remove
 /// Utility function for driving the IO. Should be replaced or moved.
+/// How much of the floor plan `inner` (from `Room::footprints`) lies inside `outer`'s
+pub fn nested_fraction(inner: &[[f32; 4]], outer: &[[f32; 4]]) -> f32 {
+    let (mut inside, mut total) = (0.0, 0.0);
+    for r in inner {
+        let area = (r[2] - r[0]).max(0.0) * (r[3] - r[1]).max(0.0);
+        let best = outer.iter().map(|o| {
+            (r[2].min(o[2]) - r[0].max(o[0])).max(0.0) * (r[3].min(o[3]) - r[1].max(o[1])).max(0.0)
+        }).fold(0.0, f32::max);
+        inside += best;
+        total += area;
+    }
+    if total > 0.0 { inside / total } else { 0.0 }
+}
+
 /// The room number an object belongs to, from the start of its name: "204" and
 /// "20_doormetal" give 204 and 20, while "glass" gives none.
 pub fn object_room(name: &str) -> Option<u32> {
@@ -1494,17 +1508,7 @@ impl Room {
     /// How much of this room's floor plan lies inside `outer`'s: 1.0 for a stairwell
     /// standing wholly inside a hall, near 0 for rooms that merely touch or share a wall.
     pub fn nested_in(&self, outer: &Room) -> f32 {
-        let outer = outer.footprints();
-        let (mut inside, mut total) = (0.0, 0.0);
-        for r in self.footprints() {
-            let area = (r[2] - r[0]).max(0.0) * (r[3] - r[1]).max(0.0);
-            let best = outer.iter().map(|o| {
-                (r[2].min(o[2]) - r[0].max(o[0])).max(0.0) * (r[3].min(o[3]) - r[1].max(o[1])).max(0.0)
-            }).fold(0.0, f32::max);
-            inside += best;
-            total += area;
-        }
-        if total > 0.0 { inside / total } else { 0.0 }
+        nested_fraction(&self.footprints(), &outer.footprints())
     }
 
     /// Whether a map-space point is inside one of the room's level volumes.
@@ -1785,11 +1789,18 @@ impl PlanningLevels {
     /// or below that, allowing a little for stairs and for standing on a step. None for a
     /// map with no floors listed.
     pub fn level_at(&self, y: f32) -> Option<&PlanningLevel> {
+        self.level_index_at(y).map(|i| &self.levels[i])
+    }
+
+    /// Like `level_at`, as an index into `levels`
+    pub fn level_index_at(&self, y: f32) -> Option<usize> {
         const STEP: f32 = 60.0;
-        self.levels.iter()
-            .filter(|l| l.floor_height <= y + STEP)
-            .max_by(|a, b| a.floor_height.total_cmp(&b.floor_height))
-            .or_else(|| self.levels.iter().min_by(|a, b| a.floor_height.total_cmp(&b.floor_height)))
+        let by_height = |a: &(usize, &PlanningLevel), b: &(usize, &PlanningLevel)| a.1.floor_height.total_cmp(&b.1.floor_height);
+        self.levels.iter().enumerate()
+            .filter(|(_, l)| l.floor_height <= y + STEP)
+            .max_by(by_height)
+            .or_else(|| self.levels.iter().enumerate().min_by(by_height))
+            .map(|(i, _)| i)
     }
 
     fn read(buf: &mut Cursor<Vec<u8>>) -> Result<Self> {
