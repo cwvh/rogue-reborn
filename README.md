@@ -78,7 +78,7 @@ On other platforms, or without the aliases:
 | T | textured / wireframe |
 | P, C | show portals, show collision points |
 | V | toggle room culling (on by default; `--no-cull` starts with it off) |
-| G | colour each room's geometry (the room you stand in is white) and list your rooms |
+| G | color each room's geometry (the room you stand in is white) and list your rooms |
 | F2 | debug dump: writes `debug/dump-<time>.png` and `.txt` with your position, rooms, what you are looking at and a command to come back to the spot |
 | F3 | reload: closes the window and starts again with the same options, so a level is back as new (a random spawn point is picked again unless you gave `--spawn` or `--seed`) |
 | Esc | quit |
@@ -120,6 +120,6 @@ would drop out).
 - `scripts/shots.sh DIR` renders a fixed set of views, and `python scripts/pngdiff.py OLD NEW`
   counts the pixels that differ between two such runs (see the comments in `shots.sh`).
 
-For debugging a level, `--rooms` (or `G`) colours each room, `--no-cull` (or `V`) draws every
+For debugging a level, `--rooms` (or `G`) colors each room, `--no-cull` (or `V`) draws every
 room, `--hide-rooms 5,224` leaves rooms out, and F2 writes a screenshot and a log of where you
 are into `debug/`.

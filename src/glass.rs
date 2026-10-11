@@ -49,7 +49,7 @@ impl Pane {
             .fold(None, |best: Option<f32>, d| Some(best.map_or(d, |b| b.min(d))))
     }
 
-    /// Distance from `point` to the nearest corner or the centre, for blast radius checks
+    /// Distance from `point` to the nearest corner or the center, for blast radius checks
     pub fn distance_to(&self, point: V3) -> f32 {
         let dist = |a: V3| ((a[0] - point[0]).powi(2) + (a[1] - point[1]).powi(2) + (a[2] - point[2]).powi(2)).sqrt();
         self.tris.iter().flat_map(|t| t.p).map(dist).chain([dist(self.center())]).fold(f32::MAX, f32::min)
@@ -140,7 +140,7 @@ impl Pane {
                 }
             }
         }
-        // From one corner, the two nearest others are its neighbours
+        // From one corner, the two nearest others are its neighbors
         let o = pts[0];
         let mut others: Vec<V3> = pts[1..].to_vec();
         others.sort_by(|a, b| dot(sub(*a, o), sub(*a, o)).total_cmp(&dot(sub(*b, o), sub(*b, o))));
@@ -294,7 +294,7 @@ pub struct Fleck {
 }
 
 impl Fleck {
-    /// 1 when new, 0 when it has burnt out
+    /// 1 when new, 0 when it has burned out
     pub fn alpha(&self) -> f32 {
         (1.0 - self.age / self.life).clamp(0.0, 1.0)
     }
@@ -329,10 +329,10 @@ impl Fracture {
     }
 }
 
-/// Break a pane where a bullet went through at `hit`, travelling along unit `dir`.
+/// Break a pane where a bullet went through at `hit`, traveling along unit `dir`.
 ///
 /// The crack pattern is a spider web: spokes out from the impact and rings
-/// around it, with tiny pieces at the middle and bigger ones towards the edges.
+/// around it, with tiny pieces at the middle and bigger ones toward the edges.
 /// Pieces by the hole are blown out along the bullet's path, the rest drop with
 /// a little push, and some of those at the frame hang on for a moment first.
 pub fn shatter(pane: &Pane, hit: V3, dir: V3, mut seed: u64) -> Fracture {
@@ -403,11 +403,11 @@ pub fn shatter(pane: &Pane, hit: V3, dir: V3, mut seed: u64) -> Fracture {
         }
         let at_edge = poly.iter().any(|p| p[0] < 0.01 || p[0] > w - 0.01 || p[1] < 0.01 || p[1] > h - 0.01);
         let world: Vec<V3> = poly.iter().map(|p| to_world(p[0], p[1])).collect();
-        let centre = mul(world.iter().fold([0.0; 3], |a, &p| add(a, p)), 1.0 / world.len() as f32);
+        let center = mul(world.iter().fold([0.0; 3], |a, &p| add(a, p)), 1.0 / world.len() as f32);
         let n = poly.len() as f32;
         let c2 = [poly.iter().map(|p| p[0]).sum::<f32>() / n, poly.iter().map(|p| p[1]).sum::<f32>() / n];
         let d = ((c2[0] - impact[0]).powi(2) + (c2[1] - impact[1]).powi(2)).sqrt();
-        let from_hole = norm(sub(centre, hit));
+        let from_hole = norm(sub(center, hit));
         let in_plane = norm(sub(from_hole, mul(normal, dot(from_hole, normal))));
         let jitter = |s: f32, rand: &mut dyn FnMut() -> f32| [(rand() - 0.5) * s, (rand() - 0.5) * s, (rand() - 0.5) * s];
 
@@ -434,9 +434,9 @@ pub fn shatter(pane: &Pane, hit: V3, dir: V3, mut seed: u64) -> Fracture {
 
         shards.push(Shard {
             uv: world.iter().map(|&p| pane.uv_at(p)).collect(),
-            local: world.iter().map(|&p| sub(p, centre)).collect(),
+            local: world.iter().map(|&p| sub(p, center)).collect(),
             normal,
-            pos: centre,
+            pos: center,
             vel,
             rot: [0.0, 0.0, 0.0, 1.0],
             spin: mul(axis, spin_rate),
@@ -520,7 +520,7 @@ mod tests {
         assert_eq!(w.tris.len(), 2);
         let c = w.center();
         assert!((c[0] - 32267.0).abs() < 1.0 && (c[1] - 33467.0).abs() < 1.0 && (c[2] - 34727.0).abs() < 1.0, "{c:?}");
-        // A ray straight at the pane's centre hits it, one beside it misses
+        // A ray straight at the pane's center hits it, one beside it misses
         let hit = w.raycast([c[0], c[1], c[2] + 500.0], [0.0, 0.0, -1.0]).unwrap();
         assert!((hit - 500.0).abs() < 1.0);
         assert!(w.raycast([c[0] + 1000.0, c[1], c[2] + 500.0], [0.0, 0.0, -1.0]).is_none());

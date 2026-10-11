@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use crate::collision::{Cut, SolidRoom};
 use crate::map::Map;
 
-/// A screen rectangle in normalised device coordinates: min x, min y, max x, max y
+/// A screen rectangle in normalized device coordinates: min x, min y, max x, max y
 pub type Rect = [f32; 4];
 
 const FULL: Rect = [-1.0, -1.0, 1.0, 1.0];
@@ -37,7 +37,7 @@ pub struct Visibility {
     outdoors: HashSet<u32>,
     /// The middle of each room (volume-weighted over its level boxes), to tell which
     /// side of a portal a room is on
-    centres: HashMap<u32, [f32; 3]>,
+    centers: HashMap<u32, [f32; 3]>,
     /// The number of each room, in the order of `map.rooms.rooms`
     numbers: Vec<Option<u32>>,
     /// Where each room is in `map.rooms.rooms`, by number
@@ -80,7 +80,7 @@ impl Visibility {
             })
             .filter_map(|o| crate::map::object_room(&o.name))
             .collect();
-        let mut centres = HashMap::new();
+        let mut centers = HashMap::new();
         for room in &map.rooms.rooms {
             let Ok(number) = room.section_name.parse::<u32>() else { continue };
             let (mut sum, mut weight) = ([0.0f32; 3], 0.0f32);
@@ -88,19 +88,19 @@ impl Visibility {
                 let (o, a) = (&b.tm.position, &b.aabb);
                 let local = [(a[0] + a[3]) / 2.0, (a[1] + a[4]) / 2.0, (a[2] + a[5]) / 2.0];
                 let (x, y, z) = (&b.tm.x_axis, &b.tm.y_axis, &b.tm.z_axis);
-                let centre = [
+                let center = [
                     o.x + x.x * local[0] + y.x * local[1] + z.x * local[2],
                     o.y + x.y * local[0] + y.y * local[1] + z.y * local[2],
                     o.z + x.z * local[0] + y.z * local[1] + z.z * local[2],
                 ];
                 let volume = ((a[3] - a[0]) * (a[4] - a[1]) * (a[5] - a[2])).abs().max(1.0);
                 for i in 0..3 {
-                    sum[i] += centre[i] * volume;
+                    sum[i] += center[i] * volume;
                 }
                 weight += volume;
             }
             if weight > 0.0 {
-                centres.insert(number, [sum[0] / weight, sum[1] / weight, sum[2] / weight]);
+                centers.insert(number, [sum[0] / weight, sum[1] / weight, sum[2] / weight]);
             }
         }
 
@@ -135,7 +135,7 @@ impl Visibility {
             }
             object_rooms.push(room);
         }
-        Self { by_room, outdoors, centres, numbers, index, corners, polygons, footprints, bounds, objects, unowned, object_rooms }
+        Self { by_room, outdoors, centers, numbers, index, corners, polygons, footprints, bounds, objects, unowned, object_rooms }
     }
 
     /// Whether the map has a room with this number
@@ -187,7 +187,7 @@ impl Visibility {
     }
 
     /// The rooms that stop the player and bullets: the rooms drawing starts from, whole;
-    /// the rooms their portals lead to, only beyond the portal (a neighbour overlaps the
+    /// the rooms their portals lead to, only beyond the portal (a neighbor overlaps the
     /// player's room, and its walls on this side are not really there); and the other
     /// rooms the player is well inside (`around`), whole, since they can hold the floor.
     ///
@@ -195,9 +195,9 @@ impl Visibility {
     /// cut at the portal too, as it overlaps the room beyond.
     pub fn solid_rooms(&self, map: &Map, starts: &[u32], around: &[u32], touch: &[[f32; 3]]) -> Vec<SolidRoom> {
         let mut rooms: Vec<SolidRoom> = starts.iter().map(|&r| SolidRoom::whole(r)).collect();
-        let mut neighbours: Vec<SolidRoom> = Vec::new();
+        let mut neighbors: Vec<SolidRoom> = Vec::new();
         for &start in starts {
-            let Some(&centre) = self.centres.get(&start) else { continue };
+            let Some(&center) = self.centers.get(&start) else { continue };
             for &i in self.by_room.get(&start).map(Vec::as_slice).unwrap_or_default() {
                 let portal = &map.portals.portals[i];
                 let other = if portal.room == start { portal.opposite_room } else { portal.room };
@@ -210,19 +210,19 @@ impl Visibility {
                 // which that is, even in the doorway (exactly in the plane there is no side,
                 // and portal_plane gives none). The room's middle is only a fallback: in a big
                 // or L-shaped room it can sit on the far side of a portal.
-                let reference = touch.first().copied().unwrap_or(centre);
+                let reference = touch.first().copied().unwrap_or(center);
                 let beyond = portal_plane(corners, reference);
-                let entry = match neighbours.iter_mut().position(|n| n.room == other) {
+                let entry = match neighbors.iter_mut().position(|n| n.room == other) {
                     Some(at) => at,
                     None => {
-                        neighbours.push(SolidRoom { room: other, keep: Vec::new(), cut: Vec::new() });
-                        neighbours.len() - 1
+                        neighbors.push(SolidRoom { room: other, keep: Vec::new(), cut: Vec::new() });
+                        neighbors.len() - 1
                     }
                 };
                 match beyond {
-                    Some(p) => neighbours[entry].keep.push(p),
+                    Some(p) => neighbors[entry].keep.push(p),
                     // No plane to cut by: the whole room counts
-                    None => neighbours[entry] = SolidRoom::whole(other),
+                    None => neighbors[entry] = SolidRoom::whole(other),
                 }
                 if let Some(p) = beyond {
                     if touched {
@@ -234,7 +234,7 @@ impl Visibility {
                 }
             }
         }
-        rooms.extend(neighbours);
+        rooms.extend(neighbors);
         // A room the player is inside but that has no portal to theirs counts only if
         // their room stands mostly within it, like a stairwell in a hall, which can hold the
         // floor beside the stairs. One that merely shares a wall's thickness does not.
@@ -528,7 +528,7 @@ mod tests {
     // On rm11, rooms 119 and 121 overlap and are joined by a doorway at x = 29477. Standing in
     // 119, only the part of 121 past that doorway is really 121.
     #[test]
-    fn a_neighbour_counts_only_beyond_the_portal() {
+    fn a_neighbor_counts_only_beyond_the_portal() {
         let path = std::path::Path::new("data/map/rm11/rm11.map");
         if !path.exists() {
             eprintln!("skipping: {} not found", path.display());

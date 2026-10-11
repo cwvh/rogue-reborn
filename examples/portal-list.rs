@@ -2,7 +2,7 @@ use anyhow::Result;
 use rogue_reborn::map;
 use std::path::Path;
 
-/// List every portal with its rooms, corner coordinates, centre and size, optionally only
+/// List every portal with its rooms, corner coordinates, center and size, optionally only
 /// those touching one room: `portal-list MAP [ROOM]`.
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -26,7 +26,7 @@ fn main() -> Result<()> {
                 hi[a] = hi[a].max(x);
             }
         }
-        println!("{:12} {:>4} -> {:<4} centre ({:.0}, {:.0}, {:.0}) size ({:.0}, {:.0}, {:.0})",
+        println!("{:12} {:>4} -> {:<4} center ({:.0}, {:.0}, {:.0}) size ({:.0}, {:.0}, {:.0})",
             p.name, p.room, p.opposite_room, c[0], c[1], c[2], hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
     }
     Ok(())

@@ -1,6 +1,6 @@
 //! Thrown grenades: how they fly and bounce, and how far a blast reaches.
 //!
-//! Units are map units, about a centimetre each. The numbers are ours: the original
+//! Units are map units, about a centimeter each. The numbers are ours: the original
 //! game's explosion classes are not in any data file.
 
 use crate::collision::CollisionWorld;

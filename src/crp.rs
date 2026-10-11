@@ -19,11 +19,11 @@
 //!   first the global vertex indices, then the same triangles in part-local
 //!   indices (which start `0,1,2`).
 //! - Inside a chunk, at offset `0x72` from the end of the path: `u32 V` (the
-//!   part's vertex count), `V` 16-byte colour entries (not read), `u32 1`,
+//!   part's vertex count), `V` 16-byte color entries (not read), `u32 1`,
 //!   then `V` UV pairs of `f32`, indexed by the part-local vertex index.
 //!   Values run roughly -1.1 to 1.7, so textures wrap.
 //!
-//! Units are centimetre-like and a soldier is about 200 tall with the origin
+//! Units are centimeter-like and a soldier is about 200 tall with the origin
 //! near the hips. Coordinates are the same handedness as the MAP files.
 
 use std::collections::HashMap;

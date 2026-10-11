@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Walk a grid around a point and find places where the floor would be missing from
-/// collision (the room whose floor it is, its portal neighbours clipped at the portals, and the
+/// collision (the room whose floor it is, its portal neighbors clipped at the portals, and the
 /// rooms it is nested in): `floor-scan MAP x y z radius step`
 fn main() -> Result<()> {
     let a: Vec<String> = std::env::args().collect();

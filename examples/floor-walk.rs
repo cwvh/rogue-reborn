@@ -6,7 +6,7 @@ use std::path::Path;
 
 /// Find places where walking from one room's floor onto the next would drop the player:
 /// from each grid point the room whose floor it is is the start, as the viewer does, and the
-/// floor at each neighbouring point (when it is about as high) must still be solid.
+/// floor at each neighboring point (when it is about as high) must still be solid.
 ///
 ///   floor-walk MAP x y z radius step
 fn main() -> Result<()> {
@@ -37,7 +37,7 @@ fn main() -> Result<()> {
     }
 
     // Whether something solid (a wall, a closed door) stands between a point and each
-    // neighbour, with every room solid: no one walks through it, so there is no step to take
+    // neighbor, with every room solid: no one walks through it, so there is no step to take
     let dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)];
     let mut walled = vec![[false; 4]; size * size];
     for ix in -n..=n {

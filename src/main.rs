@@ -92,7 +92,7 @@ struct Args {
     pitch: Option<f32>,
     textured: bool,
     portals: bool,
-    /// Colour each room's geometry and report the rooms the player is in
+    /// Color each room's geometry and report the rooms the player is in
     rooms: bool,
     /// Write the F2 debug dump on the first frame and exit
     dump: bool,
@@ -725,7 +725,7 @@ fn main() {
     }
     // Soft clouds for dust and a bright sprite for the flash of a spark
     let cloud_tex = find_file(Path::new("data/texture"), "TGAdirt_cloud", "rsb").and_then(|p| rsb::read(&p).ok()).and_then(|t| upload_rsb_to_gl(&t));
-    // The flash sprite sits on a flat colour, which would show as a square, so key it out
+    // The flash sprite sits on a flat color, which would show as a square, so key it out
     let flash_tex = find_file(Path::new("data/texture"), "Sparks1", "rsb").and_then(|p| rsb::read(&p).ok()).and_then(|t| {
         let mut px = t.to_rgba8();
         impact::key_alpha(&mut px, t.width as usize, t.height as usize);
@@ -1164,7 +1164,7 @@ fn main() {
             for (i, d) in doors.iter().enumerate() {
                 // Aim at the doorway, or at the leaf wherever it has gone (a door swung open
                 // to the side is still the one in front of you)
-                for c in [d.centre(0.0), d.centre(door_states[i].open)] {
+                for c in [d.center(0.0), d.center(door_states[i].open)] {
                     let to = [c[0] - eye[0], c[1] - eye[1], c[2] - eye[2]];
                     let dist = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
                     if dist > DOOR_REACH || dist < 1.0 {
@@ -1187,7 +1187,7 @@ fn main() {
                     let sound_name = if door_states[i].opening { &doors[i].open_sound } else { &doors[i].close_sound };
                     if let Some(snd) = sound.as_mut() {
                         if !sound_name.eq_ignore_ascii_case("none") {
-                            snd.play_at(sound_name, doors[i].centre(door_states[i].open), listener_of(&camera), 1.0);
+                            snd.play_at(sound_name, doors[i].center(door_states[i].open), listener_of(&camera), 1.0);
                         }
                     }
                     message = (format!("DOOR {}", if door_states[i].opening { "OPENING" } else { "CLOSING" }), game_time + 1.2);
@@ -1538,7 +1538,7 @@ fn main() {
             let (point, normal, material) = near.map_or((c, [0.0, 1.0, 0.0], None), |n| (n.1, n.2, n.3));
             let surface = material.and_then(|m| level.materials.materials.get(m)).map_or(Surface::Concrete, |m| Surface::classify(&m.filename));
             next_rng(&mut rng);
-            // In mid-air (nothing within a metre) there is no ground to scorch or throw dust along
+            // In mid-air (nothing within a meter) there is no ground to scorch or throw dust along
             let on_surface = near.is_some_and(|n| n.0 < 100.0);
             effects.explosion(point, normal, rng, on_surface);
             if on_surface && surface != Surface::Glass {
@@ -1827,7 +1827,7 @@ fn main() {
                             }
                         }
                         let mat_index = od.mn as usize;
-                        // Room colours replace the textures, so they show even where textures are missing
+                        // Room colors replace the textures, so they show even where textures are missing
                         let tex_id = if room_debug { Some(0) } else { ensure_texture(&level.materials, mat_index, &map_num, &mut textures) };
                         if let Some(tex_id) = tex_id {
                             // TODO put all faces with same tex-id together so I can bind once
@@ -2230,7 +2230,7 @@ fn main() {
             let feet = [eye[0], eye[1] - if first_person { eye_height } else { 0.0 }, eye[2]];
             let nearby_doors: Vec<String> = doors.iter().zip(&door_states)
                 .filter_map(|(d, s)| {
-                    let c = d.centre(s.open);
+                    let c = d.center(s.open);
                     let dist = ((c[0] - eye[0]).powi(2) + (c[1] - eye[1]).powi(2) + (c[2] - eye[2]).powi(2)).sqrt();
                     (dist <= 500.0).then(|| format!("{} {:.0} units away, {:.0}% open{}", d.name, dist, s.open * 100.0,
                         d.portal.map_or(String::new(), |p| format!(", portal {}", level.portals.portals[p].name))))
@@ -2302,10 +2302,10 @@ fn main() {
     }
 }
 
-// Spawn at the centre of a named zone from the multiplayer mission file
+// Spawn at the center of a named zone from the multiplayer mission file
 // (data/mission/<MAP>_MUL.mis). Zones appear there as two MAP-space points
 // followed by the quoted zone name, e.g. "ZONE_RM11_COURTYARD". Returns the
-// feet position in MAP space, standing on the floor under the zone's centre.
+// feet position in MAP space, standing on the floor under the zone's center.
 fn find_zone_spawn(map_path: &Path, zone: &str, world: &CollisionWorld) -> Option<[f32; 3]> {
     let stem = map_path.file_stem()?.to_string_lossy().to_uppercase();
     let mission = Path::new("data/mission").join(format!("{stem}_MUL.mis"));
@@ -2419,7 +2419,7 @@ fn draw_character(c: &crp::Crp, verts: &[[f32; 3]], part_textures: &[Option<u32>
             .or(part_textures.get(pi).copied().flatten());
         let uvs = part.corner_uvs.as_ref();
         if is_glass && textured { glEnable(0x0BE2); glBlendFunc(0x0302, 0x0303); } // GL_BLEND, SRC_ALPHA, ONE_MINUS_SRC_ALPHA
-        // Solid mode shows the texture; wireframe shows flat colour lines
+        // Solid mode shows the texture; wireframe shows flat color lines
         if let (true, Some(id), Some(_)) = (textured, tex, uvs) {
             glEnable(0x0DE1); // GL_TEXTURE_2D
             glBindTexture(0x0DE1, id);
@@ -2432,7 +2432,7 @@ fn draw_character(c: &crp::Crp, verts: &[[f32; 3]], part_textures: &[Option<u32>
             } else if textured {
                 glColor4f(0.3, 0.35, 0.4, 1.0);
             } else {
-                let (r, g, b) = material_colour(&part.material);
+                let (r, g, b) = material_color(&part.material);
                 glColor4f(r, g, b, 1.0);
             }
         }
@@ -2533,8 +2533,8 @@ fn draw_fracture(materials: &map::Materials, map_num: &str, textures: &mut HashM
     }
 }
 
-// Stable, distinguishable colour for a material name
-fn material_colour(name: &str) -> (f32, f32, f32) {
+// Stable, distinguishable color for a material name
+fn material_color(name: &str) -> (f32, f32, f32) {
     let h = name.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
     let c = |shift: u32| 0.35 + 0.65 * ((h >> shift) & 0xff) as f32 / 255.0;
     (c(0), c(8), c(16))
@@ -2633,7 +2633,7 @@ fn glu_perspective(fov_y: f32, aspect: f32, z_near: f32, z_far: f32) {
 
 // 2D debug text (stroke lines) overlay
 
-// Heads-up display: crosshair at the centre, status lines bottom-left and a
+// Heads-up display: crosshair at the center, status lines bottom-left and a
 // message under the crosshair. Leaves the 2D projection set; the debug text
 // that follows re-enables depth testing.
 fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_marker: bool, veil: f32) {
@@ -2839,7 +2839,7 @@ unsafe fn draw_plan(node: &visibility::PlanNode<'_>, level: i32, fill_mode: u32,
     }
 }
 
-/// A stable colour for a room's name, so the same room looks the same every run.
+/// A stable color for a room's name, so the same room looks the same every run.
 /// The rooms the player is standing in are drawn white.
 fn room_color(name: &str, current: bool) -> [f32; 3] {
     if current {
@@ -2910,7 +2910,7 @@ fn write_debug_dump(r: &DebugReport, rgb: &[u8], width: u32, height: u32) -> any
     writeln!(t, "map: {} ({})", r.map_path.display(), r.map_num)?;
     writeln!(t, "args: {}", std::env::args().skip(1).collect::<Vec<_>>().join(" "))?;
     writeln!(t, "mode: {}{}", if r.first_person { "first person" } else { "free fly" }, if r.third_person { ", third person view" } else { "" })?;
-    writeln!(t, "toggles: textured={} room_colours={} portals={} collisions={}", r.textured, r.room_debug, r.show_portals, r.show_collisions)?;
+    writeln!(t, "toggles: textured={} room_colors={} portals={} collisions={}", r.textured, r.room_debug, r.show_portals, r.show_collisions)?;
     writeln!(t, "frame: {:.1} fps, {:.2} ms render", r.fps, r.render_ms)?;
     writeln!(t)?;
     writeln!(t, "eye (map space): {:.1}, {:.1}, {:.1}", r.eye[0], r.eye[1], r.eye[2])?;

@@ -155,7 +155,7 @@ impl Placement {
         [s, 0.0, c]
     }
 
-    /// Which side of the character a shot travelling along `dir` hits
+    /// Which side of the character a shot traveling along `dir` hits
     pub fn facing_of_shot(&self, dir: V3) -> Facing {
         let to_attacker = [-dir[0], 0.0, -dir[2]];
         let len = (to_attacker[0] * to_attacker[0] + to_attacker[2] * to_attacker[2]).sqrt();
@@ -411,10 +411,10 @@ mod tests {
     #[test]
     fn shots_are_classified_by_side() {
         let p = Placement { pos: [0.0; 3], yaw_deg: 0.0, scale: [1.0; 3] }; // faces +Z
-        // A shot travelling -Z comes from in front of someone facing +Z
+        // A shot traveling -Z comes from in front of someone facing +Z
         assert_eq!(p.facing_of_shot([0.0, 0.0, -1.0]), Facing::Front);
         assert_eq!(p.facing_of_shot([0.0, 0.0, 1.0]), Facing::Back);
-        // Model +X is the character's right: a shot travelling -X comes from the right
+        // Model +X is the character's right: a shot traveling -X comes from the right
         assert_eq!(p.facing_of_shot([-1.0, 0.0, 0.0]), Facing::Right);
         assert_eq!(p.facing_of_shot([1.0, 0.0, 0.0]), Facing::Left);
     }
@@ -492,7 +492,7 @@ mod tests {
         // Belt height is the abdomen
         assert_eq!(aim(112.0).expect("abdomen hit").part, BodyPart::Abdomen);
         // Shin height
-        // (aimed at the right leg, 8 units off the centre line)
+        // (aimed at the right leg, 8 units off the center line)
         let leg = raycast_character(&c, &skel, &skin, &verts, &place, [508.0, 40.0, 300.0], [0.0, 0.0, -1.0])
             .expect("leg hit");
         assert_eq!(leg.part, BodyPart::RightLeg);

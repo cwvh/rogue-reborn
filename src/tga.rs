@@ -1,4 +1,4 @@
-//! Minimal TGA reader: uncompressed true-colour (type 2), 24 or 32 bits per
+//! Minimal TGA reader: uncompressed true-color (type 2), 24 or 32 bits per
 //! pixel, which is all the game's character textures use.
 
 use std::path::Path;
@@ -22,7 +22,7 @@ pub fn parse(d: &[u8]) -> Result<Tga> {
     let id_len = d[0] as usize;
     let (color_map, image_type) = (d[1], d[2]);
     if image_type != 2 || color_map != 0 {
-        bail!("unsupported TGA (type {image_type}, colour map {color_map})");
+        bail!("unsupported TGA (type {image_type}, color map {color_map})");
     }
     let width = u16::from_le_bytes([d[12], d[13]]) as usize;
     let height = u16::from_le_bytes([d[14], d[15]]) as usize;

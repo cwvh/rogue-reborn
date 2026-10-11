@@ -1,4 +1,4 @@
-// Draw the realistic bullet holes to a PNG contact sheet over a wall-coloured
+// Draw the realistic bullet holes to a PNG contact sheet over a wall-colored
 // background: hole-png out.png [first_seed]. One row per surface, four holes each.
 
 use std::path::Path;

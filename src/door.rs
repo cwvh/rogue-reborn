@@ -47,7 +47,7 @@ pub struct Door {
     pub portal: Option<usize>,
     pub rooms: Vec<u32>,
     /// The middle of the leaf in the door's own space
-    pub centre_local: V3,
+    pub center_local: V3,
 }
 
 impl Door {
@@ -69,8 +69,8 @@ impl Door {
     }
 
     /// The middle of the leaf in the world, with the door `open` this far
-    pub fn centre(&self, open: f32) -> V3 {
-        self.place(self.centre_local, open)
+    pub fn center(&self, open: f32) -> V3 {
+        self.place(self.center_local, open)
     }
 
     /// The 4x4 column-major matrix that does `place`, for OpenGL
@@ -129,12 +129,12 @@ pub fn doors(level: &Map) -> Vec<Door> {
             close_sound: name3.clone(),
             portal: None,
             rooms: map::object_room(&d.section_name).into_iter().collect(),
-            centre_local: [0.0; 3],
+            center_local: [0.0; 3],
         };
 
         // The portal in the doorway is the one the closed leaf covers
-        door.centre_local = leaf_centre(level, &door);
-        let centre = door.centre(0.0);
+        door.center_local = leaf_center(level, &door);
+        let center = door.center(0.0);
         let nearest = level.portals.portals.iter().enumerate()
             .map(|(i, p)| {
                 let n = p.coordinates.len().max(1) as f32;
@@ -143,7 +143,7 @@ pub fn doors(level: &Map) -> Vec<Door> {
                     p.coordinates.iter().map(|v| v.y).sum::<f32>() / n,
                     p.coordinates.iter().map(|v| v.z).sum::<f32>() / n,
                 ];
-                (i, ((c[0] - centre[0]).powi(2) + (c[1] - centre[1]).powi(2) + (c[2] - centre[2]).powi(2)).sqrt())
+                (i, ((c[0] - center[0]).powi(2) + (c[1] - center[1]).powi(2) + (c[2] - center[2]).powi(2)).sqrt())
             })
             .min_by(|a, b| a.1.total_cmp(&b.1));
         if let Some((i, dist)) = nearest {
@@ -162,7 +162,7 @@ pub fn doors(level: &Map) -> Vec<Door> {
 const PORTAL_MATCH: f32 = 40.0;
 
 /// The middle of the leaf, in the door's own space
-fn leaf_centre(level: &Map, door: &Door) -> V3 {
+fn leaf_center(level: &Map, door: &Door) -> V3 {
     let object = &level.geometries.objects[door.model_index];
     let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
     for v in &object.vertices {
@@ -235,7 +235,7 @@ mod tests {
             origin: [100.0, 0.0, 200.0],
             axes: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             motion: Motion::Swing { angle: std::f32::consts::FRAC_PI_2 },
-            seconds: 0.5, open_sound: String::new(), close_sound: String::new(), portal: None, rooms: vec![], centre_local: [0.0; 3],
+            seconds: 0.5, open_sound: String::new(), close_sound: String::new(), portal: None, rooms: vec![], center_local: [0.0; 3],
         };
         // Closed, the free end (120 along z) is where it says
         assert_eq!(door.place([0.0, 0.0, 120.0], 0.0), [100.0, 0.0, 320.0]);
@@ -255,7 +255,7 @@ mod tests {
             name: "d".into(), model: "d".into(), model_index: 0, origin: [0.0; 3],
             axes: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             motion: Motion::Swing { angle: 1.0 }, seconds: 0.5,
-            open_sound: String::new(), close_sound: String::new(), portal: None, rooms: vec![], centre_local: [0.0; 3],
+            open_sound: String::new(), close_sound: String::new(), portal: None, rooms: vec![], center_local: [0.0; 3],
         };
         let mut s = DoorState { open: 0.0, opening: true };
         assert!(s.advance(&door, 0.25) && (s.open - 0.5).abs() < 1e-6);

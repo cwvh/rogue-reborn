@@ -11,7 +11,7 @@ use crate::map::{
 /// The most characters the demo room places
 pub const MAX_NPCS: usize = 8;
 
-/// The room's inside measurements, in map units (about a centimetre each)
+/// The room's inside measurements, in map units (about a centimeter each)
 pub const WIDTH: f32 = 1000.0;
 pub const DEPTH: f32 = 1000.0;
 pub const HEIGHT: f32 = 300.0;
@@ -22,7 +22,7 @@ const TILE: f32 = 200.0;
 /// The room is named like the rooms of a real level, so it is drawn and walked like one
 const ROOM: &str = "1";
 
-/// A box with its floor at y = 0, centred on the origin, with every face pointing inward
+/// A box with its floor at y = 0, centered on the origin, with every face pointing inward
 pub fn map() -> Map {
     let (hx, hz) = (WIDTH / 2.0, DEPTH / 2.0);
 
@@ -162,8 +162,8 @@ mod tests {
     fn the_floor_is_underfoot_and_the_walls_are_where_they_should_be() {
         let world = CollisionWorld::from_map(&map(), Params::default());
         assert_eq!(world.ground_at(0.0, 0.0, 100.0), Some(0.0));
-        let centre = [0.0, 150.0, 0.0];
-        let wall = |dir: [f32; 3]| world.raycast_hit(centre, dir, 5000.0).map(|h| h.dist);
+        let center = [0.0, 150.0, 0.0];
+        let wall = |dir: [f32; 3]| world.raycast_hit(center, dir, 5000.0).map(|h| h.dist);
         assert!((wall([1.0, 0.0, 0.0]).unwrap() - WIDTH / 2.0).abs() < 0.5);
         assert!((wall([0.0, 0.0, -1.0]).unwrap() - DEPTH / 2.0).abs() < 0.5);
         assert!((wall([0.0, 1.0, 0.0]).unwrap() - (HEIGHT - 150.0)).abs() < 0.5);

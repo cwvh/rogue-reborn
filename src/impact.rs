@@ -1,7 +1,7 @@
 //! What a bullet leaves behind on a wall: the hole, and the debris thrown out.
 //!
 //! The original game stuck a small sprite on the surface. `key_alpha` makes
-//! those sprites usable (they are stored on a flat background colour). The
+//! those sprites usable (they are stored on a flat background color). The
 //! "realistic" option instead draws a hole for the surface that was hit, with
 //! splinters from wood, sparks off metal and dust and chips from plaster.
 
@@ -55,7 +55,7 @@ impl Surface {
         }
     }
 
-    /// How big the hole's picture is, in map units (about a centimetre each)
+    /// How big the hole's picture is, in map units (about a centimeter each)
     pub fn decal_size(self, realistic: bool) -> f32 {
         match (self, realistic) {
             (Surface::Wood, true) => 20.0,
@@ -68,8 +68,8 @@ impl Surface {
 }
 
 /// Make a sprite's flat background transparent. The sprite is `w` by `h` RGBA
-/// pixels; the background colour is taken from its corners, and a pixel becomes
-/// more opaque the further its colour is from that.
+/// pixels; the background color is taken from its corners, and a pixel becomes
+/// more opaque the further its color is from that.
 pub fn key_alpha(rgba: &mut [u8], w: usize, h: usize) {
     if w == 0 || h == 0 || rgba.len() < w * h * 4 {
         return;
@@ -193,7 +193,7 @@ impl Canvas {
         Canvas { px: vec![[0.0; 4]; TEXTURE_SIZE * TEXTURE_SIZE] }
     }
 
-    /// Lay a shape over the picture: `f(x, y)` gives the colour and opacity at each
+    /// Lay a shape over the picture: `f(x, y)` gives the color and opacity at each
     /// pixel, with the middle of the picture at (0, 0)
     fn lay(&mut self, f: impl Fn(f32, f32) -> ([f32; 3], f32)) {
         let c = TEXTURE_SIZE as f32 / 2.0;
@@ -234,7 +234,7 @@ fn segment(px: f32, py: f32, a: [f32; 2], b: [f32; 2]) -> (f32, f32) {
 
 /// A hole that is bright where it is eaten out of plaster, stone or dirt: a
 /// black hole in a crater of pale dust, with cracks running away from it and
-/// chips scattered about. `tint` is the colour of the dust.
+/// chips scattered about. `tint` is the color of the dust.
 fn crater(seed: u64, tint: [f32; 3]) -> Vec<u8> {
     let mut rng = Rng::new(seed);
     let mut cv = Canvas::new();
@@ -298,7 +298,7 @@ fn wood_hole(seed: u64) -> Vec<u8> {
     cv.lay(|x, y| {
         let wob = 1.0 + (noise(seed ^ 1, x * 0.3 + 9.0, y * 0.3 + 9.0) - 0.5) * 0.7;
         let r = ((x / ax).powi(2) + (y / ay).powi(2)).sqrt() / wob;
-        let streak = noise(seed ^ 2, x * 1.4, y * 0.12); // fibres running along the grain
+        let streak = noise(seed ^ 2, x * 1.4, y * 0.12); // fibers running along the grain
         (mix([0.2, 0.11, 0.05], [0.42, 0.26, 0.12], streak), 0.9 * (1.0 - smooth((r - 0.6) / 0.4)))
     });
     // Splinters, mostly lying along the grain, some torn out to the side

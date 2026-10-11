@@ -24,8 +24,8 @@ fn cross(a: V3, b: V3) -> V3 {
 }
 fn len(a: V3) -> f32 { dot(a, a).sqrt() }
 
-/// Tunables for the player body. Units are MAP units (about a centimetre: the
-/// storeys in rm11 are 400 units apart).
+/// Tunables for the player body. Units are MAP units (about a centimeter: the
+/// stories in rm11 are 400 units apart).
 #[derive(Clone, Copy, Debug)]
 pub struct Params {
     pub radius: f32,
@@ -555,9 +555,9 @@ impl CollisionWorld {
                         continue;
                     }
                     // Recomputed per triangle: earlier pushes move the body
-                    let centre = [p.pos[0], p.pos[1] + h, p.pos[2]];
-                    let q = closest_on_triangle(centre, t);
-                    let away = sub(centre, q);
+                    let center = [p.pos[0], p.pos[1] + h, p.pos[2]];
+                    let q = closest_on_triangle(center, t);
+                    let away = sub(center, q);
                     let dist = len(away);
                     if dist >= prm.radius {
                         continue;
@@ -566,7 +566,7 @@ impl CollisionWorld {
                     let (mut hx, mut hz) = (away[0], away[2]);
                     let mut hl = (hx * hx + hz * hz).sqrt();
                     if hl < 1e-4 {
-                        // Centre is on the triangle; use its normal
+                        // Center is on the triangle; use its normal
                         hx = t.n[0];
                         hz = t.n[2];
                         hl = (hx * hx + hz * hz).sqrt();
@@ -596,7 +596,7 @@ impl CollisionWorld {
         let mut worst = f32::INFINITY;
         for k in 0..3 {
             let h = lo + (hi - lo) * (k as f32 / 2.0);
-            let centre = [p.pos[0], p.pos[1] + h, p.pos[2]];
+            let center = [p.pos[0], p.pos[1] + h, p.pos[2]];
             let reach = prm.radius * 2.0;
             let (c0, c1) = (self.col(p.pos[0] - reach), self.col(p.pos[0] + reach));
             let (r0, r1) = (self.row(p.pos[2] - reach), self.row(p.pos[2] + reach));
@@ -607,7 +607,7 @@ impl CollisionWorld {
                         if !self.solid(t) || t.n[1].abs() >= ny_floor {
                             continue;
                         }
-                        let d = len(sub(centre, closest_on_triangle(centre, t))) - prm.radius;
+                        let d = len(sub(center, closest_on_triangle(center, t))) - prm.radius;
                         worst = worst.min(d);
                     }
                 }
@@ -853,8 +853,8 @@ mod tests {
             for _ in 0..1000 {
                 w.step(&mut p, step, 1.0 / 60.0);
             }
-            let travelled = ((p.pos[0] - start[0]).powi(2) + (p.pos[2] - start[2]).powi(2)).sqrt();
-            if travelled < 7500.0 * 0.9 {
+            let traveled = ((p.pos[0] - start[0]).powi(2) + (p.pos[2] - start[2]).powi(2)).sqrt();
+            if traveled < 7500.0 * 0.9 {
                 stopped += 1;
             }
         }

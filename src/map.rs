@@ -1397,7 +1397,7 @@ pub struct Rooms {
 impl Rooms {
     /// The rooms the point is well inside, as indices into `rooms`: in a level volume
     /// at least `fraction` of its narrowest width (up to `max`) from every wall.
-    /// Volumes overlap their neighbours by a wall's thickness, so the edge of a volume
+    /// Volumes overlap their neighbors by a wall's thickness, so the edge of a volume
     /// does not make a room the player's.
     pub fn well_inside(&self, p: [f32; 3], fraction: f32, max: f32) -> Vec<usize> {
         (0..self.rooms.len()).filter(|&i| {
