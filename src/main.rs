@@ -465,8 +465,9 @@ fn main() {
         },
         characters,
         npcs,
-        [camera.position[0], camera.position[1] - eye_height, -camera.position[2]],
     );
+    // The player on the floor below the camera: slot 0, who this viewer plays
+    let me = sim.add_player([camera.position[0], camera.position[1] - eye_height, -camera.position[2]]).expect("a game has room for a player");
     if let Some(open) = args.doors_open {
         sim.set_doors_open(open);
     }
@@ -538,7 +539,7 @@ fn main() {
     let start_time = Instant::now();
     // Time the sim has yet to run, and where the player stood a tick ago, to draw between ticks
     let mut tick_budget = 0.0f32;
-    let mut prev_feet = sim.player.pos;
+    let mut prev_feet = sim.players[me].player.pos;
     let base_speed = 7.5;
     let mut frames_drawn = 0u32;
     // Frames timed, summed render ms and summed whole-frame ms
@@ -672,7 +673,7 @@ fn main() {
             }
             if frames_drawn % 10 == 0 {
                 println!("frame {frames_drawn:4} feet=({:.1}, {:.1}, {:.1}) on_ground={} movement={movement:?} anim_frame={player_frame:.1}",
-                    sim.player.pos[0], sim.player.pos[1], sim.player.pos[2], sim.player.on_ground);
+                    sim.players[me].player.pos[0], sim.players[me].player.pos[1], sim.players[me].player.pos[2], sim.players[me].player.on_ground);
             }
         }
 
@@ -744,8 +745,8 @@ fn main() {
                 },
                 None => input,
             };
-            prev_feet = sim.player.pos;
-            events.extend(sim.tick(&tick_input, sim::TICK));
+            prev_feet = sim.players[me].player.pos;
+            events.extend(sim.tick(&[tick_input], sim::TICK));
             if let Some(rec) = recorder.as_mut() {
                 rec.after_tick(&tick_input, &sim);
             }
@@ -762,7 +763,7 @@ fn main() {
             }
             // Dropping in from the free view is a jump, not something to glide through
             if was_free && tick_input.observer.is_none() {
-                prev_feet = sim.player.pos;
+                prev_feet = sim.players[me].player.pos;
             }
             was_free = tick_input.observer.is_some();
             shown = tick_input;
@@ -783,12 +784,12 @@ fn main() {
         // The view is at the player's eyes, between where they were a tick ago and now
         let draw_feet = if first_person {
             let alpha = if fixed_step { 1.0 } else { (tick_budget / sim::TICK).clamp(0.0, 1.0) };
-            let (a, b) = (prev_feet, sim.player.pos);
+            let (a, b) = (prev_feet, sim.players[me].player.pos);
             let feet = [a[0] * (1.0 - alpha) + b[0] * alpha, a[1] * (1.0 - alpha) + b[1] * alpha, a[2] * (1.0 - alpha) + b[2] * alpha];
             camera.position = [feet[0], feet[1] + eye_height, -feet[2]];
             feet
         } else {
-            sim.player.pos
+            sim.players[me].player.pos
         };
 
         // A blast leaves the view shaken and whited out, and the sound muffled, for a while
@@ -811,8 +812,10 @@ fn main() {
                     }
                 }
                 sim::Event::Log(line) => println!("{line}"),
-                sim::Event::Shot { start, end, hit_character } => {
-                    tracer = Some((start, end, hit_character, game_time + 0.1));
+                sim::Event::Shot { player, start, end, hit_character } => {
+                    if player == me {
+                        tracer = Some((start, end, hit_character, game_time + 0.1));
+                    }
                 }
                 sim::Event::BulletHit { point, normal, dir, surface, material, dist, seed } => {
                     // The bullet struck the level: leave a hole and throw some debris
@@ -860,7 +863,7 @@ fn main() {
                         }
                     }
                 }
-                sim::Event::PlayerBlast { shake: s, veil: v } => {
+                sim::Event::PlayerBlast { player, shake: s, veil: v } if player == me => {
                     shake = shake.max(s);
                     veil = veil.max(v);
                     if s > 0.1 {
@@ -870,6 +873,8 @@ fn main() {
                         }
                     }
                 }
+                // What happened to other players is not felt here
+                sim::Event::PlayerBlast { .. } => {}
             }
         }
 
@@ -878,16 +883,16 @@ fn main() {
             // they actually move (a wall stops it)
             let dt = step_dt;
             let wanted = movement_from_keys(shown.forward, shown.back, shown.left, shown.right, shown.run);
-            let moved = sim.moved_speed;
+            let moved = sim.players[me].moved_speed;
             // A wall stops the walking animation; standing still can fire or reload
             let walking = wanted != Movement::Idle && moved >= 5.0;
             let now = if walking {
                 wanted
-            } else if sim.throw.is_some() {
+            } else if sim.players[me].throw.is_some() {
                 Movement::Throw
-            } else if sim.reload_until.is_some() {
+            } else if sim.players[me].reload_until.is_some() {
                 Movement::Reload
-            } else if sim.gun_trigger && sim.ammo > 0 {
+            } else if sim.players[me].gun_trigger && sim.players[me].ammo > 0 {
                 Movement::Fire
             } else {
                 Movement::Idle
@@ -898,10 +903,10 @@ fn main() {
             }
             let rate = if matches!(movement, Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw) { 1.0 } else { (moved / (ground_speed(movement) * args.speed_scale.unwrap_or(1.0))).clamp(0.5, 3.0) * args.anim_scale.unwrap_or(1.5) };
             let frames = player_motions.get(movement).map_or(1, |m| m.frames.max(1)) as f32;
-            player_frame = if let (Movement::Reload, Some(t)) = (movement, sim.reload_until) {
+            player_frame = if let (Movement::Reload, Some(t)) = (movement, sim.players[me].reload_until) {
                 // Spread the reload animation across the whole reload time
                 (1.0 - (t - game_time) / sim::RELOAD_SECONDS).clamp(0.0, 1.0) * (frames - 1.0)
-            } else if let (Movement::Throw, Some(th)) = (movement, sim.throw) {
+            } else if let (Movement::Throw, Some(th)) = (movement, sim.players[me].throw) {
                 ((game_time - th.start) / sim::THROW_SECONDS).clamp(0.0, 1.0) * (frames - 1.0)
             } else {
                 (player_frame + rate * 30.0 * dt) % frames
@@ -910,7 +915,7 @@ fn main() {
             let phase = (player_frame / (frames / 2.0).max(1.0)) as i32;
             if phase != step_phase {
                 step_phase = phase;
-                if walking && sim.player.on_ground {
+                if walking && sim.players[me].player.on_ground {
                     if let Some(snd) = sound.as_mut() {
                         snd.play(if movement == Movement::Run { "F_HRCON1.WAV" } else { "F_HWCON1.WAV" }, 1.0);
                     }
@@ -919,16 +924,16 @@ fn main() {
         }
 
         // Reload sound when a reload starts (by key or running dry)
-        if sim.reload_until.is_some() && !was_reloading {
+        if sim.players[me].reload_until.is_some() && !was_reloading {
             if let Some(snd) = sound.as_mut() {
                 snd.play("C_SBMAG1.WAV", 1.0);
             }
         }
-        was_reloading = sim.reload_until.is_some();
+        was_reloading = sim.players[me].reload_until.is_some();
 
         // Full auto: the firing sound runs while the trigger is held with rounds to fire,
         // then stops with a closing crack
-        let firing = sim.firing();
+        let firing = sim.firing(me);
         if let Some(snd) = sound.as_mut() {
             if firing && firing_sound.is_none() {
                 firing_sound = snd.play_loop("C_SB5KB.WAV", 1.0);
@@ -948,7 +953,7 @@ fn main() {
             amb.update(snd, &rooms, listener, game_time, step_dt);
         }
 
-        let current_rooms: Vec<&str> = sim.current_room.map(|i| level.rooms.rooms[i].section_name.as_str()).into_iter().collect();
+        let current_rooms: Vec<&str> = sim.players[me].current_room.map(|i| level.rooms.rooms[i].section_name.as_str()).into_iter().collect();
         if room_debug && current_rooms != last_rooms {
             println!("in rooms: {current_rooms:?}");
             last_rooms = current_rooms.iter().map(|s| s.to_string()).collect();
@@ -1001,12 +1006,12 @@ fn main() {
             // seen through the previous one's portals (see visibility::plan)
             let cam_eye = [view.position[0], view.position[1], -view.position[2]];
             let mut plan: Vec<rogue_reborn::visibility::PlanNode> = Vec::new();
-            if sim.culling && !sim.render_rooms.is_empty() {
+            if sim.culling && !sim.players[me].render_rooms.is_empty() {
                 let (mut modelview, mut projection) = ([0f32; 16], [0f32; 16]);
                 glGetFloatv(0x0BA6, modelview.as_mut_ptr()); // GL_MODELVIEW_MATRIX
                 glGetFloatv(0x0BA7, projection.as_mut_ptr()); // GL_PROJECTION_MATRIX
                 let clip = |v: [f32; 3]| mul_mat4(&projection, mul_mat4(&modelview, [v[0], v[1], v[2], 1.0]));
-                plan = sim.render_rooms.iter().map(|&r| sim.visibility.plan(&level, r, &sim.body, cam_eye, &sim.blocked_portals, &clip)).collect();
+                plan = sim.players[me].render_rooms.iter().map(|&r| sim.visibility.plan(&level, r, &sim.players[me].body, cam_eye, &sim.blocked_portals, &clip)).collect();
             }
             drawn_rooms = {
                 let mut v: Vec<u32> = Vec::new();
@@ -1200,15 +1205,15 @@ fn main() {
                     draw_character(c, &verts, &part_textures, face, textured);
 
                     // The MP5K in the right hand, or a grenade until it is thrown
-                    let in_hand = if sim.equipped_grenade { sim.throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
+                    let in_hand = if sim.players[me].equipped_grenade { sim.players[me].throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
                     if let (Some(Some(wd)), Some((hand, off))) = (in_hand, &weapon_attach) {
                         glPushMatrix();
                         glMultMatrixf(pose[*hand].matrix().as_ptr());
                         glMultMatrixf(off.matrix().as_ptr());
-                        if sim.equipped_grenade {
+                        if sim.players[me].equipped_grenade {
                             glTranslatef(-wd.center[0], -wd.center[1], -wd.center[2]);
                         }
-                        draw_weapon(wd, textured, !sim.equipped_grenade && game_time < sim.flash_until);
+                        draw_weapon(wd, textured, !sim.players[me].equipped_grenade && game_time < sim.players[me].flash_until);
                         glPopMatrix();
                     }
                     glPopMatrix();
@@ -1219,7 +1224,8 @@ fn main() {
 
             // Grenades in the air
             if let Some(gd) = &grenade_draw {
-                for g in &sim.thrown {
+                for t in &sim.thrown {
+                    let g = &t.grenade;
                     glPushMatrix();
                     glTranslatef(g.pos[0], g.pos[1], g.pos[2]);
                     glRotatef(g.spin, 1.0, 0.3, 0.0);
@@ -1397,20 +1403,20 @@ fn main() {
 
         // The held weapon in front of the camera, over the scene. A grenade is small, so it is held
         // further out in proportion, drawn back by the wind-up, and gone once it has been thrown.
-        let held = if sim.equipped_grenade { grenade_draw.as_ref().filter(|_| sim.throw.is_none_or(|t| !t.thrown)) } else { weapon_draw.as_ref() };
+        let held = if sim.players[me].equipped_grenade { grenade_draw.as_ref().filter(|_| sim.players[me].throw.is_none_or(|t| !t.thrown)) } else { weapon_draw.as_ref() };
         if let (true, true, false, Some(wd)) = (args.viewmodel, first_person, third_person, held) {
             let l = wd.length;
-            let [ox, oy, oz] = if sim.equipped_grenade {
-                let held_for = sim.charge_from.map_or(0.0, |from| ((game_time - from) / grenade::CHARGE_SECONDS).clamp(0.0, 1.0));
-                let swing = sim.throw.map_or(0.0, |t| t.charge.max(((game_time - t.start) / sim::THROW_SECONDS / sim::THROW_RELEASE).clamp(0.0, 1.0)));
+            let [ox, oy, oz] = if sim.players[me].equipped_grenade {
+                let held_for = sim.players[me].charge_from.map_or(0.0, |from| ((game_time - from) / grenade::CHARGE_SECONDS).clamp(0.0, 1.0));
+                let swing = sim.players[me].throw.map_or(0.0, |t| t.charge.max(((game_time - t.start) / sim::THROW_SECONDS / sim::THROW_RELEASE).clamp(0.0, 1.0)));
                 let wind = held_for.max(swing);
                 [1.7 + 0.9 * wind, -1.2 - 0.6 * wind, 8.0 - 1.8 * wind]
             } else {
                 args.viewmodel_offset.unwrap_or([0.45, -0.45, 1.5])
             };
             // Recoil pushes the gun back at the player; a reload dips it out of view
-            let kick = ((sim.flash_until - game_time) / 0.05).clamp(0.0, 1.0) * 0.04 * l;
-            let dip = sim.reload_until.map_or(0.0, |t| {
+            let kick = ((sim.players[me].flash_until - game_time) / 0.05).clamp(0.0, 1.0) * 0.04 * l;
+            let dip = sim.players[me].reload_until.map_or(0.0, |t| {
                 let p = (1.0 - (t - game_time) / sim::RELOAD_SECONDS).clamp(0.0, 1.0);
                 (p * std::f32::consts::PI).sin() * 0.8 * l
             });
@@ -1429,7 +1435,7 @@ fn main() {
                 glRotatef(180.0, 0.0, 1.0, 0.0);
                 glRotatef(-90.0, 1.0, 0.0, 0.0);
                 glTranslatef(-wd.center[0], -wd.center[1], -wd.center[2]);
-                draw_weapon(wd, textured, game_time < sim.flash_until);
+                draw_weapon(wd, textured, game_time < sim.players[me].flash_until);
                 glColor4f(1.0, 1.0, 1.0, 1.0);
             }
         }
@@ -1446,17 +1452,17 @@ fn main() {
         let render_text = format!("RENDER: {:.2} MS", render_ms);
         if first_person {
             let mut status = vec![
-                format!("KILLS: {}", sim.kills),
-                if sim.equipped_grenade { format!("GRENADES: {}", sim.grenades_left) }
-                    else if sim.reload_until.is_some() { "RELOADING".to_string() } else { format!("AMMO: {}/{}", sim.ammo, sim.reserve) },
+                format!("KILLS: {}", sim.players[me].kills),
+                if sim.players[me].equipped_grenade { format!("GRENADES: {}", sim.players[me].grenades_left) }
+                    else if sim.players[me].reload_until.is_some() { "RELOADING".to_string() } else { format!("AMMO: {}/{}", sim.players[me].ammo, sim.players[me].reserve) },
             ];
-            if let Some(from) = sim.charge_from {
+            if let Some(from) = sim.players[me].charge_from {
                 status.insert(0, format!("POWER: {:.0}", ((game_time - from) / grenade::CHARGE_SECONDS).clamp(0.0, 1.0) * 100.0));
             }
-            if let Some(hp) = sim.target_hp {
+            if let Some(hp) = sim.players[me].target_hp {
                 status.insert(0, format!("TARGET: {hp:.0}"));
             }
-            let msg = if game_time < sim.message.1 { sim.message.0.as_str() } else { "" };
+            let msg = if game_time < sim.players[me].message.1 { sim.players[me].message.0.as_str() } else { "" };
             let marker = tracer.is_some_and(|t| t.2 && game_time < t.3);
             draw_hud(w, h, &status, msg, marker, veil);
         }
@@ -1507,7 +1513,7 @@ fn main() {
             let report = DebugReport {
                 map_path, map_num: &map_num, level: &level, eye, feet, yaw: camera.yaw, pitch: camera.pitch, dir,
                 hit, first_person, third_person, textured, room_debug, show_portals, show_collisions,
-                fps, render_ms, culling: sim.culling, room: current_rooms.first().copied(), drawn: &drawn_rooms, collision: &sim.collision_rooms, player_rooms: &sim.player_rooms, render_rooms: &sim.render_rooms, doors: &nearby_doors,
+                fps, render_ms, culling: sim.culling, room: current_rooms.first().copied(), drawn: &drawn_rooms, collision: &sim.players[me].collision_rooms, player_rooms: &sim.players[me].player_rooms, render_rooms: &sim.players[me].render_rooms, doors: &nearby_doors,
             };
             match write_debug_dump(&report, &rgb, fw as u32, fh as u32) {
                 Ok(stem) => println!("wrote {stem}.png and {stem}.txt"),

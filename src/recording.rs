@@ -80,7 +80,7 @@ impl Recording {
     pub fn replay(&self, sim: &mut Sim) -> Result<(), Desync> {
         let mut playback = Playback::new(self.clone());
         while let Some(input) = playback.next_input() {
-            sim.tick(&input, TICK);
+            sim.tick(&[input], TICK);
             if let Some(d) = playback.after_tick(sim) {
                 return Err(d);
             }
@@ -453,7 +453,9 @@ mod tests {
         let level = Arc::new(crate::demo::map());
         let world = CollisionWorld::from_map(&level, Params::default());
         let config = Config { magazine: 30, ammo: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };
-        Sim::new(level, world, config, None, Vec::new(), [0.0, 0.0, -350.0])
+        let mut sim = Sim::new(level, world, config, None, Vec::new());
+        sim.add_player([0.0, 0.0, -350.0]);
+        sim
     }
 
     /// Play a made-up game, recording it
@@ -473,7 +475,7 @@ mod tests {
                 ..Input::default()
             };
             input.set_look((tick as f32 * 0.05).sin() * 60.0, 5.0);
-            sim.tick(&input, TICK);
+            sim.tick(&[input], TICK);
             recorder.after_tick(&input, &sim);
         }
         let sum = sim.checksum();

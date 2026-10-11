@@ -1,11 +1,11 @@
-//! The game itself, apart from how it looks and sounds: the player, their weapon and
+//! The game itself, apart from how it looks and sounds: the players, their weapons and
 //! grenades, the characters, doors and glass, and what a tick of time does to them.
 //!
-//! The viewer feeds the sim an `Input` for every `TICK` and gets back `Event`s: things that
-//! happened, which it draws, plays sounds for and prints. The sim never reads a clock, a
-//! window or a sound device, and takes all its randomness from its own generator, so the same
-//! inputs always give the same game. That is what lets a recorded run be played again, and
-//! lets a server and its clients agree.
+//! The viewer (or a server) feeds the sim an `Input` for every player on every `TICK` and
+//! gets back `Event`s: things that happened, which it draws, plays sounds for and prints. The
+//! sim never reads a clock, a window or a sound device, and takes all its randomness from its
+//! own generator, so the same inputs always give the same game. That is what lets a recorded
+//! run be played again, and lets a server and its clients agree.
 
 pub mod characters;
 pub mod movement;
@@ -41,8 +41,11 @@ pub const THROW_RELEASE: f32 = 0.35;
 /// How far away the door being opened or closed can be
 const DOOR_REACH: f32 = 220.0;
 
+/// The most players in a game
+pub const MAX_PLAYERS: usize = 8;
+
 /// A grenade throw under way
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Throw {
     pub start: f32,
     /// How long the throw was held for before letting go (0..1)
@@ -51,7 +54,7 @@ pub struct Throw {
     pub thrown: bool,
 }
 
-/// What the player is doing during one tick
+/// What a player is doing during one tick
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Input {
     /// Where the player looks, in 65536ths of a turn (see `set_look`)
@@ -101,25 +104,30 @@ impl Input {
     pub fn look(&self) -> (f32, f32) {
         (dequantize(self.yaw), dequantize(self.pitch) - if self.pitch >= 0x8000 { 360.0 } else { 0.0 })
     }
+
+    /// The same input a tick later: what is held stays held, and the presses are over
+    pub fn held(&self) -> Input {
+        Input { use_key: false, reload: false, gun: false, grenade: false, toggle_culling: false, ..*self }
+    }
 }
 
 /// Something that happened in a tick
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     /// A sound: at a point in the level, or with no place (the player's own)
     Sound { name: String, at: Option<V3>, gain: f32 },
     /// A line for the log
     Log(String),
-    /// A shot was fired: where it left and where it ended, and whether it struck a character
-    Shot { start: V3, end: V3, hit_character: bool },
+    /// A player fired: where the shot left and where it ended, and whether it struck a character
+    Shot { player: usize, start: V3, end: V3, hit_character: bool },
     /// A bullet struck the level. `seed` is for the effects it makes, `dist` how far it flew.
     BulletHit { point: V3, normal: V3, dir: V3, surface: Surface, material: String, dist: f32, seed: u64 },
     /// A pane broke where `at` is, struck along `dir`
     Glass { pane: usize, at: V3, dir: V3, seed: u64 },
     /// A grenade went off. `on_surface` is false in mid-air, where there is nothing to scorch.
     Blast { point: V3, normal: V3, surface: Surface, on_surface: bool, seed: u64 },
-    /// What a blast did to the player: how hard it shook them, and how white it made their view
-    PlayerBlast { shake: f32, veil: f32 },
+    /// What a blast did to a player: how hard it shook them, and how white it made their view
+    PlayerBlast { player: usize, shake: f32, veil: f32 },
 }
 
 /// FNV-1a, a simple hash that gives the same answer on every machine
@@ -159,43 +167,43 @@ impl Fnv {
 /// Settings a sim starts with
 pub struct Config {
     pub magazine: u32,
-    /// Rounds in the magazine at the start
+    /// Rounds in each player's magazine at the start
     pub ammo: u32,
     pub reserve: u32,
     pub grenades: u32,
-    /// Scales the player's speed
+    /// Scales the players' speed
     pub speed_scale: f32,
     pub seed: u64,
-    /// Only the player's room and its neighbors are solid (the viewer's V key)
+    /// Only a player's room and its neighbors are solid to them (the viewer's V key)
     pub culling: bool,
 }
 
-/// The whole game
-pub struct Sim {
-    pub level: Arc<Map>,
-    pub world: CollisionWorld,
-    pub visibility: Visibility,
-    /// Seconds since the start
-    pub time: f32,
-    pub rng: u64,
-    pub culling: bool,
-    speed_scale: f32,
-    eye_height: f32,
+/// A grenade in flight, and who threw it
+#[derive(Clone, Debug)]
+pub struct Thrown {
+    pub grenade: Grenade,
+    pub owner: usize,
+}
 
+/// One player: their body, weapon, grenades and where they are in the level
+pub struct PlayerState {
+    /// Whether anyone is playing this slot
+    pub active: bool,
     pub player: Player,
+    /// Where the player looked in the last tick, as an `Input` says
+    pub look: (u16, u16),
     /// Where the view was last tick if the player was not in control
-    last_observer: Option<V3>,
+    pub last_observer: Option<V3>,
     /// Whether the player is in control, as of the last tick
     pub controlled: bool,
     /// How fast the player moved in the last tick, in units per second
     pub moved_speed: f32,
 
     // Weapon
-    pub magazine: u32,
     pub ammo: u32,
     pub reserve: u32,
     pub reload_until: Option<f32>,
-    next_shot: f32,
+    pub next_shot: f32,
     /// The muzzle flashes until this time
     pub flash_until: f32,
     /// Whether the trigger is held with the gun out, as of the last tick
@@ -207,18 +215,6 @@ pub struct Sim {
     pub grenades_left: u32,
     pub charge_from: Option<f32>,
     pub throw: Option<Throw>,
-    pub thrown: Vec<Grenade>,
-
-    pub characters: Option<Characters>,
-    pub npcs: Vec<Npc>,
-
-    pub doors: Vec<Door>,
-    pub door_states: Vec<DoorState>,
-    /// Whether each portal is shut by a closed door
-    pub blocked_portals: Vec<bool>,
-    pub panes: Vec<Pane>,
-    /// When each pane broke
-    pub broken_at: Vec<Option<f32>>,
 
     /// A line for the screen and when it goes away
     pub message: (String, f32),
@@ -232,12 +228,46 @@ pub struct Sim {
     pub render_rooms: Vec<u32>,
     /// The player's feet and eyes (or the free view's point twice), for portals they are standing in
     pub body: [V3; 2],
+    /// What is solid to this player (see `Sim::culling`)
     pub collision_rooms: Option<Vec<SolidRoom>>,
     last_render_rooms: Vec<u32>,
 }
 
+/// The whole game
+pub struct Sim {
+    pub level: Arc<Map>,
+    pub world: CollisionWorld,
+    pub visibility: Visibility,
+    /// Seconds since the start
+    pub time: f32,
+    pub rng: u64,
+    pub culling: bool,
+    speed_scale: f32,
+    eye_height: f32,
+    /// What a player starts with
+    pub magazine: u32,
+    loadout: (u32, u32, u32),
+
+    pub players: Vec<PlayerState>,
+    pub thrown: Vec<Thrown>,
+    /// What is solid in the world right now (see `PlayerState::collision_rooms`)
+    applied_rooms: Option<Vec<SolidRoom>>,
+
+    pub characters: Option<Characters>,
+    pub npcs: Vec<Npc>,
+
+    pub doors: Vec<Door>,
+    pub door_states: Vec<DoorState>,
+    /// Whether each portal is shut by a closed door
+    pub blocked_portals: Vec<bool>,
+    pub panes: Vec<Pane>,
+    /// When each pane broke
+    pub broken_at: Vec<Option<f32>>,
+}
+
 impl Sim {
-    pub fn new(level: Arc<Map>, world: CollisionWorld, config: Config, characters: Option<Characters>, npcs: Vec<Npc>, player_at: V3) -> Sim {
+    /// A game with nobody in it yet: see `add_player`
+    pub fn new(level: Arc<Map>, world: CollisionWorld, config: Config, characters: Option<Characters>, npcs: Vec<Npc>) -> Sim {
         let visibility = Visibility::new(&level);
         let doors: Vec<Door> = world.doors().cloned().collect();
         let panes = glass::panes(&level);
@@ -256,25 +286,37 @@ impl Sim {
             culling: config.culling,
             speed_scale: config.speed_scale,
             eye_height,
-            player: Player::new(player_at),
+            magazine: config.magazine,
+            loadout: (config.ammo, config.reserve, config.grenades),
+            players: Vec::new(),
+            thrown: Vec::new(),
+            applied_rooms: None,
+            characters,
+            npcs,
+        }
+    }
+
+    /// Put a new player on their feet at `feet`. Returns their slot, or none when the game is full.
+    pub fn add_player(&mut self, feet: V3) -> Option<usize> {
+        let (ammo, reserve, grenades) = self.loadout;
+        let fresh = PlayerState {
+            active: true,
+            player: Player::new(feet),
+            look: (0, 0),
             last_observer: None,
             controlled: true,
             moved_speed: 0.0,
-            magazine: config.magazine,
-            ammo: config.ammo,
-            reserve: config.reserve,
+            ammo,
+            reserve,
             reload_until: None,
             next_shot: 0.0,
             flash_until: 0.0,
             gun_trigger: false,
             kills: 0,
             equipped_grenade: false,
-            grenades_left: config.grenades,
+            grenades_left: grenades,
             charge_from: None,
             throw: None,
-            thrown: Vec::new(),
-            characters,
-            npcs,
             message: (String::new(), 0.0),
             target_hp: None,
             current_room: None,
@@ -283,12 +325,30 @@ impl Sim {
             body: [[0.0; 3]; 2],
             collision_rooms: None,
             last_render_rooms: Vec::new(),
+        };
+        if let Some(i) = self.players.iter().position(|p| !p.active) {
+            self.players[i] = fresh;
+            return Some(i);
         }
+        if self.players.len() >= MAX_PLAYERS {
+            return None;
+        }
+        self.players.push(fresh);
+        Some(self.players.len() - 1)
     }
 
-    /// Where the player's eyes are
-    pub fn eye(&self) -> V3 {
-        [self.player.pos[0], self.player.pos[1] + self.eye_height, self.player.pos[2]]
+    /// A player leaves. Their slot is free for the next to join, and their grenades stay in the air.
+    pub fn remove_player(&mut self, slot: usize) {
+        if let Some(p) = self.players.get_mut(slot) {
+            p.active = false;
+        }
+        self.apply_union_rooms();
+    }
+
+    /// Where a player's eyes are
+    pub fn eye(&self, slot: usize) -> V3 {
+        let p = self.players[slot].player.pos;
+        [p[0], p[1] + self.eye_height, p[2]]
     }
 
     /// Set every door this far open (0 shut, 1 open)
@@ -300,9 +360,10 @@ impl Sim {
         }
     }
 
-    /// Whether the full-auto firing sound should be running
-    pub fn firing(&self) -> bool {
-        self.controlled && self.gun_trigger && self.reload_until.is_none() && self.ammo > 0
+    /// Whether the full-auto firing sound should be running for a player
+    pub fn firing(&self, slot: usize) -> bool {
+        let p = &self.players[slot];
+        p.controlled && p.gun_trigger && p.reload_until.is_none() && p.ammo > 0
     }
 
     /// A fingerprint of everything that decides what happens next, to compare two runs of the
@@ -312,23 +373,27 @@ impl Sim {
         h.f32(self.time);
         h.u64(self.rng);
         h.u32(self.culling as u32);
-        h.v3(self.player.pos);
-        h.f32(self.player.vel_y);
-        h.u32(self.player.on_ground as u32);
-        h.u32(self.ammo);
-        h.u32(self.reserve);
-        h.opt_f32(self.reload_until);
-        h.f32(self.next_shot);
-        h.f32(self.flash_until);
-        h.u32(self.kills);
-        h.u32(self.equipped_grenade as u32);
-        h.u32(self.grenades_left);
-        h.opt_f32(self.charge_from);
-        match self.throw {
-            None => h.u32(0),
-            Some(t) => { h.u32(1); h.f32(t.start); h.f32(t.charge); h.u32(t.thrown as u32); }
+        for p in self.players.iter().filter(|p| p.active) {
+            h.v3(p.player.pos);
+            h.f32(p.player.vel_y);
+            h.u32(p.player.on_ground as u32);
+            h.u32(p.ammo);
+            h.u32(p.reserve);
+            h.opt_f32(p.reload_until);
+            h.f32(p.next_shot);
+            h.f32(p.flash_until);
+            h.u32(p.kills);
+            h.u32(p.equipped_grenade as u32);
+            h.u32(p.grenades_left);
+            h.opt_f32(p.charge_from);
+            match p.throw {
+                None => h.u32(0),
+                Some(t) => { h.u32(1); h.f32(t.start); h.f32(t.charge); h.u32(t.thrown as u32); }
+            }
+            h.u32(p.current_room.map_or(u32::MAX, |r| r as u32));
         }
-        for g in &self.thrown {
+        for t in &self.thrown {
+            let g = &t.grenade;
             h.v3(g.pos);
             h.v3(g.vel);
             h.f32(g.fuse);
@@ -353,61 +418,103 @@ impl Sim {
         for b in &self.broken_at {
             h.opt_f32(*b);
         }
-        h.u32(self.current_room.map_or(u32::MAX, |r| r as u32));
         h.0
     }
 
-    fn announce(&mut self, text: &str, seconds: f32) {
-        self.message = (text.to_string(), self.time + seconds);
+    fn announce(&mut self, slot: usize, text: &str, seconds: f32) {
+        self.players[slot].message = (text.to_string(), self.time + seconds);
     }
 
     fn surface_of(&self, material: Option<usize>) -> Surface {
         material.and_then(|m| self.level.materials.materials.get(m)).map_or(Surface::Concrete, |m| Surface::classify(&m.filename))
     }
 
-    /// Run the game for one tick
-    pub fn tick(&mut self, input: &Input, dt: f32) -> Vec<Event> {
-        let mut ev: Vec<Event> = Vec::new();
-        let controlled = input.observer.is_none();
-        self.controlled = controlled;
-        if controlled {
-            // Control returns: the player drops in from wherever the view was
-            if let Some(o) = self.last_observer.take() {
-                self.player = Player::new([o[0], o[1] - self.eye_height, o[2]]);
+    /// Make this what is solid in the world, if it is not already
+    fn set_applied_rooms(&mut self, wanted: Option<Vec<SolidRoom>>) {
+        if wanted != self.applied_rooms {
+            self.world.set_solid_rooms(wanted.as_deref());
+            self.applied_rooms = wanted;
+        }
+    }
+
+    /// What is solid to one player is what moves and shoots them
+    fn use_rooms_of(&mut self, slot: usize) {
+        if self.players[slot].collision_rooms != self.applied_rooms {
+            let wanted = self.players[slot].collision_rooms.clone();
+            self.set_applied_rooms(wanted);
+        }
+    }
+
+    /// What everyone's rooms add up to, for what belongs to no one: grenades in the air. When
+    /// anyone has the whole level solid, so has it.
+    fn apply_union_rooms(&mut self) {
+        let mut all: Vec<SolidRoom> = Vec::new();
+        let mut any = false;
+        let mut whole = false;
+        for p in self.players.iter().filter(|p| p.active) {
+            any = true;
+            match &p.collision_rooms {
+                None => whole = true,
+                Some(rooms) => all.extend(rooms.iter().cloned()),
             }
-        } else {
-            self.last_observer = input.observer;
         }
-        if input.toggle_culling {
-            self.culling = !self.culling;
-        }
+        let wanted = if !any || whole { None } else { Some(all) };
+        self.set_applied_rooms(wanted);
+    }
+
+    /// Run the game for one tick. `inputs` has what each player slot did; a slot with no input
+    /// does nothing.
+    pub fn tick(&mut self, inputs: &[Input], dt: f32) -> Vec<Event> {
+        let mut ev: Vec<Event> = Vec::new();
+        let none = Input::default();
+        let input_of = |i: usize| inputs.get(i).copied().unwrap_or(none);
+        let slots: Vec<usize> = (0..self.players.len()).filter(|&i| self.players[i].active).collect();
 
         // Keys pressed since the last tick
-        if input.gun && self.throw.is_none() {
-            // Back to the gun
-            self.equipped_grenade = false;
-            self.charge_from = None;
-        }
-        if input.grenade && controlled && self.throw.is_none() && self.reload_until.is_none() {
-            self.equipped_grenade = true;
-            if self.grenades_left == 0 {
-                self.announce("NO GRENADES", 1.0);
+        for &i in &slots {
+            let input = input_of(i);
+            let controlled = input.observer.is_none();
+            let p = &mut self.players[i];
+            p.controlled = controlled;
+            p.look = (input.yaw, input.pitch);
+            if controlled {
+                // Control returns: the player drops in from wherever the view was
+                if let Some(o) = p.last_observer.take() {
+                    p.player = Player::new([o[0], o[1] - self.eye_height, o[2]]);
+                }
+            } else {
+                p.last_observer = input.observer;
             }
+            if input.toggle_culling {
+                self.culling = !self.culling;
+            }
+            let p = &mut self.players[i];
+            if input.gun && p.throw.is_none() {
+                // Back to the gun
+                p.equipped_grenade = false;
+                p.charge_from = None;
+            }
+            if input.grenade && controlled && p.throw.is_none() && p.reload_until.is_none() {
+                p.equipped_grenade = true;
+                if p.grenades_left == 0 {
+                    self.announce(i, "NO GRENADES", 1.0);
+                }
+            }
+            let p = &mut self.players[i];
+            // Reload: takes time, then fills the magazine from the reserve
+            if input.reload && controlled && !p.equipped_grenade && p.reload_until.is_none() && p.ammo < self.magazine && p.reserve > 0 {
+                p.reload_until = Some(self.time + RELOAD_SECONDS);
+            }
+            // The trigger fires the gun, unless a grenade is out
+            p.gun_trigger = input.fire && !p.equipped_grenade;
         }
-        // Reload: takes time, then fills the magazine from the reserve
-        if input.reload && controlled && !self.equipped_grenade && self.reload_until.is_none() && self.ammo < self.magazine && self.reserve > 0 {
-            self.reload_until = Some(self.time + RELOAD_SECONDS);
-        }
-
-        // The trigger fires the gun, unless a grenade is out
-        let gun_trigger = input.fire && !self.equipped_grenade;
-        self.gun_trigger = gun_trigger;
         self.time += dt;
 
-        let (yaw, pitch) = input.look();
-        let (forward_cam, right_cam) = (forward(yaw, pitch), right(yaw));
-        if input.use_key && controlled {
-            self.use_door(forward_cam, &mut ev);
+        for &i in &slots {
+            let input = input_of(i);
+            if input.use_key && input.observer.is_none() {
+                self.use_door(i, forward(input.look().0, input.look().1), &mut ev);
+            }
         }
 
         // Doors move, and the collision and the portals follow
@@ -420,11 +527,14 @@ impl Sim {
             }
         }
         // Finish a reload
-        if self.reload_until.is_some_and(|t| self.time >= t) {
-            let take = (self.magazine - self.ammo).min(self.reserve);
-            self.ammo += take;
-            self.reserve -= take;
-            self.reload_until = None;
+        for &i in &slots {
+            let p = &mut self.players[i];
+            if p.reload_until.is_some_and(|t| self.time >= t) {
+                let take = (self.magazine - p.ammo).min(p.reserve);
+                p.ammo += take;
+                p.reserve -= take;
+                p.reload_until = None;
+            }
         }
         // Injury reactions end and the character goes back to idling
         if let Some(chars) = &self.characters {
@@ -437,20 +547,30 @@ impl Sim {
             }
         }
 
-        if controlled {
-            self.move_player(input, dt, right_cam);
-            self.throw_grenade(input, forward_cam, right_cam, &mut ev);
-            self.shoot(forward_cam, &mut ev);
+        for &i in &slots {
+            let input = input_of(i);
+            if input.observer.is_none() {
+                let (yaw, pitch) = input.look();
+                let (forward_cam, right_cam) = (forward(yaw, pitch), right(yaw));
+                self.use_rooms_of(i);
+                self.move_player(i, &input, dt, right_cam);
+                self.throw_grenade(i, &input, forward_cam, right_cam, &mut ev);
+                self.shoot(i, forward_cam, &mut ev);
+            }
         }
 
-        self.update_grenades(dt, controlled, &mut ev);
-        self.track_rooms(input.observer);
+        self.apply_union_rooms();
+        self.update_grenades(dt, &mut ev);
+        for &i in &slots {
+            self.track_rooms(i, input_of(i).observer);
+        }
+        self.apply_union_rooms();
         ev
     }
 
     /// Space or Backspace opens or closes the door the player is looking at
-    fn use_door(&mut self, forward_cam: V3, ev: &mut Vec<Event>) {
-        let eye = self.eye();
+    fn use_door(&mut self, slot: usize, forward_cam: V3, ev: &mut Vec<Event>) {
+        let eye = self.eye(slot);
         let look = [forward_cam[0], forward_cam[1], -forward_cam[2]];
         let mut best: Option<(usize, f32)> = None;
         for (i, d) in self.doors.iter().enumerate() {
@@ -481,15 +601,15 @@ impl Sim {
                 if !sound_name.eq_ignore_ascii_case("none") {
                     ev.push(Event::Sound { name: sound_name.clone(), at: Some(self.doors[i].center(self.door_states[i].open)), gain: 1.0 });
                 }
-                self.announce(&format!("DOOR {}", if opening { "OPENING" } else { "CLOSING" }), 1.2);
+                self.announce(slot, &format!("DOOR {}", if opening { "OPENING" } else { "CLOSING" }), 1.2);
                 ev.push(Event::Log(format!("t={:.2} door {} {}", self.time, self.doors[i].name, if opening { "opening" } else { "closing" })));
             }
-            None => self.announce("NO DOOR IN REACH", 1.0),
+            None => self.announce(slot, "NO DOOR IN REACH", 1.0),
         }
     }
 
     /// Walk the player, at speeds that come from the animations so the feet do not slide
-    fn move_player(&mut self, input: &Input, dt: f32, right_cam: V3) {
+    fn move_player(&mut self, slot: usize, input: &Input, dt: f32, right_cam: V3) {
         let yaw_rad = input.look().0.to_radians();
         let fwd_flat = [-yaw_rad.sin(), 0.0, -yaw_rad.cos()];
         let (w, a, s_, d, run) = (input.forward, input.left, input.back, input.right, input.run);
@@ -509,36 +629,38 @@ impl Sim {
             vel = [vel[0] / len * cap, vel[1] / len * cap];
         }
 
-        let before = self.player.pos;
-        self.world.step(&mut self.player, [vel[0] * dt, -vel[1] * dt], dt);
-        self.moved_speed = ((self.player.pos[0] - before[0]).powi(2) + (self.player.pos[2] - before[2]).powi(2)).sqrt() / dt.max(1e-4);
+        let before = self.players[slot].player.pos;
+        self.world.step(&mut self.players[slot].player, [vel[0] * dt, -vel[1] * dt], dt);
+        let after = self.players[slot].player.pos;
+        self.players[slot].moved_speed = ((after[0] - before[0]).powi(2) + (after[2] - before[2]).powi(2)).sqrt() / dt.max(1e-4);
     }
 
     /// A grenade: hold the trigger to wind up, let go to throw. The swing plays for a moment,
     /// and the grenade leaves the hand part of the way in.
-    fn throw_grenade(&mut self, input: &Input, forward_cam: V3, right_cam: V3, ev: &mut Vec<Event>) {
-        if !self.equipped_grenade {
+    fn throw_grenade(&mut self, slot: usize, input: &Input, forward_cam: V3, right_cam: V3, ev: &mut Vec<Event>) {
+        if !self.players[slot].equipped_grenade {
             return;
         }
         let now = self.time;
         let mut finished = false;
-        match self.throw {
+        match self.players[slot].throw {
             None => {
-                if input.fire && self.grenades_left > 0 {
-                    self.charge_from.get_or_insert(now);
-                } else if let Some(from) = self.charge_from.take() {
+                let p = &mut self.players[slot];
+                if input.fire && p.grenades_left > 0 {
+                    p.charge_from.get_or_insert(now);
+                } else if let Some(from) = p.charge_from.take() {
                     let charge = ((now - from) / grenade::CHARGE_SECONDS).clamp(0.0, 1.0);
-                    self.throw = Some(Throw { start: now, charge, thrown: false });
-                } else if input.fire && self.grenades_left == 0 && now >= self.message.1 {
-                    self.announce("NO GRENADES", 0.8);
+                    p.throw = Some(Throw { start: now, charge, thrown: false });
+                } else if input.fire && p.grenades_left == 0 && now >= p.message.1 {
+                    self.announce(slot, "NO GRENADES", 0.8);
                 }
             }
             Some(mut th) => {
                 let progress = (now - th.start) / THROW_SECONDS;
                 if !th.thrown && progress >= THROW_RELEASE {
                     th.thrown = true;
-                    self.grenades_left -= 1;
-                    let eye = self.eye();
+                    self.players[slot].grenades_left -= 1;
+                    let eye = self.eye(slot);
                     let f = forward_cam;
                     // Thrown a little upward, as a lob
                     let aim = unit3([f[0], f[1] + 0.14, -f[2]]);
@@ -551,37 +673,39 @@ impl Sim {
                         Some(d) => { let d = (d - grenade::RADIUS - 1.0).max(0.0); [eye[0] + to[0] * d, eye[1] + to[1] * d, eye[2] + to[2] * d] }
                         None => want,
                     };
-                    self.thrown.push(Grenade::thrown(from, aim, th.charge, [0.0; 3]));
+                    self.thrown.push(Thrown { grenade: Grenade::thrown(from, aim, th.charge, [0.0; 3]), owner: slot });
                     ev.push(Event::Log(format!("t={now:.2} threw a grenade at {:.0}% power", th.charge * 100.0)));
                 }
-                self.throw = Some(th);
+                self.players[slot].throw = Some(th);
                 finished = progress >= 1.0;
             }
         }
         if finished {
-            self.throw = None;
-            if self.grenades_left == 0 {
-                self.equipped_grenade = false;
-                self.announce("OUT OF GRENADES", 1.2);
+            self.players[slot].throw = None;
+            if self.players[slot].grenades_left == 0 {
+                self.players[slot].equipped_grenade = false;
+                self.announce(slot, "OUT OF GRENADES", 1.2);
             }
         }
     }
 
     /// Shooting: a ray from the eye along the view, stopped by walls
-    fn shoot(&mut self, forward_cam: V3, ev: &mut Vec<Event>) {
-        let gun_trigger = self.gun_trigger;
-        if gun_trigger && self.reload_until.is_none() && self.ammo == 0 && self.reserve > 0 {
-            self.reload_until = Some(self.time + RELOAD_SECONDS);
+    fn shoot(&mut self, slot: usize, forward_cam: V3, ev: &mut Vec<Event>) {
+        let gun_trigger = self.players[slot].gun_trigger;
+        if gun_trigger && self.players[slot].reload_until.is_none() && self.players[slot].ammo == 0 && self.players[slot].reserve > 0 {
+            self.players[slot].reload_until = Some(self.time + RELOAD_SECONDS);
         }
-        if !(gun_trigger && self.reload_until.is_none() && self.ammo > 0 && self.time >= self.next_shot) {
+        let p = &self.players[slot];
+        if !(gun_trigger && p.reload_until.is_none() && p.ammo > 0 && self.time >= p.next_shot) {
             return;
         }
-        self.ammo -= 1;
-        self.next_shot = self.time + 60.0 / 800.0; // the MP5K fires about 800 rounds a minute
-        self.flash_until = self.time + 0.05;
         let now = self.time;
+        let p = &mut self.players[slot];
+        p.ammo -= 1;
+        p.next_shot = now + 60.0 / 800.0; // the MP5K fires about 800 rounds a minute
+        p.flash_until = now + 0.05;
 
-        let eye = self.eye();
+        let eye = self.eye(slot);
         let f = forward_cam;
         let dir = [f[0], f[1], -f[2]]; // camera space to MAP space
         let mut wall = self.world.raycast(eye, dir, 20000.0);
@@ -626,22 +750,22 @@ impl Sim {
             Some((i, hit)) if wall.map_or(true, |w| hit.distance <= w) => {
                 next_rng(&mut self.rng);
                 let result = self.npcs[i].health.apply_hit(&hit, now, (self.rng >> 33) as u32);
-                self.target_hp = Some(self.npcs[i].health.hp);
+                self.players[slot].target_hp = Some(self.npcs[i].health.hp);
                 ev.push(Event::Log(format!("t={now:.2} shot hit character {i}: {:?} from the {:?}, {:?}, hp now {}", hit.part, hit.facing, result, self.npcs[i].health.hp)));
                 let text = match result {
                     HitResult::Killed => {
-                        self.kills += 1;
+                        self.players[slot].kills += 1;
                         if hit.part == combat::BodyPart::Head { "HEAD SHOT KILL".to_string() } else { "KILLED".to_string() }
                     }
                     _ => format!("HIT {:?}", hit.part).to_uppercase(),
                 };
-                self.announce(&text, 1.2);
+                self.announce(slot, &text, 1.2);
                 ev.push(Event::Sound { name: "C_BHTHT.WAV".to_string(), at: Some(hit.point), gain: 1.0 });
                 // Voices: a grunt when hurt, a cry when killed
                 let (name, n) = if matches!(result, HitResult::Killed) { ("re_ded", 2) } else { ("re_wnd", 3) };
                 let pick = 1 + (self.rng >> 40) as u32 % n;
                 ev.push(Event::Sound { name: format!("English/{name}{pick}.wav"), at: Some(self.npcs[i].pos), gain: 1.0 });
-                ev.push(Event::Shot { start, end: hit.point, hit_character: true });
+                ev.push(Event::Shot { player: slot, start, end: hit.point, hit_character: true });
             }
             _ => {
                 // The bullet struck the level
@@ -653,17 +777,18 @@ impl Sim {
                     ev.push(Event::BulletHit { point, normal: hit.normal, dir, surface, material, dist: hit.dist, seed: self.rng });
                 }
                 let d = wall.unwrap_or(5000.0);
-                ev.push(Event::Shot { start, end: [eye[0] + dir[0] * d, eye[1] + dir[1] * d, eye[2] + dir[2] * d], hit_character: false });
+                ev.push(Event::Shot { player: slot, start, end: [eye[0] + dir[0] * d, eye[1] + dir[1] * d, eye[2] + dir[2] * d], hit_character: false });
             }
         }
     }
 
     /// Grenades in the air: they bounce off the level and go off when the fuse runs out
-    fn update_grenades(&mut self, dt: f32, controlled: bool, ev: &mut Vec<Event>) {
+    fn update_grenades(&mut self, dt: f32, ev: &mut Vec<Event>) {
         let now = self.time;
-        let mut blasts: Vec<V3> = Vec::new();
+        let mut blasts: Vec<(V3, usize)> = Vec::new();
         let mut thrown = std::mem::take(&mut self.thrown);
-        for g in thrown.iter_mut() {
+        for t in thrown.iter_mut() {
+            let g = &mut t.grenade;
             for b in g.update(dt, &self.world) {
                 // Glass: it goes through, shattering the pane, slowed and knocked off line
                 let heading = unit3(b.incoming);
@@ -696,18 +821,18 @@ impl Sim {
                 ev.push(Event::Sound { name: name.to_string(), at: Some(b.point), gain: (b.speed / 500.0).clamp(0.25, 1.0) });
             }
             if g.goes_off() {
-                blasts.push(g.pos);
+                blasts.push((g.pos, t.owner));
             }
         }
-        thrown.retain(|g| !g.goes_off());
+        thrown.retain(|t| !t.grenade.goes_off());
         self.thrown = thrown;
-        for c in blasts {
-            self.blast(c, controlled, ev);
+        for (c, owner) in blasts {
+            self.blast(c, owner, ev);
         }
     }
 
-    /// A grenade goes off at `c`
-    fn blast(&mut self, c: V3, controlled: bool, ev: &mut Vec<Event>) {
+    /// A grenade thrown by `owner` goes off at `c`
+    fn blast(&mut self, c: V3, owner: usize, ev: &mut Vec<Event>) {
         let now = self.time;
         // The surface it went off against, the nearest of the six directions
         let mut near: Option<(f32, V3, V3, Option<usize>)> = None;
@@ -743,11 +868,17 @@ impl Sim {
             let from = place.facing_of_shot(unit3([chest[0] - c[0], chest[1] - c[1], chest[2] - c[2]]));
             next_rng(&mut self.rng);
             let result = self.npcs[i].health.apply_blast(100.0 * strength, from, now, (self.rng >> 33) as u32);
-            self.target_hp = Some(self.npcs[i].health.hp);
+            if let Some(p) = self.players.get_mut(owner) {
+                p.target_hp = Some(self.npcs[i].health.hp);
+            }
             ev.push(Event::Log(format!("t={now:.2} grenade hit character {i} at {:.0} units: {result:?}, hp now {}", dist3(c, chest), self.npcs[i].health.hp)));
             if matches!(result, HitResult::Killed) {
-                self.kills += 1;
-                self.announce("GRENADE KILL", 1.2);
+                if let Some(p) = self.players.get_mut(owner) {
+                    p.kills += 1;
+                }
+                if owner < self.players.len() {
+                    self.announce(owner, "GRENADE KILL", 1.2);
+                }
             }
             let (name, n) = if matches!(result, HitResult::Killed) { ("re_ded", 2) } else { ("re_wnd", 3) };
             ev.push(Event::Sound { name: format!("English/{name}{}.wav", 1 + (self.rng >> 40) as u32 % n), at: Some(self.npcs[i].pos), gain: 1.0 });
@@ -776,39 +907,43 @@ impl Sim {
             }
         }
 
-        // The player: shaken and dazzled more the nearer, and less behind a wall
-        if controlled {
-            let eye = self.eye();
+        // The players: shaken and dazzled more the nearer, and less behind a wall
+        for i in 0..self.players.len() {
+            if !self.players[i].active || !self.players[i].controlled {
+                continue;
+            }
+            let eye = self.eye(i);
             let d = dist3(c, eye);
             let open = grenade::clear_between(&self.world, c, eye);
             let shake = grenade::shake(d, open);
             let veil = if open { ((900.0 - d) / 900.0).clamp(0.0, 1.0) } else { 0.0 };
-            ev.push(Event::PlayerBlast { shake, veil });
+            ev.push(Event::PlayerBlast { player: i, shake, veil });
         }
     }
 
-    /// Work out which rooms the player is in and make only those solid. The view is the
+    /// Work out which rooms a player is in and which are solid to them. The view is the
     /// player's, or `observer` when it is flying free.
-    fn track_rooms(&mut self, observer: Option<V3>) {
+    fn track_rooms(&mut self, slot: usize, observer: Option<V3>) {
         // The room the player is in: the point just above the feet (the view when flying),
         // low enough to land inside the thin slabs that stairs and ramps use. Where no room
         // claims it, the last room stays.
+        let pos = self.players[slot].player.pos;
         let (probe, eye) = match observer {
             Some(o) => (o, o),
             None => {
-                let eye_y = self.player.pos[1] + self.eye_height;
-                ([self.player.pos[0], eye_y - (self.eye_height - 10.0), self.player.pos[2]], [self.player.pos[0], eye_y, self.player.pos[2]])
+                let eye_y = pos[1] + self.eye_height;
+                ([pos[0], eye_y - (self.eye_height - 10.0), pos[2]], [pos[0], eye_y, pos[2]])
             }
         };
-        if let Some(i) = self.level.rooms.locate(probe, self.current_room) {
-            self.current_room = Some(i);
+        if let Some(i) = self.level.rooms.locate(probe, self.players[slot].current_room) {
+            self.players[slot].current_room = Some(i);
         }
         // Where the player's feet and eyes are, for portals they are standing in
-        self.body = [probe, eye];
+        self.players[slot].body = [probe, eye];
         // Only the player's room and the rooms its portals lead to can stop movement or
         // bullets: the level overlaps itself, and the exterior of a plane must not block
         // anyone inside it
-        self.player_rooms = self.visibility.player_rooms(&self.level, probe, self.current_room);
+        let player_rooms = self.visibility.player_rooms(&self.level, probe, self.players[slot].current_room);
         // The room drawing starts from: the one whose floor the player stands on, as
         // overlapping rooms (a stairwell beside a hall, an upstairs over a downstairs)
         // all claim the same spot. Airborne, the last one stays; flying, the smallest
@@ -819,24 +954,24 @@ impl Sim {
         } else {
             None
         };
+        let p = &self.players[slot];
         let render_rooms: Vec<u32> = match floor_room {
             Some(n) => vec![n],
-            None if controlled && !self.last_render_rooms.is_empty() => self.last_render_rooms.clone(),
-            None => self.current_room.and_then(|i| self.visibility.number_of(i)).map(|n| vec![n]).unwrap_or_else(|| self.player_rooms.clone()),
+            None if controlled && !p.last_render_rooms.is_empty() => p.last_render_rooms.clone(),
+            None => p.current_room.and_then(|i| self.visibility.number_of(i)).map(|n| vec![n]).unwrap_or_else(|| player_rooms.clone()),
         };
-        self.last_render_rooms = render_rooms.clone();
         // What stops the player: their room, the rooms through its portals but only
         // beyond them, and the other rooms they are well inside (they can hold the floor)
         let wanted: Option<Vec<SolidRoom>> = if self.culling && !render_rooms.is_empty() {
-            Some(self.visibility.solid_rooms(&self.level, &render_rooms, &self.player_rooms, &self.body))
+            Some(self.visibility.solid_rooms(&self.level, &render_rooms, &player_rooms, &self.players[slot].body))
         } else {
             None
         };
-        self.render_rooms = render_rooms;
-        if wanted != self.collision_rooms {
-            self.world.set_solid_rooms(wanted.as_deref());
-            self.collision_rooms = wanted;
-        }
+        let p = &mut self.players[slot];
+        p.last_render_rooms = render_rooms.clone();
+        p.player_rooms = player_rooms;
+        p.render_rooms = render_rooms;
+        p.collision_rooms = wanted;
     }
 }
 
@@ -850,7 +985,9 @@ mod tests {
         let level = Arc::new(crate::demo::map());
         let world = CollisionWorld::from_map(&level, Params::default());
         let config = Config { magazine: 30, ammo: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };
-        Sim::new(level, world, config, None, Vec::new(), [0.0, 0.0, -350.0])
+        let mut sim = Sim::new(level, world, config, None, Vec::new());
+        sim.add_player([0.0, 0.0, -350.0]);
+        sim
     }
 
     fn holding() -> Input {
@@ -859,7 +996,7 @@ mod tests {
 
     /// Run `seconds` of ticks with the same input, keeping every event
     fn run(sim: &mut Sim, input: &Input, seconds: f32) -> Vec<Event> {
-        (0..(seconds / TICK).round() as usize).flat_map(|_| sim.tick(input, TICK)).collect()
+        (0..(seconds / TICK).round() as usize).flat_map(|_| sim.tick(&[*input], TICK)).collect()
     }
 
     #[test]
@@ -868,36 +1005,38 @@ mod tests {
         let fire = Input { fire: true, ..holding() };
         run(&mut sim, &fire, 1.0);
         // About 800 rounds a minute
-        assert!((12..=15).contains(&(30 - sim.ammo)), "{} rounds left", sim.ammo);
+        let ammo = sim.players[0].ammo;
+        assert!((12..=15).contains(&(30 - ammo)), "{ammo} rounds left");
         run(&mut sim, &fire, 2.0);
         // Dry after 2.25 s, so the reload has begun and no round is fired during it
-        assert!(sim.reload_until.is_some());
-        assert_eq!(sim.ammo, 0);
+        assert!(sim.players[0].reload_until.is_some());
+        assert_eq!(sim.players[0].ammo, 0);
     }
 
     #[test]
     fn a_reload_takes_its_time_then_fills_the_magazine_from_the_reserve() {
         let mut sim = demo();
-        sim.ammo = 10;
-        sim.tick(&Input { reload: true, ..holding() }, TICK);
-        assert!(sim.reload_until.is_some());
+        sim.players[0].ammo = 10;
+        sim.tick(&[Input { reload: true, ..holding() }], TICK);
+        assert!(sim.players[0].reload_until.is_some());
         run(&mut sim, &holding(), RELOAD_SECONDS - 0.2);
-        assert_eq!(sim.ammo, 10);
+        assert_eq!(sim.players[0].ammo, 10);
         run(&mut sim, &holding(), 0.4);
-        assert_eq!((sim.ammo, sim.reserve, sim.reload_until), (30, 70, None));
+        let p = &sim.players[0];
+        assert_eq!((p.ammo, p.reserve, p.reload_until), (30, 70, None));
     }
 
     #[test]
     fn a_thrown_grenade_goes_off_once_when_its_fuse_runs_out() {
         let mut sim = demo();
-        let mut events = sim.tick(&Input { grenade: true, fire: true, ..holding() }, TICK);
-        assert!(sim.equipped_grenade);
+        let mut events = sim.tick(&[Input { grenade: true, fire: true, ..holding() }], TICK);
+        assert!(sim.players[0].equipped_grenade);
         // Wind up for half a second, let go, and wait out the throw and the fuse
         events.extend(run(&mut sim, &Input { fire: true, ..holding() }, 0.5));
         events.extend(run(&mut sim, &holding(), 5.0));
         let blasts = events.iter().filter(|e| matches!(e, Event::Blast { .. })).count();
         assert_eq!(blasts, 1);
-        assert_eq!(sim.grenades_left, 2);
+        assert_eq!(sim.players[0].grenades_left, 2);
         assert!(sim.thrown.is_empty());
     }
 
@@ -906,21 +1045,23 @@ mod tests {
         let mut sim = demo();
         // Facing +Z (yaw 0), the far wall is 850 units off
         run(&mut sim, &Input { forward: true, ..holding() }, 4.0);
-        assert!(sim.player.pos[2] > 300.0 && sim.player.pos[2] < 500.0, "{:?}", sim.player.pos);
-        assert!(sim.moved_speed < 1.0, "still moving at {}", sim.moved_speed);
+        let p = &sim.players[0];
+        assert!(p.player.pos[2] > 300.0 && p.player.pos[2] < 500.0, "{:?}", p.player.pos);
+        assert!(p.moved_speed < 1.0, "still moving at {}", p.moved_speed);
     }
 
     /// Everything a replay would have to reproduce, to the bit
     fn fingerprint(sim: &Sim) -> Vec<u32> {
-        let mut v: Vec<u32> = sim.player.pos.iter().map(|f| f.to_bits()).collect();
+        let p = &sim.players[0];
+        let mut v: Vec<u32> = p.player.pos.iter().map(|f| f.to_bits()).collect();
         v.push(sim.time.to_bits());
-        v.push(sim.ammo);
-        v.push(sim.reserve);
-        v.push(sim.grenades_left);
+        v.push(p.ammo);
+        v.push(p.reserve);
+        v.push(p.grenades_left);
         v.push(sim.rng as u32);
         v.push((sim.rng >> 32) as u32);
-        for g in &sim.thrown {
-            v.extend(g.pos.iter().chain(g.vel.iter()).map(|f| f.to_bits()));
+        for t in &sim.thrown {
+            v.extend(t.grenade.pos.iter().chain(t.grenade.vel.iter()).map(|f| f.to_bits()));
         }
         v
     }
@@ -940,7 +1081,7 @@ mod tests {
                     ..Input::default()
                 };
                 input.set_look((tick as f32 * 0.7).sin() * 90.0, (tick as f32 * 0.3).sin() * 20.0);
-                log.extend(sim.tick(&input, TICK).iter().map(|e| format!("{e:?}")));
+                log.extend(sim.tick(&[input], TICK).iter().map(|e| format!("{e:?}")));
             }
             log
         };
@@ -949,5 +1090,48 @@ mod tests {
         assert!(!log_a.is_empty());
         assert_eq!(log_a, log_b);
         assert_eq!(fingerprint(&a), fingerprint(&b));
+    }
+
+    #[test]
+    fn two_players_move_and_fire_on_their_own() {
+        let mut sim = demo();
+        let second = sim.add_player([200.0, 0.0, -350.0]).unwrap();
+        assert_eq!(second, 1);
+        let walker = Input { forward: true, ..holding() };
+        let shooter = Input { fire: true, ..holding() };
+        for _ in 0..60 {
+            sim.tick(&[walker, shooter], TICK);
+        }
+        let (a, b) = (&sim.players[0], &sim.players[1]);
+        assert!(a.player.pos[2] > -350.0 + 300.0 && a.ammo == 30, "{:?} {}", a.player.pos, a.ammo);
+        assert!(b.player.pos[2] == -350.0 && b.ammo < 30);
+    }
+
+    #[test]
+    fn a_player_who_leaves_frees_their_slot() {
+        let mut sim = demo();
+        sim.add_player([100.0, 0.0, -350.0]);
+        sim.remove_player(0);
+        sim.tick(&[holding(), holding()], TICK);
+        // The slot is empty, so what it was fed does nothing, and the next to join takes it
+        assert_eq!(sim.add_player([0.0, 0.0, 0.0]), Some(0));
+        let full = (0..MAX_PLAYERS).filter_map(|_| sim.add_player([0.0; 3])).count();
+        assert_eq!(full, MAX_PLAYERS - 2);
+        assert_eq!(sim.add_player([0.0; 3]), None);
+    }
+
+    #[test]
+    fn a_blast_shakes_every_player_whoever_threw_the_grenade() {
+        let mut sim = demo();
+        sim.add_player([300.0, 0.0, -350.0]);
+        run(&mut sim, &holding(), 0.1);
+        let mut events = sim.tick(&[holding(), Input { grenade: true, fire: true, ..holding() }], TICK);
+        events.extend((0..30).flat_map(|_| sim.tick(&[holding(), Input { fire: true, ..holding() }], TICK)));
+        events.extend((0..400).flat_map(|_| sim.tick(&[holding(), holding()], TICK)));
+        assert_eq!(sim.players[0].grenades_left, 3);
+        assert_eq!(sim.players[1].grenades_left, 2);
+        // And the blast shook both, whoever threw it
+        let shaken: Vec<usize> = events.iter().filter_map(|e| match e { Event::PlayerBlast { player, .. } => Some(*player), _ => None }).collect();
+        assert_eq!(shaken, vec![0, 1]);
     }
 }
