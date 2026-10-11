@@ -12,9 +12,12 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 use std::sync::Arc;
-use rogue_reborn::{map, rsb, actor, demo, grenade, motion, recording, skeleton, sim, sound, weapon, ambience, glass};
+use std::net::ToSocketAddrs;
+use rogue_reborn::{map, rsb, actor, combat, demo, grenade, motion, recording, skeleton, sim, sound, weapon, ambience, glass};
+use rogue_reborn::net::client::{Client, Status};
+use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
 use rogue_reborn::recording::{Playback, Recorder, Recording};
-use rogue_reborn::sim::characters::{Characters, Rig, place_npcs};
+use rogue_reborn::sim::characters::{Characters, Npc, Rig, place_npcs};
 use rogue_reborn::sim::movement::{Movement, ground_speed, movement_from_keys};
 use rogue_reborn::collision::{CollisionWorld, Params};
 use rogue_reborn::impact::{self, Surface};
@@ -80,6 +83,56 @@ fn main() {
         args.walk = None;
         Playback::new(rec)
     });
+    // Joining a server: the game is set up as it says, so ask it before anything is loaded
+    let net_clock = Instant::now();
+    let mut net: Option<(Client, Impaired<UdpLink>)> = None;
+    let mut joined: Option<rogue_reborn::net::proto::Setup> = None;
+    if let Some(address) = args.connect.clone() {
+        let server = address.to_socket_addrs().ok().and_then(|mut a| a.next()).unwrap_or_else(|| {
+            eprintln!("cannot find the server {address}");
+            std::process::exit(2);
+        });
+        let mut link = Impaired::new(
+            UdpLink::bind("0.0.0.0:0").expect("cannot open a socket"),
+            Conditions { latency: args.sim_latency, jitter: args.sim_jitter, loss: args.sim_loss, duplicate: 0.0 },
+            std::process::id() as u64,
+        );
+        let to_server = link.inner_mut().addr_of(server);
+        let token = (std::process::id() ^ 0x5bd1e995).wrapping_mul(2654435761);
+        let mut client = Client::new(to_server, token, option_env!("GIT_HASH").unwrap_or("unknown"));
+        let setup = loop {
+            let now = net_clock.elapsed().as_secs_f64();
+            link.set_time(now);
+            if let Some(setup) = client.connect(now, &mut link).cloned() {
+                break setup;
+            }
+            match &client.status {
+                Status::Refused(why) => {
+                    eprintln!("the server refused us: {why}");
+                    std::process::exit(1);
+                }
+                _ if now > 10.0 => {
+                    eprintln!("no answer from {address}");
+                    std::process::exit(1);
+                }
+                _ => {}
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        println!("joined {address} as player {}: {}, {} characters", client.slot(), setup.map, setup.npcs.len());
+        args.demo = setup.map == "demo";
+        args.map = (!args.demo).then(|| PathBuf::from(&setup.map));
+        args.level = None;
+        args.seed = Some(setup.seed);
+        args.speed_scale = Some(setup.speed_scale);
+        args.no_cull = !setup.culling;
+        args.doors_open = setup.doors_open;
+        args.model = Some(PathBuf::from(&setup.model));
+        args.anim = Some(setup.idle.clone());
+        args.first_person = true;
+        net = Some((client, link));
+        joined = Some(setup);
+    }
     let map_buf = match (&args.map, &args.level) {
         _ if args.demo => PathBuf::from("data/map/m00/demo.map"),
         (Some(path), level) => {
@@ -346,8 +399,12 @@ fn main() {
         }
     }).collect();
 
-    let (npcs, npc_actor) = match (&characters, args.no_models) {
-        (Some(c), false) => place_npcs(&mission_spawns, own_spawn.as_slice(), &world, &c.model, &actors, &|i, p| {
+    let (npcs, npc_actor) = match (&joined, &characters, args.no_models) {
+        (Some(s), _, _) => (
+            s.npcs.iter().map(|n| Npc { health: combat::Health::new(), pos: n.pos, floor: n.floor, yaw: n.yaw, scale: n.scale, stagger: n.stagger }).collect(),
+            s.npcs.iter().map(|n| n.actor.map(|a| a as usize)).collect(),
+        ),
+        (None, Some(c), false) => place_npcs(&mission_spawns, own_spawn.as_slice(), &world, &c.model, &actors, &|i, p| {
             args.model_yaw.unwrap_or_else(|| match mission_spawns.first() {
                 // In the demo room everyone faces the player
                 Some(player) if args.demo => (player[0] - p[0]).atan2(player[2] - p[2]).to_degrees(),
@@ -363,17 +420,19 @@ fn main() {
 
     // The game: the player stands on the floor below the camera
     let eye_height = world.params().eye_height;
-    let (mag_size, reserve) = match &playback {
-        Some(p) => (p.header().magazine, p.header().reserve),
-        None => weapon_def.as_ref().map_or((30, 900), |w| (w.magazine, w.reserve)),
+    let (mag_size, reserve) = match (&playback, &joined) {
+        (Some(p), _) => (p.header().magazine, p.header().reserve),
+        (_, Some(s)) => (s.magazine, s.reserve),
+        _ => weapon_def.as_ref().map_or((30, 900), |w| (w.magazine, w.reserve)),
     };
     // A scripted run can hold L to start with a short magazine and reload it
     let ammo = match &playback {
         Some(p) => p.header().ammo,
+        None if joined.is_some() => joined.as_ref().map_or(mag_size, |s| s.ammo),
         None if args.walk.is_some() && args.hold.as_deref().is_some_and(|h| h.to_ascii_uppercase().contains('L')) => 10,
         None => mag_size,
     };
-    let grenades = playback.as_ref().map_or(3, |p| p.header().grenades);
+    let grenades = playback.as_ref().map(|p| p.header().grenades).or(joined.as_ref().map(|s| s.grenades)).unwrap_or(3);
     let mut recorder = args.record.as_ref().map(|_| Recorder::new(recording::Header {
         build: option_env!("GIT_HASH").unwrap_or("unknown").to_string(),
         map: if args.demo { "demo".to_string() } else { map_path.display().to_string() },
@@ -411,7 +470,15 @@ fn main() {
         npcs,
     );
     // The player on the floor below the camera: slot 0, who this viewer plays
-    let me = sim.add_player([camera.position[0], camera.position[1] - eye_height, -camera.position[2]]).expect("a game has room for a player");
+    let feet = [camera.position[0], camera.position[1] - eye_height, -camera.position[2]];
+    // On a server the slot is the server's choice, and the first snapshot says where in it the player stands
+    let me = match &net {
+        Some((client, _)) => {
+            sim.activate_slot(client.slot(), feet);
+            client.slot()
+        }
+        None => sim.add_player(feet).expect("a game has room for a player"),
+    };
     if let Some(open) = args.doors_open {
         sim.set_doors_open(open);
     }
@@ -545,7 +612,7 @@ fn main() {
                         (Key::R, Action::Press) => {
                             reload_pressed = true;
                         }
-                        (Key::F1, Action::Press) if playback.is_none() => {
+                        (Key::F1, Action::Press) if playback.is_none() && net.is_none() => {
                             // Into the player's body, who drops in from wherever the view is, and out again
                             first_person = !first_person;
                         }
@@ -690,7 +757,16 @@ fn main() {
                 None => input,
             };
             prev_feet = sim.players[me].player.pos;
-            events.extend(sim.tick(&[tick_input], sim::TICK));
+            events.extend(match net.as_mut() {
+                // On a server the game is its to run: send it what the player did, and put
+                // what it says into this copy
+                Some((client, link)) => {
+                    let now = net_clock.elapsed().as_secs_f64();
+                    link.set_time(now);
+                    client.tick(now, link, &mut sim, tick_input)
+                }
+                None => sim.tick(&[tick_input], sim::TICK),
+            });
             if let Some(rec) = recorder.as_mut() {
                 rec.after_tick(&tick_input, &sim);
             }
@@ -724,6 +800,12 @@ fn main() {
             tick_budget = 0.0;
         }
         let game_time = sim.time;
+        if let Some((client, _)) = &net {
+            if client.status != Status::Connected {
+                eprintln!("the connection to the server was lost: {:?}", client.status);
+                window.set_should_close(true);
+            }
+        }
 
         // The view is at the player's eyes, between where they were a tick ago and now
         let draw_feet = if first_person {
@@ -1116,6 +1198,31 @@ fn main() {
                 glColor4f(1.0, 1.0, 1.0, 1.0);
             }
 
+            // The other players on the server, standing about as the characters do
+            if let Some(chars) = &sim.characters {
+                glDisable(0x0DE1); // GL_TEXTURE_2D
+                for (slot, p) in sim.players.iter().enumerate().filter(|(i, p)| *i != me && p.active) {
+                    let ghost = Npc {
+                        health: combat::Health::new(),
+                        pos: p.player.pos,
+                        floor: p.player.pos[1],
+                        yaw: -sim::dequantize(p.look.0),
+                        scale: [1.0; 3],
+                        stagger: slot as f32 * 0.73,
+                    };
+                    let idle = game_time * 30.0 + ghost.stagger * 9.0;
+                    let posed = chars.pose(&ghost, game_time, idle);
+                    let verts: &[[f32; 3]] = if posed.is_empty() { &chars.model.vertices } else { &posed };
+                    glPushMatrix();
+                    glTranslatef(ghost.pos[0], ghost.pos[1], ghost.pos[2]);
+                    glRotatef(ghost.yaw, 0.0, 1.0, 0.0);
+                    let face = (!actors.is_empty()).then(|| face_textures[slot % actors.len()].0).flatten();
+                    draw_character(&chars.model, verts, &part_textures, face, textured);
+                    glPopMatrix();
+                }
+                glColor4f(1.0, 1.0, 1.0, 1.0);
+            }
+
             // The player's own body, shown in third person
             if let (true, true, Some(chars)) = (first_person, third_person, &sim.characters) {
                 if let Some(Rig { skeleton: skel, skin }) = &chars.rig {
@@ -1423,7 +1530,11 @@ fn main() {
             }
             _ => String::new(),
         };
+        let net_text = net.as_ref().map_or(String::new(), |(c, _)| format!("NET: {:?} {} PLAYERS", c.status, sim.players.iter().filter(|p| p.active).count()).to_uppercase());
         let mut debug_lines: Vec<&str> = vec![&level_text, &fps_text, &render_text];
+        if !net_text.is_empty() {
+            debug_lines.push(&net_text);
+        }
         if room_debug {
             debug_lines.push(&rooms_text);
         }
@@ -1514,6 +1625,9 @@ fn main() {
         }
     }
 
+    if let Some((client, link)) = net.as_mut() {
+        client.leave(link);
+    }
     if let (Some(rec), Some(path)) = (recorder, &args.record) {
         let rec = rec.finish(&sim);
         match rec.write(path) {

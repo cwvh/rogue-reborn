@@ -115,6 +115,34 @@ drawn (T, F, G and the rest). A replay with `--screenshot FILE` runs as fast as 
 picture of the last frame, and exits with status 1 if the game stopped matching, so a recording
 can be kept as a test.
 
+## Playing over a network
+
+The game can be played by several people at once, with a server that owns the game and runs it for
+everyone. Start a server and join it from two (or more) windows:
+
+```
+rrsrv --demo --max-players 4                  # the box room, or --level rm11 for a level from the game
+rr --connect 127.0.0.1:27960 --first-person --textured
+rr --connect 127.0.0.1:27960 --first-person --textured
+```
+
+`rrsrv` listens on UDP port 27960 (`--port` changes it). It places `--npcs` characters for the box
+room, or the level's spawn points after the first `--max-players` for a level. Build `rr` and `rrsrv`
+together (the same `cargo build`): the server turns away a client built from a different commit,
+because the two must move a player the same way.
+
+Each player's own movement happens at once on their screen and is checked by the server, which
+moves them back, rarely and by little, if it disagreed. Everything else is the server's word:
+shots, hits, grenades, doors, glass, kills. Other players are shown standing where they are.
+
+To see how it copes with a poor connection, add `--sim-latency 80 --sim-jitter 30 --sim-loss 5` to
+`rrsrv` and/or `rr` (milliseconds each way, milliseconds of jitter, percent lost).
+
+`rrbot` is a client with no window, for trying the server without a screen (`rrbot --connect
+HOST:PORT --keys WF --seconds 10`; `--keys` takes the letters of `--hold`), and
+`scripts/net-test.sh` runs a server and two bots over real sockets, on a clean and a bad connection,
+and checks that the game stayed in agreement.
+
 ## How the code is laid out
 
 The game itself is `src/sim/`, part of the library: the player, weapon, grenades, characters,
@@ -122,7 +150,7 @@ doors and glass, and what a tick of time does to them. It reads no clock, window
 device, and takes its randomness from its own generator, so the same inputs always give the
 same game (a test checks this). Each tick takes an `Input` and returns `Event`s.
 
-The client, `src/main.rs` and its modules, is a window around that: it turns keys and the mouse
+The server logic and wire format are `src/net/`, tested against a pretend network. The client, `src/main.rs` and its modules, is a window around that: it turns keys and the mouse
 into `Input`, steps the sim in fixed 60 Hz ticks, and draws, plays sounds and prints the events.
 
 ## Other tools

@@ -35,3 +35,16 @@ Map parser
 * [map] anyhow context message consistency
 * [map] unify VecN, Coord, and similar, types that all look the same
 * [map] are individual field contexts useful for parse errors, maybe replace?
+
+Network play
+* [net] Snapshots are the full state every time (about 1 kB for eight players and sixteen characters). Send only what changed since the snapshot the client last confirmed, with positions as small integers.
+* [net] Other players and characters are drawn where the latest snapshot put them, so they move at 20 Hz. Draw them a little in the past, between the last two snapshots.
+* [net] Players cannot hurt each other: shots and blasts pass through other players. Needs a hit shape (or the posed character), health, death and respawn.
+* [net] A player's own shots, sounds and muzzle flash wait for the server's answer (a round trip). Predict the ones that cannot be wrong, and take them back if they were.
+* [net] Hit detection ignores latency: a player has to lead a moving target by their ping. Rewind the other players and characters to what the shooter saw (lag compensation).
+* [net] Other players have no weapon in hand and one idle pose (they glide). Send what they are doing and use the player animations.
+* [net] The client's clock is not tied to the server's; the server queues inputs and drops or repeats them when the two drift apart. Measure the queue and speed the client up or slow it down instead.
+* [net] No protection beyond the token: anyone who can see the traffic can speak for a player. No limit on connection attempts, and a client behind a changed address cannot resume.
+* [net] The build check compares the commit, so a dirty tree or a stale binary of the other program passes it. Hash the binary or the sim's constants instead.
+* [net] A listen server (one `rr` hosting) and a lobby are not built, nor is changing level while connected.
+

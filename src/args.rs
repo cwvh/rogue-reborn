@@ -9,6 +9,13 @@ pub struct Args {
     /// A level by name, such as rm11 or citystreet_large, found under data/map
     pub level: Option<String>,
     pub list_levels: bool,
+    /// Join the server at this address (host:port) instead of playing alone
+    pub connect: Option<String>,
+    /// Make the connection to the server worse, to see how the game copes: milliseconds each
+    /// way, milliseconds of jitter, and the share of datagrams lost (0 to 1)
+    pub sim_latency: f64,
+    pub sim_jitter: f64,
+    pub sim_loss: f32,
     /// Record the game to this file, to play back with --play
     pub record: Option<PathBuf>,
     /// Play back a recorded game, which starts as it did when recorded
@@ -85,6 +92,10 @@ pub fn parse_args() -> Args {
             "--map" => args.map = it.next().map(PathBuf::from),
             "--level" => args.level = it.next(),
             "--list-levels" => args.list_levels = true,
+            "--connect" => args.connect = it.next(),
+            "--sim-latency" => args.sim_latency = it.next().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 1000.0,
+            "--sim-jitter" => args.sim_jitter = it.next().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 1000.0,
+            "--sim-loss" => args.sim_loss = it.next().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0) / 100.0,
             "--record" => args.record = it.next().map(PathBuf::from),
             "--play" => args.play = it.next().map(PathBuf::from),
             "--demo" => {
