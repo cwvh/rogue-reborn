@@ -296,10 +296,10 @@ impl Sim {
         }
     }
 
-    /// Put a new player on their feet at `feet`. Returns their slot, or none when the game is full.
-    pub fn add_player(&mut self, feet: V3) -> Option<usize> {
+    /// A player with the starting loadout, on their feet at `feet`
+    fn new_player(&self, feet: V3) -> PlayerState {
         let (ammo, reserve, grenades) = self.loadout;
-        let fresh = PlayerState {
+        PlayerState {
             active: true,
             player: Player::new(feet),
             look: (0, 0),
@@ -325,7 +325,12 @@ impl Sim {
             body: [[0.0; 3]; 2],
             collision_rooms: None,
             last_render_rooms: Vec::new(),
-        };
+        }
+    }
+
+    /// Put a new player on their feet at `feet`. Returns their slot, or none when the game is full.
+    pub fn add_player(&mut self, feet: V3) -> Option<usize> {
+        let fresh = self.new_player(feet);
         if let Some(i) = self.players.iter().position(|p| !p.active) {
             self.players[i] = fresh;
             return Some(i);
@@ -335,6 +340,33 @@ impl Sim {
         }
         self.players.push(fresh);
         Some(self.players.len() - 1)
+    }
+
+    /// Make sure `slot` is a player, standing at `feet` if it was not one. For a copy of a
+    /// game that someone else runs: the slots are theirs to choose.
+    pub fn activate_slot(&mut self, slot: usize, feet: V3) {
+        assert!(slot < MAX_PLAYERS, "there is no slot {slot}");
+        while self.players.len() <= slot {
+            let vacant = PlayerState { active: false, ..self.new_player(feet) };
+            self.players.push(vacant);
+        }
+        if !self.players[slot].active {
+            self.players[slot] = self.new_player(feet);
+        }
+    }
+
+    /// Move a player as a tick would, and nothing else: what a client does with its own player's
+    /// input to see the result before the server has answered
+    pub fn predict(&mut self, slot: usize, input: &Input, dt: f32) {
+        if !self.players.get(slot).is_some_and(|p| p.active) {
+            return;
+        }
+        let yaw = input.look().0;
+        self.players[slot].look = (input.yaw, input.pitch);
+        self.players[slot].controlled = input.observer.is_none();
+        self.use_rooms_of(slot);
+        self.move_player(slot, input, dt, right(yaw));
+        self.track_rooms(slot, input.observer);
     }
 
     /// A player leaves. Their slot is free for the next to join, and their grenades stay in the air.

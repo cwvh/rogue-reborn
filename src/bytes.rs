@@ -40,6 +40,18 @@ impl Writer {
     pub fn new() -> Writer {
         Writer(Vec::new())
     }
+    pub fn bool(&mut self, v: bool) {
+        self.u8(v as u8);
+    }
+    pub fn v3(&mut self, v: [f32; 3]) {
+        v.iter().for_each(|&c| self.f32(c));
+    }
+    pub fn opt_v3(&mut self, v: Option<[f32; 3]>) {
+        self.bool(v.is_some());
+        if let Some(v) = v {
+            self.v3(v);
+        }
+    }
 
     pub fn u8(&mut self, v: u8) {
         self.0.push(v);
@@ -111,6 +123,15 @@ impl<'a> Reader<'a> {
     /// How many bytes are left
     pub fn left(&self) -> usize {
         self.bytes.len() - self.at
+    }
+    pub fn bool(&mut self) -> Result<bool> {
+        Ok(self.u8()? != 0)
+    }
+    pub fn v3(&mut self) -> Result<[f32; 3]> {
+        Ok([self.f32()?, self.f32()?, self.f32()?])
+    }
+    pub fn opt_v3(&mut self) -> Result<Option<[f32; 3]>> {
+        Ok(if self.bool()? { Some(self.v3()?) } else { None })
     }
 
     pub fn take(&mut self, n: usize) -> Result<&[u8]> {
