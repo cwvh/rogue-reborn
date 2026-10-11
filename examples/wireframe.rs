@@ -4,7 +4,7 @@ use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 use rogue_reborn::{map, rsb};
 use rogue_reborn::collision::{CollisionWorld, Params, Player};
-use rogue_reborn::{actor, combat, crp, grenade, motion, skeleton, sound, tga, weapon};
+use rogue_reborn::{actor, combat, crp, demo, grenade, motion, skeleton, sound, tga, weapon};
 use rogue_reborn::ambience;
 use rogue_reborn::glass;
 use rogue_reborn::impact::{self, Surface};
@@ -81,6 +81,10 @@ struct Args {
     /// A level by name, such as rm11 or citystreet_large, found under data/map
     level: Option<String>,
     list_levels: bool,
+    /// The built-in box room instead of a level from the game
+    demo: bool,
+    /// Characters standing in the demo room (0 to 8, default 8)
+    npcs: Option<usize>,
     map: Option<PathBuf>,
     screenshot: Option<PathBuf>,
     pos: Option<[f32; 3]>,
@@ -149,6 +153,12 @@ fn parse_args() -> Args {
             "--map" => args.map = it.next().map(PathBuf::from),
             "--level" => args.level = it.next(),
             "--list-levels" => args.list_levels = true,
+            "--demo" => {
+                args.demo = true;
+                // The player is always the first of the demo room's spawn points
+                args.spawn = Some(1);
+            }
+            "--npcs" => args.npcs = it.next().and_then(|v| v.parse().ok()),
             "--screenshot" => args.screenshot = it.next().map(PathBuf::from),
             "--pos" => {
                 let v: Vec<f32> = it.next().unwrap_or_default()
@@ -489,6 +499,7 @@ fn main() {
         return;
     }
     let map_buf = match (&args.map, &args.level) {
+        _ if args.demo => PathBuf::from("data/map/m00/demo.map"),
         (Some(path), level) => {
             if level.is_some() {
                 eprintln!("--map and --level both given: using --map");
@@ -503,8 +514,7 @@ fn main() {
     };
     let map_path = map_buf.as_path();
     let map_num = extract_map_num(map_path).unwrap_or_else(|| String::from("m00"));
-    let level = map::read(map_path)
-        .expect("Failed to load map");
+    let level = if args.demo { demo::map() } else { map::read(map_path).expect("Failed to load map") };
 
     // Build a flattened mesh from the MAP geometry
     let mesh = build_mesh(&level);
@@ -567,7 +577,7 @@ fn main() {
     camera.position = [33924.6_f32, 33307.0_f32, -30028.3_f32];   // CSL
     // Spawn priority: --pos, --spawn-zone, a random mission spawn point, then
     // the fallback position above
-    let mission_spawns = find_mission_spawns(map_path);
+    let mission_spawns = if args.demo { demo::spawns(args.npcs.unwrap_or(demo::MAX_NPCS)) } else { find_mission_spawns(map_path) };
     let mut own_spawn = None;
     let spawn = if args.pos.is_some() {
         None
@@ -808,7 +818,11 @@ fn main() {
                 pos: [p[0], floor + feet_to_origin * scale_y, p[2]],
                 floor,
                 // Spread facing directions deterministically by spawn index
-                yaw: args.model_yaw.unwrap_or(i as f32 * 137.5),
+                yaw: args.model_yaw.unwrap_or_else(|| match mission_spawns.first() {
+                    // In the demo room everyone faces the player
+                    Some(player) if args.demo => (player[0] - p[0]).atan2(player[2] - p[2]).to_degrees(),
+                    _ => i as f32 * 137.5,
+                }),
                 actor,
                 blink_offset: i as f32 * 0.73,
             });
@@ -864,6 +878,8 @@ fn main() {
     let mut room_debug = args.rooms;
     let mut last_rooms: Vec<String> = Vec::new();
     let mut dump_requested = args.dump;
+    // F3 closes the window and starts the viewer again with the same options
+    let mut reload = false;
     // Draw only the rooms the portals show (V toggles); drawn_rooms is last frame's set
     let mut culling = !args.no_cull;
     let visibility = rogue_reborn::visibility::Visibility::new(&level);
@@ -974,6 +990,10 @@ fn main() {
                         }
                         (Key::F2, Action::Press) => {
                             dump_requested = true;
+                        }
+                        (Key::F3, Action::Press) => {
+                            reload = true;
+                            window.set_should_close(true);
                         }
                         (Key::Space, Action::Press) | (Key::Backspace, Action::Press) => {
                             use_pressed = true;
@@ -2267,6 +2287,17 @@ fn main() {
                     std::hint::spin_loop();
                 }
             }
+        }
+    }
+
+    if reload {
+        // Let go of the window and the sound device first, so the new one has them to itself
+        drop(window);
+        drop(sound);
+        let exe = std::env::current_exe().expect("cannot find the viewer to restart");
+        match std::process::Command::new(exe).args(std::env::args_os().skip(1)).spawn() {
+            Ok(_) => {}
+            Err(e) => eprintln!("could not reload: {e}"),
         }
     }
 }

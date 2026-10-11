@@ -80,6 +80,7 @@ On other platforms, or without the aliases:
 | V | toggle room culling (on by default; `--no-cull` starts with it off) |
 | G | colour each room's geometry (the room you stand in is white) and list your rooms |
 | F2 | debug dump: writes `debug/dump-<time>.png` and `.txt` with your position, rooms, what you are looking at and a command to come back to the spot |
+| F3 | reload: closes the window and starts again with the same options, so a level is back as new (a random spawn point is picked again unless you gave `--spawn` or `--seed`) |
 | Esc | quit |
 
 ### Useful options
@@ -87,6 +88,7 @@ On other platforms, or without the aliases:
 | Option | Effect |
 | --- | --- |
 | `--level NAME` | pick a level by name (`rm05`, `citystreet_large`...); `--map PATH` for a file |
+| `--demo [--npcs N]` | a plain 10 m box with you and up to 8 characters (default 8) standing close by, for trying weapons and grenades |
 | `--first-person` | start walking instead of in free-fly |
 | `--textured` | textured instead of wireframe |
 | `--spawn N` | start at the Nth mission spawn point (1-based) |
