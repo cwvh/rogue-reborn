@@ -82,7 +82,12 @@ struct Tri {
     off: bool,
     /// The MAP material this face uses (`usize::MAX` for none)
     material: usize,
+    /// The room this face belongs to (`NO_ROOM` when its object is not a room's)
+    room: u32,
 }
+
+/// Marks faces that are solid whichever rooms are active
+const NO_ROOM: u32 = u32::MAX;
 
 /// Where a ray struck the level
 #[derive(Clone, Copy, Debug)]
@@ -92,6 +97,8 @@ pub struct RayHit {
     pub normal: V3,
     /// Index into the MAP's materials, if the face has one
     pub material: Option<usize>,
+    /// The room whose geometry was hit
+    pub room: Option<u32>,
 }
 
 pub struct CollisionWorld {
@@ -106,6 +113,8 @@ pub struct CollisionWorld {
     rows: usize,
     cells: Vec<Vec<u32>>,
     params: Params,
+    /// Which room numbers are solid right now; None means all of them
+    active: Option<Vec<bool>>,
 }
 
 impl CollisionWorld {
@@ -113,11 +122,13 @@ impl CollisionWorld {
         let mut tris = Vec::new();
         let glass = crate::glass::panes(level);
         let glass_names: Vec<&str> = glass.iter().map(|g| g.name.as_str()).collect();
+        let room_numbers: Vec<u32> = level.rooms.rooms.iter().filter_map(|r| r.section_name.parse().ok()).collect();
         for object in &level.geometries.objects {
             // Glass panes are stored in their own space; they are added placed, below
             if glass_names.contains(&object.name.as_str()) {
                 continue;
             }
+            let room = map::object_room(&object.name).filter(|n| room_numbers.contains(n)).unwrap_or(NO_ROOM);
             for od in &object.object_datas {
                 let n = od.faces.face_indices.len().min(od.faces.normals.len());
                 for i in 0..n {
@@ -141,7 +152,7 @@ impl CollisionWorld {
                         if gl <= 1e-6 { continue; }
                         n = scale(gn, 1.0 / gl);
                     }
-                    tris.push(Tri { a, b, c, n, off: false, material: od.mn as usize });
+                    tris.push(Tri { a, b, c, n, off: false, material: od.mn as usize, room });
                 }
             }
         }
@@ -155,7 +166,7 @@ impl CollisionWorld {
                 let gn = cross(sub(b, a), sub(c, a));
                 let gl = len(gn);
                 if gl <= 1e-6 { continue; }
-                tris.push(Tri { a, b, c, n: scale(gn, 1.0 / gl), off: false, material: usize::MAX });
+                tris.push(Tri { a, b, c, n: scale(gn, 1.0 / gl), off: false, material: usize::MAX, room: NO_ROOM });
             }
             groups.push((pane.name.clone(), first..tris.len()));
         }
@@ -187,6 +198,7 @@ impl CollisionWorld {
             rows,
             cells: vec![Vec::new(); cols * rows],
             params,
+            active: None,
         };
 
         for ti in 0..world.tris.len() {
@@ -208,12 +220,30 @@ impl CollisionWorld {
 
     pub fn params(&self) -> &Params { &self.params }
 
+    /// Make only the faces of these rooms solid (everything else, such as the glass,
+    /// stays solid), or all of them with None. The level overlaps itself: the outside
+    /// of a plane sits inside its cabin, so only the rooms around the player may count.
+    pub fn set_active_rooms(&mut self, rooms: Option<&[u32]>) {
+        self.active = rooms.map(|rooms| {
+            let mut on = vec![false; rooms.iter().copied().max().map_or(0, |m| m as usize + 1)];
+            for &r in rooms {
+                on[r as usize] = true;
+            }
+            on
+        });
+    }
+
+    /// Whether a face can currently stop anything
+    fn solid(&self, t: &Tri) -> bool {
+        !t.off && (t.room == NO_ROOM || self.active.as_ref().is_none_or(|on| on.get(t.room as usize).copied().unwrap_or(false)))
+    }
+
     /// Distance along the unit vector `dir` from `origin` to the nearest
     /// triangle in the level within `max_dist`, treating every triangle as
     /// solid from both sides (used for bullets and line of sight).
     pub fn raycast(&self, origin: [f32; 3], dir: [f32; 3], max_dist: f32) -> Option<f32> {
         let mut best: Option<f32> = None;
-        for t in self.tris.iter().filter(|t| !t.off) {
+        for t in self.tris.iter().filter(|t| self.solid(t)) {
             if let Some(d) = crate::combat::ray_triangle(origin, dir, t.a, t.b, t.c) {
                 if d <= max_dist && best.map_or(true, |b| d < b) {
                     best = Some(d);
@@ -226,7 +256,7 @@ impl CollisionWorld {
     /// Like `raycast`, but says what was hit: how far, which way the surface faces and its material
     pub fn raycast_hit(&self, origin: [f32; 3], dir: [f32; 3], max_dist: f32) -> Option<RayHit> {
         let mut best: Option<(f32, &Tri)> = None;
-        for t in self.tris.iter().filter(|t| !t.off) {
+        for t in self.tris.iter().filter(|t| self.solid(t)) {
             if let Some(d) = crate::combat::ray_triangle(origin, dir, t.a, t.b, t.c) {
                 if d <= max_dist && best.map_or(true, |(b, _)| d < b) {
                     best = Some((d, t));
@@ -236,7 +266,7 @@ impl CollisionWorld {
         best.map(|(dist, t)| {
             // The file's normals are not reliable about which side is front
             let n = if dot(t.n, dir) > 0.0 { scale(t.n, -1.0) } else { t.n };
-            RayHit { dist, normal: n, material: (t.material != usize::MAX).then_some(t.material) }
+            RayHit { dist, normal: n, material: (t.material != usize::MAX).then_some(t.material), room: (t.room != NO_ROOM).then_some(t.room) }
         })
     }
 
@@ -275,7 +305,7 @@ impl CollisionWorld {
         let mut best: Option<f32> = None;
         for &ti in &self.cells[self.row(z) * self.cols + self.col(x)] {
             let t = &self.tris[ti as usize];
-            if t.off || t.n[1] < ny_min {
+            if !self.solid(t) || t.n[1] < ny_min {
                 continue;
             }
             if let Some(y) = height_on_triangle(t, x, z) {
@@ -361,7 +391,7 @@ impl CollisionWorld {
                 let h = lo + (hi - lo) * (k as f32 / (count - 1) as f32);
                 for &ti in &near {
                     let t = &self.tris[ti as usize];
-                    if t.off || t.n[1].abs() >= ny_floor {
+                    if !self.solid(t) || t.n[1].abs() >= ny_floor {
                         continue;
                     }
                     // Recomputed per triangle: earlier pushes move the body
@@ -414,7 +444,7 @@ impl CollisionWorld {
                 for c in c0..=c1 {
                     for &ti in &self.cells[r * self.cols + c] {
                         let t = &self.tris[ti as usize];
-                        if t.off || t.n[1].abs() >= ny_floor {
+                        if !self.solid(t) || t.n[1].abs() >= ny_floor {
                             continue;
                         }
                         let d = len(sub(centre, closest_on_triangle(centre, t))) - prm.radius;
@@ -503,6 +533,32 @@ mod tests {
         }
         let level = map::read(path).expect("rm11 loads");
         Some(CollisionWorld::from_map(&level, Params::default()))
+    }
+
+    // From inside the plane on rm05, looking at the cabin wall: the plane's hull
+    // (part of the exterior, room 100) overlaps the cabin and used to get hit first
+    #[test]
+    fn the_exterior_does_not_stop_bullets_inside_the_plane() {
+        let path = Path::new("data/map/rm05/rm05.map");
+        if !path.exists() {
+            eprintln!("skipping: {} not found", path.display());
+            return;
+        }
+        let level = map::read(path).expect("rm05 loads");
+        let mut w = CollisionWorld::from_map(&level, Params::default());
+        let eye = [37792.9, 33272.0, 35970.0];
+        let dir = [0.797, -0.007, 0.605];
+        let all = w.raycast_hit(eye, dir, 20000.0).expect("hits something");
+        assert_eq!(all.room, Some(100), "the hull is hit first with every room solid");
+
+        // Room 401 and the rooms its portals lead to
+        w.set_active_rooms(Some(&[301, 401, 402]));
+        let near = w.raycast_hit(eye, dir, 20000.0).expect("hits the cabin wall");
+        assert_eq!(near.room, Some(401));
+        assert!(near.dist > all.dist);
+
+        w.set_active_rooms(None);
+        assert_eq!(w.raycast_hit(eye, dir, 20000.0).unwrap().room, Some(100));
     }
 
     // Spawn used by the wireframe example, in MAP space (camera Z is negated)

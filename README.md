@@ -75,6 +75,9 @@ On other platforms, or without the aliases:
 | F1 | toggle between first person and free-fly (collision off, Shift = faster, scroll = zoom) |
 | T | textured / wireframe |
 | P, C | show portals, show collision points |
+| V | toggle room culling (on by default; `--no-cull` starts with it off) |
+| G | colour each room's geometry (the room you stand in is white) and list your rooms |
+| F2 | debug dump: writes `debug/dump-<time>.png` and `.txt` with your position, rooms, what you are looking at and a command to come back to the spot |
 | Esc | quit |
 
 ### Useful options

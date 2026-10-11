@@ -88,6 +88,16 @@ pub fn read_model(filename: &Path) -> anyhow::Result<Model> {
 
 // TODO replace or remove
 /// Utility function for driving the IO. Should be replaced or moved.
+/// The room number an object belongs to, from the start of its name: "204" and
+/// "20_doormetal" give 204 and 20, while "glass" gives none.
+pub fn object_room(name: &str) -> Option<u32> {
+    let digits: String = name.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() || !(digits.len() == name.len() || name[digits.len()..].starts_with('_')) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
 pub fn read(filename: &Path) -> anyhow::Result<Map> {
     let file = File::open(filename).context("could not open MAP file")?;
     let mut reader = BufReader::new(file);
@@ -1371,6 +1381,39 @@ pub struct Rooms {
 }
 
 impl Rooms {
+    /// The one room a map-space point belongs to, as an index into `rooms`.
+    ///
+    /// Room volumes overlap (a hull around a cabin, a floor slab under the next level), so
+    /// a point is often inside several. The smallest volume wins: a cabin beats the
+    /// exterior that encloses it. A point in no volume goes to the nearest room within
+    /// `NEAREST_RANGE` units, which covers standing on a ramp or stair that the boxes
+    /// do not quite reach.
+    ///
+    /// `prev` is the room the point was in a moment ago. Among rooms the point is only
+    /// near, it gets a head start, so walking along a wall does not flip between rooms.
+    pub fn locate(&self, p: [f32; 3], prev: Option<usize>) -> Option<usize> {
+        const NEAREST_RANGE: f32 = 150.0;
+        const PREV_BONUS: f32 = 40.0;
+        let mut inside: Option<(usize, f32)> = None;
+        let mut nearest: Option<(usize, f32)> = None;
+        for (i, room) in self.rooms.iter().enumerate() {
+            for b in room.sherman_levels.iter().flat_map(|l| &l.tm_with_aabb) {
+                let (outside, volume) = b.measure(p);
+                if outside == 0.0 {
+                    if inside.is_none_or(|(_, v)| volume < v) {
+                        inside = Some((i, volume));
+                    }
+                } else {
+                    let score = outside - if prev == Some(i) { PREV_BONUS } else { 0.0 };
+                    if nearest.is_none_or(|(_, d)| score < d) {
+                        nearest = Some((i, score));
+                    }
+                }
+            }
+        }
+        inside.map(|(i, _)| i).or(nearest.filter(|&(_, d)| d <= NEAREST_RANGE).map(|(i, _)| i))
+    }
+
     fn read(buf: &mut Cursor<Vec<u8>>) -> Result<Self> {
         let (section_id, section_name) = section_header(buf)
             .context("room list")?;
@@ -1549,6 +1592,22 @@ pub struct TransformationWithAABB {
 }
 
 impl TransformationWithAABB {
+    /// How far a map-space point is outside the box (0 when inside) and the box's volume.
+    fn measure(&self, p: [f32; 3]) -> (f32, f32) {
+        // Into the box's local space: the transform axes are orthonormal
+        let o = &self.tm.position;
+        let d = [p[0] - o.x, p[1] - o.y, p[2] - o.z];
+        let dot = |v: &Vec3f| d[0] * v.x + d[1] * v.y + d[2] * v.z;
+        let l = [dot(&self.tm.x_axis), dot(&self.tm.y_axis), dot(&self.tm.z_axis)];
+        let a = &self.aabb;
+        let mut out2 = 0.0;
+        for i in 0..3 {
+            let past = (a[i] - l[i]).max(l[i] - a[i + 3]).max(0.0);
+            out2 += past * past;
+        }
+        (out2.sqrt(), (a[3] - a[0]) * (a[4] - a[1]) * (a[5] - a[2]))
+    }
+
     fn read(buf: &mut Cursor<Vec<u8>>) -> Result<Self> {
         let tm = TransformationMatrix::read(buf).context("TM + AABB")?;
         let mut aabb = [0f32; 6];

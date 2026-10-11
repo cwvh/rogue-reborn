@@ -16,6 +16,8 @@ unsafe extern "C" {
     fn glViewport(x: i32, y: i32, width: i32, height: i32);
     fn glClearColor(r: f32, g: f32, b: f32, a: f32);
     fn glEnable(cap: u32);
+    fn glScissor(x: i32, y: i32, width: i32, height: i32);
+    fn glGetFloatv(pname: u32, params: *mut f32);
     fn glPolygonMode(face: u32, mode: u32);
     fn glClear(mask: u32);
     fn glMatrixMode(mode: u32);
@@ -77,6 +79,12 @@ struct Args {
     pitch: Option<f32>,
     textured: bool,
     portals: bool,
+    /// Colour each room's geometry and report the rooms the player is in
+    rooms: bool,
+    /// Write the F2 debug dump on the first frame and exit
+    dump: bool,
+    /// Draw every room instead of only the ones visible through portals
+    no_cull: bool,
     collisions: bool,
     first_person: bool,
     info: bool,
@@ -143,6 +151,9 @@ fn parse_args() -> Args {
             "--textured" => args.textured = true,
             "--portals" => args.portals = true,
             "--collisions" => args.collisions = true,
+            "--rooms" => args.rooms = true,
+            "--dump" => args.dump = true,
+            "--no-cull" => args.no_cull = true,
             "--info" => args.info = true,
             "--spawn-zone" => args.spawn_zone = it.next(),
             "--model" => args.model = it.next().map(PathBuf::from),
@@ -766,6 +777,15 @@ fn main() {
     let mut planning_level_index = 0;
     let mut show_portals = args.portals;
     let mut show_collisions = args.collisions;
+    let mut room_debug = args.rooms;
+    let mut last_rooms: Vec<String> = Vec::new();
+    let mut dump_requested = args.dump;
+    // Draw only the rooms the portals show (V toggles); drawn_rooms is last frame's set
+    let mut culling = !args.no_cull;
+    let visibility = rogue_reborn::visibility::Visibility::new(&level);
+    let mut current_room: Option<usize> = None;
+    let mut collision_rooms: Option<Vec<u32>> = None;
+    let mut drawn_rooms: Vec<String> = Vec::new();
     let mut blink_enabled = !args.no_blink;
     // Combat state; times are in game seconds
     let mut game_time = 0.0f32;
@@ -830,6 +850,16 @@ fn main() {
                         }
                         (Key::P, Action::Press) => {
                             show_portals = !show_portals;
+                        }
+                        (Key::F2, Action::Press) => {
+                            dump_requested = true;
+                        }
+                        (Key::V, Action::Press) => {
+                            culling = !culling;
+                        }
+                        (Key::G, Action::Press) => {
+                            room_debug = !room_debug;
+                            last_rooms.clear();
                         }
                         (Key::C, Action::Press) => {
                             show_collisions = !show_collisions;
@@ -1203,6 +1233,34 @@ fn main() {
             amb.update(snd, &rooms, listener, game_time, step_dt);
         }
 
+        // The room the player is in: the point just above the feet (the camera when
+        // flying), low enough to land inside the thin slabs that stairs and ramps use.
+        // Where no room claims it, the last room stays.
+        // The camera's Z is negated relative to the map
+        let probe = [camera.position[0], camera.position[1] - if first_person { eye_height - 10.0 } else { 0.0 }, -camera.position[2]];
+        if let Some(i) = level.rooms.locate(probe, current_room) {
+            current_room = Some(i);
+        }
+        // Where the player's feet and eyes are, for portals they are standing in
+        let body = [probe, [camera.position[0], camera.position[1], -camera.position[2]]];
+        // Only the player's room and the rooms its portals lead to can stop movement or
+        // bullets: the level overlaps itself, and the exterior of a plane must not block
+        // anyone inside it
+        let wanted: Option<Vec<u32>> = if culling {
+            current_room.and_then(|i| level.rooms.rooms[i].section_name.parse().ok()).map(|n| visibility.with_neighbours(&level, n))
+        } else {
+            None
+        };
+        if wanted != collision_rooms {
+            world.set_active_rooms(wanted.as_deref());
+            collision_rooms = wanted;
+        }
+        let current_rooms: Vec<&str> = current_room.map(|i| level.rooms.rooms[i].section_name.as_str()).into_iter().collect();
+        if room_debug && current_rooms != last_rooms {
+            println!("in rooms: {current_rooms:?}");
+            last_rooms = current_rooms.iter().map(|s| s.to_string()).collect();
+        }
+
         // Compute dynamic aspect and clip planes
         let (w, h) = window.get_size();
         let aspect = (w as f32 / h.max(1) as f32).max(0.1);
@@ -1237,6 +1295,25 @@ fn main() {
             apply_camera(&view);
             glScalef(1.0, 1.0, -1.0);
 
+            // Which rooms the portals show from here, each with the part of the screen
+            // it can be seen through
+            let mut drawn: Option<HashMap<u32, rogue_reborn::visibility::Rect>> = None;
+            if culling {
+                if let Some(start) = current_room.and_then(|i| level.rooms.rooms[i].section_name.parse::<u32>().ok()) {
+                    let (mut modelview, mut projection) = ([0f32; 16], [0f32; 16]);
+                    glGetFloatv(0x0BA6, modelview.as_mut_ptr()); // GL_MODELVIEW_MATRIX
+                    glGetFloatv(0x0BA7, projection.as_mut_ptr()); // GL_PROJECTION_MATRIX
+                    let clip = |v: [f32; 3]| mul_mat4(&projection, mul_mat4(&modelview, [v[0], v[1], v[2], 1.0]));
+                    drawn = Some(visibility.visible(&level, start, &body, &clip));
+                }
+            }
+            drawn_rooms = drawn.as_ref().map(|d| {
+                let mut v: Vec<u32> = d.keys().copied().collect();
+                v.sort();
+                v.iter().map(|n| n.to_string()).collect()
+            }).unwrap_or_default();
+            let (fb_w, fb_h) = window.get_framebuffer_size();
+
             // Combined
             {
                 // Textured mode
@@ -1251,10 +1328,32 @@ fn main() {
                 // Determine which room names are active for this planning level (if any)
                 let use_filter = false; // !level.planning_levels.levels.is_empty();
                 // Iterate map geometry by material groups
+                if room_debug {
+                    glDisable(0x0DE1); // GL_TEXTURE_2D
+                }
                 for object in &level.geometries.objects {
                     // Panes are drawn in place below
                     if panes.iter().any(|g| g.name == object.name) {
                         continue;
+                    }
+                    // An object belongs to the room its name starts with ("204", "20_doormetal").
+                    // Rooms the portals don't show are skipped; the rest are drawn only
+                    // through the part of the screen their portals cover.
+                    let room = map::object_room(&object.name).filter(|n| level.rooms.rooms.iter().any(|r| r.section_name == n.to_string()));
+                    glDisable(0x0C11); // GL_SCISSOR_TEST
+                    if let (Some(drawn), Some(n)) = (&drawn, room) {
+                        let Some(rect) = drawn.get(&n) else { continue };
+                        if *rect != [-1.0, -1.0, 1.0, 1.0] {
+                            let to_px = |v: f32, size: i32| (v + 1.0) / 2.0 * size as f32;
+                            let (x0, y0) = ((to_px(rect[0], fb_w) - 2.0).floor().max(0.0), (to_px(rect[1], fb_h) - 2.0).floor().max(0.0));
+                            let (x1, y1) = ((to_px(rect[2], fb_w) + 2.0).ceil().min(fb_w as f32), (to_px(rect[3], fb_h) + 2.0).ceil().min(fb_h as f32));
+                            glEnable(0x0C11);
+                            glScissor(x0 as i32, y0 as i32, (x1 - x0).max(0.0) as i32, (y1 - y0).max(0.0) as i32);
+                        }
+                    }
+                    if room_debug {
+                        let [r, g, b] = room_color(&object.name, current_rooms.iter().any(|n| *n == object.name));
+                        glColor3f(r, g, b);
                     }
                     for od in &object.object_datas {
                         if use_filter {
@@ -1264,9 +1363,13 @@ fn main() {
                             }
                         }
                         let mat_index = od.mn as usize;
-                        if let Some(tex_id) = ensure_texture(&level.materials, mat_index, &map_num, &mut textures) {
+                        // Room colours replace the textures, so they show even where textures are missing
+                        let tex_id = if room_debug { Some(0) } else { ensure_texture(&level.materials, mat_index, &map_num, &mut textures) };
+                        if let Some(tex_id) = tex_id {
                             // TODO put all faces with same tex-id together so I can bind once
-                            glBindTexture(0x0DE1, tex_id); // GL_TEXTURE_2D
+                            if !room_debug {
+                                glBindTexture(0x0DE1, tex_id); // GL_TEXTURE_2D
+                            }
 
                             // Faces and UVs are parallel arrays
                             let face_count = od.faces.face_indices.len().min(od.faces.texture_indices.len());
@@ -1301,6 +1404,8 @@ fn main() {
                         }
                     }
                 }
+                glDisable(0x0C11); // GL_SCISSOR_TEST
+                glColor3f(1.0, 1.0, 1.0);
             }
 
             // Characters at the spawn points, posed for what they are doing
@@ -1566,7 +1671,44 @@ fn main() {
             let marker = tracer.is_some_and(|t| t.2 && game_time < t.3);
             draw_hud(w, h, &status, msg, marker);
         }
-        draw_debug_text(w, h, &[&level_text, &fps_text, &render_text]);
+        let rooms_text = if culling {
+            format!("ROOM: {} DRAWN: {}", current_rooms.join(" "), drawn_rooms.join(" "))
+        } else {
+            format!("ROOM: {} (CULLING OFF)", current_rooms.join(" "))
+        };
+        let mut debug_lines: Vec<&str> = vec![&level_text, &fps_text, &render_text];
+        if room_debug {
+            debug_lines.push(&rooms_text);
+        }
+        draw_debug_text(w, h, &debug_lines);
+
+        // F2: a screenshot and a text log of where the player is and what they see
+        if dump_requested && (!args.dump || frames_drawn >= 2) {
+            dump_requested = false;
+            let (fw, fh) = window.get_framebuffer_size();
+            let rgb = read_framebuffer(fw, fh);
+            let eye = [camera.position[0], camera.position[1], -camera.position[2]];
+            let f = camera.get_forward();
+            let dir = [f[0], f[1], -f[2]];
+            let hit = world.raycast_hit(eye, dir, 20000.0).map(|hit| {
+                let point = [eye[0] + dir[0] * hit.dist, eye[1] + dir[1] * hit.dist, eye[2] + dir[2] * hit.dist];
+                let material = hit.material.and_then(|m| level.materials.materials.get(m)).map_or("?", |m| m.filename.as_str());
+                (hit, point, material)
+            });
+            let feet = [eye[0], eye[1] - if first_person { eye_height } else { 0.0 }, eye[2]];
+            let report = DebugReport {
+                map_path, map_num: &map_num, level: &level, eye, feet, yaw: camera.yaw, pitch: camera.pitch, dir,
+                hit, first_person, third_person, textured, room_debug, show_portals, show_collisions,
+                fps, render_ms, culling, room: current_rooms.first().copied(), drawn: &drawn_rooms, collision: &collision_rooms,
+            };
+            match write_debug_dump(&report, &rgb, fw as u32, fh as u32) {
+                Ok(stem) => println!("wrote {stem}.png and {stem}.txt"),
+                Err(e) => eprintln!("debug dump failed: {e:#}"),
+            }
+            if args.dump {
+                break;
+            }
+        }
 
         // Screenshot mode: capture after a couple of frames so textures are
         // uploaded and the context has settled, then exit.
@@ -1975,6 +2117,125 @@ fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_marker
         }
         glColor3f(1.0, 1.0, 1.0);
     }
+}
+
+/// A column-major 4x4 matrix times a vector
+fn mul_mat4(m: &[f32; 16], v: [f32; 4]) -> [f32; 4] {
+    std::array::from_fn(|row| (0..4).map(|col| m[col * 4 + row] * v[col]).sum())
+}
+
+/// A stable colour for a room's name, so the same room looks the same every run.
+/// The rooms the player is standing in are drawn white.
+fn room_color(name: &str, current: bool) -> [f32; 3] {
+    if current {
+        return [1.0, 1.0, 1.0];
+    }
+    let hash = name.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
+    let hue = (hash % 360) as f32 / 60.0;
+    let x = 1.0 - (hue % 2.0 - 1.0).abs();
+    let (r, g, b) = match hue as u32 {
+        0 => (1.0, x, 0.0),
+        1 => (x, 1.0, 0.0),
+        2 => (0.0, 1.0, x),
+        3 => (0.0, x, 1.0),
+        4 => (x, 0.0, 1.0),
+        _ => (1.0, 0.0, x),
+    };
+    [r * 0.8 + 0.1, g * 0.8 + 0.1, b * 0.8 + 0.1]
+}
+
+// What F2 records. Positions are in MAP space (the camera's Z is negated), except
+// the `--pos` in the repro command, which takes the camera's own coordinates.
+struct DebugReport<'a> {
+    map_path: &'a Path,
+    map_num: &'a str,
+    level: &'a map::Map,
+    eye: [f32; 3],
+    feet: [f32; 3],
+    yaw: f32,
+    pitch: f32,
+    dir: [f32; 3],
+    hit: Option<(rogue_reborn::collision::RayHit, [f32; 3], &'a str)>,
+    first_person: bool,
+    third_person: bool,
+    textured: bool,
+    room_debug: bool,
+    show_portals: bool,
+    show_collisions: bool,
+    fps: f32,
+    render_ms: f32,
+    culling: bool,
+    /// The room the player is in
+    room: Option<&'a str>,
+    /// The rooms drawn this frame, when culling is on
+    drawn: &'a [String],
+    /// The rooms that can stop movement and bullets, when culling is on
+    collision: &'a Option<Vec<u32>>,
+}
+
+// Write debug/dump-<time>.png and .txt; returns the path without extension
+fn write_debug_dump(r: &DebugReport, rgb: &[u8], width: u32, height: u32) -> anyhow::Result<String> {
+    use std::fmt::Write as _;
+    std::fs::create_dir_all("debug")?;
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    let stem = format!("debug/dump-{secs}");
+    rogue_reborn::png::write_png(Path::new(&format!("{stem}.png")), width, height, rgb)?;
+
+    let rooms_at = |p: [f32; 3]| -> Vec<&str> {
+        r.level.rooms.rooms.iter().filter(|room| room.contains(p, 50.0)).map(|room| room.section_name.as_str()).collect()
+    };
+    let in_rooms = rooms_at(r.feet);
+    let mut t = String::new();
+    writeln!(t, "map: {} ({})", r.map_path.display(), r.map_num)?;
+    writeln!(t, "args: {}", std::env::args().skip(1).collect::<Vec<_>>().join(" "))?;
+    writeln!(t, "mode: {}{}", if r.first_person { "first person" } else { "free fly" }, if r.third_person { ", third person view" } else { "" })?;
+    writeln!(t, "toggles: textured={} room_colours={} portals={} collisions={}", r.textured, r.room_debug, r.show_portals, r.show_collisions)?;
+    writeln!(t, "frame: {:.1} fps, {:.2} ms render", r.fps, r.render_ms)?;
+    writeln!(t)?;
+    writeln!(t, "eye (map space): {:.1}, {:.1}, {:.1}", r.eye[0], r.eye[1], r.eye[2])?;
+    writeln!(t, "feet (map space): {:.1}, {:.1}, {:.1}", r.feet[0], r.feet[1], r.feet[2])?;
+    writeln!(t, "yaw {:.1}, pitch {:.1}; looking along ({:.3}, {:.3}, {:.3})", r.yaw, r.pitch, r.dir[0], r.dir[1], r.dir[2])?;
+    writeln!(t, "rooms whose volumes contain the feet: {in_rooms:?}")?;
+    writeln!(t, "room the player is in: {}", r.room.unwrap_or("none"))?;
+    if r.culling {
+        writeln!(t, "rooms drawn (visible through portals): {}", r.drawn.join(" "))?;
+        writeln!(t, "rooms that collide (the room and its portal neighbours): {:?}", r.collision.as_deref().unwrap_or_default())?;
+    } else {
+        writeln!(t, "room culling is off: every room is drawn")?;
+    }
+
+    // Portals touching those rooms
+    let numbers: Vec<u32> = r.room.and_then(|n| n.parse().ok()).into_iter().collect();
+    let portals: Vec<String> = r.level.portals.portals.iter()
+        .filter(|p| numbers.contains(&p.room) || numbers.contains(&p.opposite_room))
+        .map(|p| format!("{} ({} -> {})", p.name, p.room, p.opposite_room))
+        .collect();
+    writeln!(t, "portals of that room: {}", if portals.is_empty() { "none".to_string() } else { portals.join(", ") })?;
+
+    match &r.hit {
+        Some((hit, point, material)) => {
+            writeln!(t, "\nlooking at: {:.0} units away, point ({:.1}, {:.1}, {:.1}), normal ({:.2}, {:.2}, {:.2})",
+                hit.dist, point[0], point[1], point[2], hit.normal[0], hit.normal[1], hit.normal[2])?;
+            writeln!(t, "  material: {material}")?;
+            writeln!(t, "  room whose geometry this is: {}", hit.room.map_or("none".to_string(), |n| n.to_string()))?;
+            writeln!(t, "  rooms at that point: {:?}", rooms_at(*point))?;
+        }
+        None => writeln!(t, "\nlooking at: nothing within range")?,
+    }
+
+    // `--pos` takes the camera's own coordinates, with Z negated
+    let mut repro = format!("cargo wireframe --map {} --pos {:.1},{:.1},{:.1} --yaw {:.1} --pitch {:.1}",
+        r.map_path.display(), r.eye[0], r.eye[1], -r.eye[2], r.yaw, r.pitch);
+    for (on, flag) in [(!r.culling, "--no-cull"), (r.first_person, "--first-person"), (r.textured, "--textured"), (r.room_debug, "--rooms"), (r.show_portals, "--portals"), (r.show_collisions, "--collisions")] {
+        if on {
+            repro.push(' ');
+            repro.push_str(flag);
+        }
+    }
+    writeln!(t, "\nreproduce: {repro}")?;
+    writeln!(t, "git commit: {}", option_env!("GIT_HASH").unwrap_or("unknown"))?;
+    std::fs::write(format!("{stem}.txt"), t)?;
+    Ok(stem)
 }
 
 fn draw_debug_text(win_w: i32, win_h: i32, lines: &[&str]) {
