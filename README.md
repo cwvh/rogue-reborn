@@ -137,6 +137,8 @@ at the spawn point farthest from the others, with a full loadout. Playing alone,
 A shot is judged against where the other players were when the shooter saw them (the client says
 which moment that was, up to half a second back), so there is no need to lead a target by your
 ping; `rrsrv --no-lag-compensation` judges against where they are now instead.
+Other players are drawn with the player's own animations and weapon: walking, running or strafing
+according to how they are seen to move, and firing, reloading or throwing as the snapshots say.
 A snapshot is sent as only what has changed since the latest one the client says it has, or in full
 if there is none, so a quiet game costs about a hundred bytes a snapshot.
 

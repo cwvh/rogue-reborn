@@ -42,7 +42,7 @@ Network play
 * [net] Players are hit as a plain upright cylinder (head, chest, belly, legs by height). Use the posed character's hit zones for arms and exact heads, once the other players are animated. Also: teams, a score limit and rounds, a kill feed, a death view (the camera stays where the player fell), and a spawn that avoids lines of sight.
 * [net] A player's own shots, sounds and muzzle flash wait for the server's answer (a round trip). Predict the ones that cannot be wrong, and take them back if they were.
 * [net] Lag compensation rewinds only the other players (up to half a second, to the view the shooter had). The characters are still hit where they are now, and the shooter's own position is not rewound. A client could lie about its view time; the cap is the only check.
-* [net] Other players have no weapon in hand and one idle pose (they glide). Send what they are doing and use the player animations.
+* [net] Other players walk, run, strafe, fire, reload and throw with the gun in hand, but which way they walk is worked out from how they are seen to move (so a wall they push against still looks like walking), and they never jump or crouch. Send what they are doing if that is not enough.
 * [net] The client's clock is not tied to the server's; the server queues inputs and drops or repeats them when the two drift apart. Measure the queue and speed the client up or slow it down instead.
 * [net] No protection beyond the token: anyone who can see the traffic can speak for a player. No limit on connection attempts, and a client behind a changed address cannot resume.
 * [net] The build check compares the commit, so a dirty tree or a stale binary of the other program passes it. Hash the binary or the sim's constants instead.

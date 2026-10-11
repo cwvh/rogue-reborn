@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::net::ToSocketAddrs;
 use rogue_reborn::{map, rsb, actor, combat, demo, grenade, motion, recording, skeleton, sim, sound, weapon, ambience, glass};
 use rogue_reborn::net::client::{Client, Status};
+use rogue_reborn::net::animation::Doing;
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
 use rogue_reborn::recording::{Playback, Recorder, Recording};
 use rogue_reborn::sim::characters::{Characters, Npc, Rig, place_npcs};
@@ -536,6 +537,7 @@ fn main() {
     let mut firing_sound: Option<rodio::Player> = None;
     let mut was_reloading = false;
     let mut step_phase = 0i32;
+    let mut remote_anim = rogue_reborn::net::animation::Animators::default();
     let mut trigger = false;
     // Right mouse button held: walk instead of the default run
     let mut walk_held = false;
@@ -1211,21 +1213,84 @@ fn main() {
                 glColor4f(1.0, 1.0, 1.0, 1.0);
             }
 
-            // The other players on the server, standing about as the characters do
+            // How a posed body is drawn, for the other players and for the player's own
+            let draw_body = |chars: &Characters, movement: Movement, frame: f32, feet: [f32; 3], yaw_deg: f32, scale: [f32; 3],
+                             face: Option<u32>, hand: Option<&Option<WeaponDraw>>, grenade: bool, flash: bool| -> bool {
+                let Some(Rig { skeleton: skel, skin }) = &chars.rig else { return false };
+                let Some(mot) = player_motions.get(movement) else { return false };
+                let (root, mut rots) = mot.sample(frame.min(mot.frames.saturating_sub(1) as f32));
+                // Moving: legs from the locomotion cycle, upper body keeps the gun hold
+                if matches!(movement, Movement::Walk | Movement::Run | Movement::Back | Movement::StrafeLeft | Movement::StrafeRight) {
+                    if let Some(hold) = player_motions.get(Movement::Idle) {
+                        let (_, hold_rots) = hold.sample(0.0);
+                        for b in &skel.bones {
+                            if is_upper_body(&b.name) {
+                                if let (Some(r), Some(h)) = (rots.get_mut(b.anim_index), hold_rots.get(b.anim_index)) { *r = *h; }
+                            }
+                        }
+                    }
+                }
+                let pose = skel.pose([0.0, root[1], 0.0], &rots);
+                let verts = skin.apply(&pose);
+                glPushMatrix();
+                glTranslatef(feet[0], feet[1], feet[2]);
+                // The body faces where the player looks (model forward is +Z)
+                glRotatef(yaw_deg, 0.0, 1.0, 0.0);
+                glScalef(scale[0], scale[1], scale[2]);
+                draw_character(&chars.model, &verts, &part_textures, face, textured);
+
+                // The MP5K in the right hand, or a grenade until it is thrown
+                if let (Some(Some(wd)), Some((hand, off))) = (hand, &weapon_attach) {
+                    glPushMatrix();
+                    glMultMatrixf(pose[*hand].matrix().as_ptr());
+                    glMultMatrixf(off.matrix().as_ptr());
+                    if grenade {
+                        glTranslatef(-wd.center[0], -wd.center[1], -wd.center[2]);
+                    }
+                    draw_weapon(wd, textured, flash);
+                    glPopMatrix();
+                }
+                glPopMatrix();
+                glColor4f(1.0, 1.0, 1.0, 1.0);
+                true
+            };
+
+            // The other players on the server, moving and handling their weapons as they are seen to
             if let Some(chars) = &sim.characters {
                 glDisable(0x0DE1); // GL_TEXTURE_2D
                 let others = view.as_ref().map_or(&[][..], |v| &v.players[..]);
                 for &(slot, pos, look) in others.iter().filter(|(i, ..)| *i != me) {
-                    // A player who has died lies where they fell until they come back
+                    let p = &sim.players[slot];
+                    let yaw = sim::dequantize(look.0);
+                    let face = (!actors.is_empty()).then(|| face_textures[slot % actors.len()].0).flatten();
+                    if p.respawn_at.is_none() {
+                        let doing = Doing {
+                            throwing: p.throw.map(|t| (game_time - t.start) / sim::THROW_SECONDS),
+                            reloading: p.reload_until.map(|t| 1.0 - (t - game_time) / sim::RELOAD_SECONDS),
+                            firing: p.gun_trigger && p.ammo > 0,
+                        };
+                        let frames = |m: Movement| player_motions.get(m).map_or(1, |m| m.frames.max(1)) as f32;
+                        let (movement, frame) = remote_anim.update(slot, pos, yaw, step_dt, doing, frames, args.speed_scale.unwrap_or(1.0), args.anim_scale.unwrap_or(1.5));
+                        let scale = actors.get(slot % actors.len().max(1)).map_or([1.0; 3], |a| a.scale);
+                        let hand = if p.equipped_grenade { p.throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
+                        let flash = !p.equipped_grenade && game_time < p.flash_until;
+                        if draw_body(chars, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash) {
+                            continue;
+                        }
+                    } else {
+                        remote_anim.forget(slot);
+                    }
+                    // Without the player animations, or when dead: a character, lying where they
+                    // fell until they come back
                     let mut health = combat::Health::new();
-                    if let Some(until) = sim.players[slot].respawn_at {
+                    if let Some(until) = p.respawn_at {
                         health.state = combat::NpcState::Dead { motion: "thdu_1", start: until - sim::RESPAWN_SECONDS };
                     }
                     let ghost = Npc {
                         health,
                         pos,
                         floor: pos[1],
-                        yaw: -sim::dequantize(look.0),
+                        yaw: -yaw,
                         scale: [1.0; 3],
                         stagger: slot as f32 * 0.73,
                     };
@@ -1235,7 +1300,6 @@ fn main() {
                     glPushMatrix();
                     glTranslatef(ghost.pos[0], ghost.pos[1], ghost.pos[2]);
                     glRotatef(ghost.yaw, 0.0, 1.0, 0.0);
-                    let face = (!actors.is_empty()).then(|| face_textures[slot % actors.len()].0).flatten();
                     draw_character(&chars.model, verts, &part_textures, face, textured);
                     glPopMatrix();
                 }
@@ -1244,52 +1308,16 @@ fn main() {
 
             // The player's own body, shown in third person
             if let (true, true, Some(chars)) = (first_person, third_person, &sim.characters) {
-                if let Some(Rig { skeleton: skel, skin }) = &chars.rig {
-                let c = &chars.model;
-                if let Some(mot) = player_motions.get(movement) {
-                    let (root, mut rots) = mot.sample(player_frame.min(mot.frames.saturating_sub(1) as f32));
-                    // Moving: legs from the locomotion cycle, upper body keeps the gun hold
-                    if matches!(movement, Movement::Walk | Movement::Run | Movement::Back | Movement::StrafeLeft | Movement::StrafeRight) {
-                        if let Some(hold) = player_motions.get(Movement::Idle) {
-                            let (_, hold_rots) = hold.sample(0.0);
-                            for b in &skel.bones {
-                                if is_upper_body(&b.name) {
-                                    if let (Some(r), Some(h)) = (rots.get_mut(b.anim_index), hold_rots.get(b.anim_index)) { *r = *h; }
-                                }
-                            }
-                        }
-                    }
-                    let pose = skel.pose([0.0, root[1], 0.0], &rots);
-                    let verts = skin.apply(&pose);
-                    let clock = start_time.elapsed().as_secs_f32();
-                    let blinking = args.eyes_closed || (blink_enabled && clock % 4.0 < 0.15);
-                    let face = (!actors.is_empty()).then(|| face_textures[0]).and_then(|(main, blink)| {
-                        if blinking { blink.or(main) } else { main }
-                    });
-                    glPushMatrix();
-                    glTranslatef(draw_feet[0], draw_feet[1], draw_feet[2]);
-                    // The body faces where the player looks (model forward is +Z)
-                    glRotatef(-camera.yaw, 0.0, 1.0, 0.0);
-                    let scale = actors.first().map_or([1.0; 3], |a| a.scale);
-                    glScalef(scale[0], scale[1], scale[2]);
-                    draw_character(c, &verts, &part_textures, face, textured);
-
-                    // The MP5K in the right hand, or a grenade until it is thrown
-                    let in_hand = if sim.players[me].equipped_grenade { sim.players[me].throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
-                    if let (Some(Some(wd)), Some((hand, off))) = (in_hand, &weapon_attach) {
-                        glPushMatrix();
-                        glMultMatrixf(pose[*hand].matrix().as_ptr());
-                        glMultMatrixf(off.matrix().as_ptr());
-                        if sim.players[me].equipped_grenade {
-                            glTranslatef(-wd.center[0], -wd.center[1], -wd.center[2]);
-                        }
-                        draw_weapon(wd, textured, !sim.players[me].equipped_grenade && game_time < sim.players[me].flash_until);
-                        glPopMatrix();
-                    }
-                    glPopMatrix();
-                    glColor4f(1.0, 1.0, 1.0, 1.0);
-                }
-                }
+                let clock = start_time.elapsed().as_secs_f32();
+                let blinking = args.eyes_closed || (blink_enabled && clock % 4.0 < 0.15);
+                let face = (!actors.is_empty()).then(|| face_textures[0]).and_then(|(main, blink)| {
+                    if blinking { blink.or(main) } else { main }
+                });
+                let scale = actors.first().map_or([1.0; 3], |a| a.scale);
+                let mine = &sim.players[me];
+                let hand = if mine.equipped_grenade { mine.throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
+                let flash = !mine.equipped_grenade && game_time < mine.flash_until;
+                draw_body(chars, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash);
             }
 
             // Grenades in the air
