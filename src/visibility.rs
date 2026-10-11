@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::collision::SolidRoom;
+use crate::collision::{Cut, SolidRoom};
 use crate::map::Map;
 
 /// A screen rectangle in normalised device coordinates: min x, min y, max x, max y
@@ -18,6 +18,10 @@ const FULL: Rect = [-1.0, -1.0, 1.0, 1.0];
 const TOUCH: f32 = 40.0;
 /// How much of a room's floor plan must lie inside another's for it to stand in it
 const NESTED: f32 = 0.6;
+/// How far in from a room's volume the doorway cut starts. The walls of the room around it
+/// meet the volume's edge to within a couple of units, and the stray surfaces of an
+/// overlapping room reach it too; this keeps the first and cuts nearly all of the second.
+const WALL: f32 = 4.0;
 /// How many portals deep to look
 const MAX_DEPTH: usize = 8;
 /// The most portals to follow in one frame
@@ -43,6 +47,8 @@ pub struct Visibility {
     polygons: Vec<Vec<[f32; 3]>>,
     /// The floor plan of each room, by number
     footprints: HashMap<u32, Vec<[f32; 4]>>,
+    /// The main volume of each room, floor plan only, pulled in by a wall (min x, min z, max x, max z)
+    bounds: HashMap<u32, [f32; 4]>,
     /// The objects of each room (indices into `map.geometries.objects`), by number
     objects: HashMap<u32, Vec<usize>>,
     /// The objects that belong to no room, and the room of each object
@@ -104,9 +110,20 @@ impl Visibility {
             .map(|p| p.coordinates.iter().map(|v| [v.x, v.y, v.z]).collect())
             .collect();
         let polygons = corners.iter().map(|c| ordered(c)).collect();
-        let footprints = map.rooms.rooms.iter().zip(&numbers)
+        let footprints: HashMap<u32, Vec<[f32; 4]>> = map.rooms.rooms.iter().zip(&numbers)
             .filter_map(|(r, n)| n.map(|n| (n, r.footprints())))
             .collect();
+        // The main volume of each room, pulled in by a wall's thickness: an overlapping room's
+        // stray surfaces lie well inside it, while the walls of the room around it that meet
+        // its outside do not
+        let bounds = footprints.iter().filter_map(|(&n, f): (&u32, &Vec<[f32; 4]>)| {
+            let area = |r: &[f32; 4]| (r[2] - r[0]) * (r[3] - r[1]);
+            let main = f.iter().max_by(|a, b| area(a).total_cmp(&area(b)))?;
+            let inset = |lo: f32, hi: f32| if hi - lo > 2.0 * WALL { (lo + WALL, hi - WALL) } else { (lo, hi) };
+            let (x0, x1) = inset(main[0], main[2]);
+            let (z0, z1) = inset(main[1], main[3]);
+            Some((n, [x0, z0, x1, z1]))
+        }).collect();
         let mut objects: HashMap<u32, Vec<usize>> = HashMap::new();
         let mut unowned = Vec::new();
         let mut object_rooms = Vec::with_capacity(map.geometries.objects.len());
@@ -118,7 +135,7 @@ impl Visibility {
             }
             object_rooms.push(room);
         }
-        Self { by_room, outdoors, centres, numbers, index, corners, polygons, footprints, objects, unowned, object_rooms }
+        Self { by_room, outdoors, centres, numbers, index, corners, polygons, footprints, bounds, objects, unowned, object_rooms }
     }
 
     /// Whether the map has a room with this number
@@ -210,7 +227,8 @@ impl Visibility {
                 if let Some(p) = beyond {
                     if touched {
                         if let Some(r) = rooms.iter_mut().find(|r| r.room == start) {
-                            r.cut.push([-p[0], -p[1], -p[2], -p[3]]);
+                            // Only where it overlaps the room beyond
+                            r.cut.push(Cut { plane: [-p[0], -p[1], -p[2], -p[3]], within: self.bounds.get(&other).copied() });
                         }
                     }
                 }
@@ -249,7 +267,7 @@ impl Visibility {
     /// through it.
     pub fn plan<'a>(&'a self, map: &Map, start: u32, touch: &[[f32; 3]], eye: [f32; 3], blocked: &[bool], clip: &dyn Fn([f32; 3]) -> [f32; 4]) -> PlanNode<'a> {
         let mut budget = MAX_NODES;
-        let mut node = PlanNode { room: start, plane: None, polygon: &[], touched: false, children: Vec::new() };
+        let mut node = PlanNode { room: start, plane: None, polygon: &[], touched: false, cut_in_self: None, cut_in_parent: None, children: Vec::new() };
         self.grow(map, &mut node, FULL, touch, eye, blocked, clip, &mut vec![start], &mut budget);
         node
     }
@@ -282,6 +300,9 @@ impl Visibility {
                 plane: portal_plane(corners, near_side),
                 polygon: &self.polygons[i],
                 touched,
+                // Each room's cut is limited to where it overlaps the other
+                cut_in_self: if touched { self.bounds.get(&node.room).copied() } else { None },
+                cut_in_parent: if touched { self.bounds.get(&other).copied() } else { None },
                 children: Vec::new(),
             };
             path.push(other);
@@ -305,6 +326,11 @@ pub struct PlanNode<'a> {
     /// The player is standing in this portal: the two rooms are drawn whole, each cut at
     /// the portal's plane, since no polygon on screen describes a doorway the camera is in
     pub touched: bool,
+    /// For a touched portal: the box (min x, min z, max x, max z) this room is cut within,
+    /// which is where it overlaps the room it was reached from...
+    pub cut_in_self: Option<[f32; 4]>,
+    /// ...and the box the room it was reached from is cut within, where it overlaps this one
+    pub cut_in_parent: Option<[f32; 4]>,
     pub children: Vec<PlanNode<'a>>,
 }
 
@@ -546,6 +572,29 @@ mod tests {
         let beside = rooms_beside(&blocked);
         assert!(!beside.contains(&121), "shut, it is not: {beside:?}");
         assert!(beside.contains(&120), "the other doorways are unaffected");
+    }
+
+    // The cut a room gets where the player stands in a doorway is limited to where it overlaps
+    // the room beyond: rm11's courtyard (room 1) has real ground past the gatehouse
+    // doorway's plane, away from room 100.
+    #[test]
+    fn a_doorway_cut_is_limited_to_the_other_rooms_footprint() {
+        let path = std::path::Path::new("data/map/rm11/rm11.map");
+        if !path.exists() {
+            eprintln!("skipping: {} not found", path.display());
+            return;
+        }
+        let map = crate::map::read(path).expect("rm11 loads");
+        let vis = Visibility::new(&map);
+        let feet = [33243.0, 32677.0, 34205.0];
+        let eye = [feet[0], feet[1] + 155.0, feet[2]];
+        let rooms = vis.solid_rooms(&map, &[1], &[], &[feet, eye]);
+        let r1 = rooms.iter().find(|r| r.room == 1).unwrap();
+        let cut = r1.cut.iter().find(|c| c.within.is_some()).expect("room 1 is cut at the doorway");
+        let w = cut.within.unwrap();
+        // Room 100's own footprint: inside it, room 1 is cut; elsewhere it is not
+        assert!(33113.0 >= w[0] && 33113.0 <= w[2] && 35000.0 >= w[1] && 35000.0 <= w[3]);
+        assert!(!(31000.0 >= w[0] && 31000.0 <= w[2]), "ground well to the side is not cut");
     }
 
     // On rm11 the courtyard (room 1, a shell around the whole building, whose middle is far

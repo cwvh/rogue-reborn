@@ -146,9 +146,20 @@ pub struct SolidRoom {
     /// next door overlaps the player's, and only what is beyond the portal between them
     /// is really in it.
     pub keep: Vec<[f32; 4]>,
-    /// Like `keep`, but every plane must be satisfied: the parts of the player's own room
-    /// that run past a portal they are standing in, into the room beyond
-    pub cut: Vec<[f32; 4]>,
+    /// What to leave out of the player's own room where it runs past a portal they are
+    /// standing in, into the room beyond. Every cut applies.
+    pub cut: Vec<Cut>,
+}
+
+/// Part of a room that does not count: what is on the far side of `plane` (a, b, c, d with
+/// a*x + b*y + c*z + d >= 0 where it does count) and inside `within`. Without `within` it
+/// is everything on the far side. The limit matters in a big room, such as a courtyard,
+/// that has real surfaces beyond a doorway's plane away from the room next door.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cut {
+    pub plane: [f32; 4],
+    /// A floor plan box (min x, min z, max x, max z)
+    pub within: Option<[f32; 4]>,
 }
 
 impl SolidRoom {
@@ -334,7 +345,12 @@ impl CollisionWorld {
                     let middle = scale(add(add(t.a, t.b), t.c), 1.0 / 3.0);
                     // A room listed more than once counts wherever any entry has it
                     !rooms.iter().filter(|r| r.room == t.room).any(|r| {
-                        (r.keep.is_empty() || side(&r.keep, middle).iter().any(|&ok| ok)) && side(&r.cut, middle).iter().all(|&ok| ok)
+                        let counts = |c: &Cut| {
+                            let past = !side(&[c.plane], middle)[0];
+                            let inside = c.within.is_none_or(|w| middle[0] >= w[0] && middle[0] <= w[2] && middle[2] >= w[1] && middle[2] <= w[3]);
+                            !(past && inside)
+                        };
+                        (r.keep.is_empty() || side(&r.keep, middle).iter().any(|&ok| ok)) && r.cut.iter().all(counts)
                     })
                 }
             };

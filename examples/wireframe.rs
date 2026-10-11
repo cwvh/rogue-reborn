@@ -2344,15 +2344,43 @@ unsafe fn draw_plan(node: &visibility::PlanNode<'_>, level: i32, fill_mode: u32,
         glStencilFunc(EQUAL, level, !0);
         glStencilOp(KEEP, KEEP, KEEP);
         // Cut where the portal it is seen through begins, and at the portals the player is
-        // standing in (on this room's side)
-        let mut planes: Vec<[f32; 4]> = node.plane.into_iter().collect();
+        // standing in (on this room's side). Where the player stands in a doorway both rooms
+        // are drawn whole and each is cut only where it overlaps the other: what is on the
+        // near side of the plane, or outside the other room's floor plan, stays. That is a
+        // union, which clip planes cannot say, so the room is drawn once for each way to stay.
+        let outside = |b: [f32; 4]| [[-1.0, 0.0, 0.0, b[0]], [1.0, 0.0, 0.0, -b[2]], [0.0, 0.0, -1.0, b[1]], [0.0, 0.0, 1.0, -b[3]]];
+        let mut fixed: Vec<[f32; 4]> = Vec::new();
+        let mut ways: Vec<Vec<[f32; 4]>> = Vec::new();
+        match (node.plane, node.cut_in_self) {
+            // Entered through a doorway the player stands in
+            (Some(p), Some(b)) if node.touched => {
+                ways.push(vec![p]);
+                ways.extend(outside(b).into_iter().map(|o| vec![o]));
+            }
+            (Some(p), _) => fixed.push(p),
+            _ => {}
+        }
         for child in node.children.iter().filter(|c| c.touched) {
-            if let Some(p) = child.plane {
-                planes.push([-p[0], -p[1], -p[2], -p[3]]);
+            let Some(p) = child.plane else { continue };
+            let near = [-p[0], -p[1], -p[2], -p[3]];
+            match child.cut_in_parent {
+                Some(b) if ways.is_empty() => {
+                    ways.push(vec![near]);
+                    ways.extend(outside(b).into_iter().map(|o| vec![o]));
+                }
+                _ => fixed.push(near),
             }
         }
-        planes.truncate(6);
-        draw(node.room, &planes);
+        if ways.is_empty() {
+            fixed.truncate(6);
+            draw(node.room, &fixed);
+        }
+        for way in &ways {
+            let mut planes = fixed.clone();
+            planes.extend(way);
+            planes.truncate(6);
+            draw(node.room, &planes);
+        }
 
         for child in &node.children {
             // Standing in the doorway: both rooms are drawn, each cut at the portal's plane
