@@ -9,6 +9,10 @@ pub struct Args {
     /// A level by name, such as rm11 or citystreet_large, found under data/map
     pub level: Option<String>,
     pub list_levels: bool,
+    /// Record the game to this file, to play back with --play
+    pub record: Option<PathBuf>,
+    /// Play back a recorded game, which starts as it did when recorded
+    pub play: Option<PathBuf>,
     /// The built-in box room instead of a level from the game
     pub demo: bool,
     /// Characters standing in the demo room (0 to 8, default 8)
@@ -81,6 +85,8 @@ pub fn parse_args() -> Args {
             "--map" => args.map = it.next().map(PathBuf::from),
             "--level" => args.level = it.next(),
             "--list-levels" => args.list_levels = true,
+            "--record" => args.record = it.next().map(PathBuf::from),
+            "--play" => args.play = it.next().map(PathBuf::from),
             "--demo" => {
                 args.demo = true;
                 // The player is always the first of the demo room's spawn points

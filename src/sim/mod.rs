@@ -52,7 +52,7 @@ pub struct Throw {
 }
 
 /// What the player is doing during one tick
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Input {
     /// Where the player looks, in degrees
     pub yaw: f32,
@@ -71,8 +71,11 @@ pub struct Input {
     pub reload: bool,
     pub gun: bool,
     pub grenade: bool,
+    /// Pressed since the last tick: switch between only the player's room and its neighbors
+    /// being solid, and all of the level (the viewer's V key)
+    pub toggle_culling: bool,
     /// Set when the player is not in control, because the view is flying free: the point in
-    /// map space it is at
+    /// map space it is at. When control returns, the player drops in there.
     pub observer: Option<V3>,
 }
 
@@ -95,9 +98,45 @@ pub enum Event {
     PlayerBlast { shake: f32, veil: f32 },
 }
 
+/// FNV-1a, a simple hash that gives the same answer on every machine
+struct Fnv(u64);
+
+impl Fnv {
+    fn new() -> Fnv {
+        Fnv(0xcbf29ce484222325)
+    }
+    fn bytes(&mut self, b: &[u8]) {
+        for &x in b {
+            self.0 = (self.0 ^ x as u64).wrapping_mul(0x100000001b3);
+        }
+    }
+    fn u32(&mut self, v: u32) {
+        self.bytes(&v.to_le_bytes());
+    }
+    fn u64(&mut self, v: u64) {
+        self.bytes(&v.to_le_bytes());
+    }
+    fn f32(&mut self, v: f32) {
+        self.u32(v.to_bits());
+    }
+    fn opt_f32(&mut self, v: Option<f32>) {
+        match v {
+            None => self.u32(0),
+            Some(v) => { self.u32(1); self.f32(v); }
+        }
+    }
+    fn v3(&mut self, v: V3) {
+        for c in v {
+            self.f32(c);
+        }
+    }
+}
+
 /// Settings a sim starts with
 pub struct Config {
     pub magazine: u32,
+    /// Rounds in the magazine at the start
+    pub ammo: u32,
     pub reserve: u32,
     pub grenades: u32,
     /// Scales the player's speed
@@ -120,6 +159,8 @@ pub struct Sim {
     eye_height: f32,
 
     pub player: Player,
+    /// Where the view was last tick if the player was not in control
+    last_observer: Option<V3>,
     /// Whether the player is in control, as of the last tick
     pub controlled: bool,
     /// How fast the player moved in the last tick, in units per second
@@ -192,10 +233,11 @@ impl Sim {
             speed_scale: config.speed_scale,
             eye_height,
             player: Player::new(player_at),
+            last_observer: None,
             controlled: true,
             moved_speed: 0.0,
             magazine: config.magazine,
-            ammo: config.magazine,
+            ammo: config.ammo,
             reserve: config.reserve,
             reload_until: None,
             next_shot: 0.0,
@@ -225,11 +267,6 @@ impl Sim {
         [self.player.pos[0], self.player.pos[1] + self.eye_height, self.player.pos[2]]
     }
 
-    /// Put the player on their feet at a new place
-    pub fn place_player(&mut self, feet: V3) {
-        self.player = Player::new(feet);
-    }
-
     /// Set every door this far open (0 shut, 1 open)
     pub fn set_doors_open(&mut self, open: f32) {
         for (i, s) in self.door_states.iter_mut().enumerate() {
@@ -242,6 +279,58 @@ impl Sim {
     /// Whether the full-auto firing sound should be running
     pub fn firing(&self) -> bool {
         self.controlled && self.gun_trigger && self.reload_until.is_none() && self.ammo > 0
+    }
+
+    /// A fingerprint of everything that decides what happens next, to compare two runs of the
+    /// game: equal inputs must leave equal fingerprints
+    pub fn checksum(&self) -> u64 {
+        let mut h = Fnv::new();
+        h.f32(self.time);
+        h.u64(self.rng);
+        h.u32(self.culling as u32);
+        h.v3(self.player.pos);
+        h.f32(self.player.vel_y);
+        h.u32(self.player.on_ground as u32);
+        h.u32(self.ammo);
+        h.u32(self.reserve);
+        h.opt_f32(self.reload_until);
+        h.f32(self.next_shot);
+        h.f32(self.flash_until);
+        h.u32(self.kills);
+        h.u32(self.equipped_grenade as u32);
+        h.u32(self.grenades_left);
+        h.opt_f32(self.charge_from);
+        match self.throw {
+            None => h.u32(0),
+            Some(t) => { h.u32(1); h.f32(t.start); h.f32(t.charge); h.u32(t.thrown as u32); }
+        }
+        for g in &self.thrown {
+            h.v3(g.pos);
+            h.v3(g.vel);
+            h.f32(g.fuse);
+            h.f32(g.spin);
+            h.u32(g.at_rest as u32);
+        }
+        for n in &self.npcs {
+            h.v3(n.pos);
+            h.f32(n.floor);
+            h.f32(n.yaw);
+            h.f32(n.health.hp);
+            match n.health.state {
+                combat::NpcState::Idle => h.u32(0),
+                combat::NpcState::Reacting { motion, start } => { h.u32(1); h.bytes(motion.as_bytes()); h.f32(start); }
+                combat::NpcState::Dead { motion, start } => { h.u32(2); h.bytes(motion.as_bytes()); h.f32(start); }
+            }
+        }
+        for s in &self.door_states {
+            h.f32(s.open);
+            h.u32(s.opening as u32);
+        }
+        for b in &self.broken_at {
+            h.opt_f32(*b);
+        }
+        h.u32(self.current_room.map_or(u32::MAX, |r| r as u32));
+        h.0
     }
 
     fn announce(&mut self, text: &str, seconds: f32) {
@@ -257,6 +346,17 @@ impl Sim {
         let mut ev: Vec<Event> = Vec::new();
         let controlled = input.observer.is_none();
         self.controlled = controlled;
+        if controlled {
+            // Control returns: the player drops in from wherever the view was
+            if let Some(o) = self.last_observer.take() {
+                self.player = Player::new([o[0], o[1] - self.eye_height, o[2]]);
+            }
+        } else {
+            self.last_observer = input.observer;
+        }
+        if input.toggle_culling {
+            self.culling = !self.culling;
+        }
 
         // Keys pressed since the last tick
         if input.gun && self.throw.is_none() {
@@ -724,7 +824,7 @@ mod tests {
     fn demo() -> Sim {
         let level = Arc::new(crate::demo::map());
         let world = CollisionWorld::from_map(&level, Params::default());
-        let config = Config { magazine: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };
+        let config = Config { magazine: 30, ammo: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };
         Sim::new(level, world, config, None, Vec::new(), [0.0, 0.0, -350.0])
     }
 

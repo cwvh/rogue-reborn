@@ -19,3 +19,4 @@ pub mod grenade;
 pub mod demo;
 pub mod sim;
 pub mod util;
+pub mod recording;

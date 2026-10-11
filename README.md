@@ -97,9 +97,23 @@ On other platforms, or without the aliases:
 | `--no-sound`, `--volume 0.0-1.0` | sound off, master volume |
 | `--doors-open 0..1` | start with every door that far open (they start shut) |
 | `--viewmodel` | draw the gun in front of the camera (the original didn't) |
+| `--record FILE` | record the game (about 10 bytes a tick) to FILE when you quit |
+| `--play FILE` | play a recording back; it starts as the game did, and checks the game against the recording every second |
 | `--screenshot FILE` | render a few frames, save a PNG and exit |
 
 The client has many more, listed in `src/args.rs` (animation, camera and weapon tweaks).
+
+## Demos
+
+`--record FILE` saves a game and `--play FILE` plays it back. A recording is how the game began
+plus what the player did each tick, so it is small (a ten-minute game is about a fifth of a
+megabyte) and, because the sim is deterministic, playing it back reproduces the game exactly. It
+also holds a checksum of the whole game state for every second, and a replay reports the tick
+where it stops matching, which means a rule, a data file or the build has changed since it was
+recorded. In a replay the keys and the mouse do nothing, but you can still change how it is
+drawn (T, F, G and the rest). A replay with `--screenshot FILE` runs as fast as it can, saves a
+picture of the last frame, and exits with status 1 if the game stopped matching, so a recording
+can be kept as a test.
 
 ## How the code is laid out
 

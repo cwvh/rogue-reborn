@@ -13,7 +13,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 use std::sync::Arc;
-use rogue_reborn::{map, rsb, actor, combat, crp, demo, grenade, motion, skeleton, sim, sound, weapon, ambience, glass};
+use rogue_reborn::{map, rsb, actor, combat, crp, demo, grenade, motion, recording, skeleton, sim, sound, weapon, ambience, glass};
+use rogue_reborn::recording::{Playback, Recorder, Recording};
 use rogue_reborn::sim::characters::{Characters, Npc, Rig};
 use rogue_reborn::sim::movement::{Movement, ground_speed, movement_from_keys};
 use rogue_reborn::collision::{CollisionWorld, Params};
@@ -40,13 +41,45 @@ fn main() {
     // let map_path = Path::new("data/map/m00/demolitions_area.MAP");
     // let map_path = Path::new("data/map/rm11/rm11.map");
     // let map_path = Path::new("data/map/rm02/rm02.map");
-    let args = parse_args();
+    let mut args = parse_args();
     if args.list_levels {
         for (dir, name, _) in list_levels() {
             println!("{name:24} data/map/{dir}");
         }
         return;
     }
+    // Playing a recording back: the game starts as it did when it was recorded
+    let recorded = args.play.as_ref().map(|path| {
+        Recording::read(path).unwrap_or_else(|e| {
+            eprintln!("{e:#}");
+            std::process::exit(2);
+        })
+    });
+    let mut playback = recorded.map(|rec| {
+        let h = &rec.header;
+        let build = option_env!("GIT_HASH").unwrap_or("unknown");
+        if h.build != build {
+            eprintln!("warning: recorded by build {}, this is {build}, so it may not play back the same", h.build);
+        }
+        args.demo = h.map == "demo";
+        args.map = (!args.demo).then(|| PathBuf::from(&h.map));
+        args.level = None;
+        args.npcs = Some(h.npcs as usize);
+        args.seed = Some(h.seed);
+        args.speed_scale = Some(h.speed_scale);
+        args.no_cull = !h.culling;
+        args.doors_open = h.doors_open;
+        args.model = Some(PathBuf::from(&h.model));
+        args.no_models = h.no_models;
+        args.model_yaw = h.model_yaw;
+        args.actor = h.actor.clone();
+        args.pos = Some(h.camera);
+        args.yaw = Some(h.yaw);
+        args.pitch = Some(h.pitch);
+        // The recording says what the player did, so no script and no real mouse
+        args.walk = None;
+        Playback::new(rec)
+    });
     let map_buf = match (&args.map, &args.level) {
         _ if args.demo => PathBuf::from("data/map/m00/demo.map"),
         (Some(path), level) => {
@@ -143,6 +176,9 @@ fn main() {
     };
     if let Some(spawn) = spawn {
         camera.position = [spawn[0], spawn[1] + world.params().eye_height, -spawn[2]];
+    }
+    if let Some(p) = &playback {
+        own_spawn = p.header().own_spawn.map(|i| i as usize);
     }
     // Character models standing at every other mission spawn point
     let model_path = args.model.clone()
@@ -383,14 +419,46 @@ fn main() {
 
     // The game: the player stands on the floor below the camera
     let eye_height = world.params().eye_height;
-    let (mag_size, reserve) = weapon_def.as_ref().map_or((30, 900), |w| (w.magazine, w.reserve));
+    let (mag_size, reserve) = match &playback {
+        Some(p) => (p.header().magazine, p.header().reserve),
+        None => weapon_def.as_ref().map_or((30, 900), |w| (w.magazine, w.reserve)),
+    };
+    // A scripted run can hold L to start with a short magazine and reload it
+    let ammo = match &playback {
+        Some(p) => p.header().ammo,
+        None if args.walk.is_some() && args.hold.as_deref().is_some_and(|h| h.to_ascii_uppercase().contains('L')) => 10,
+        None => mag_size,
+    };
+    let grenades = playback.as_ref().map_or(3, |p| p.header().grenades);
+    let mut recorder = args.record.as_ref().map(|_| Recorder::new(recording::Header {
+        build: option_env!("GIT_HASH").unwrap_or("unknown").to_string(),
+        map: if args.demo { "demo".to_string() } else { map_path.display().to_string() },
+        npcs: args.npcs.unwrap_or(demo::MAX_NPCS) as u32,
+        own_spawn: own_spawn.map(|i| i as u32),
+        camera: camera.position,
+        yaw: camera.yaw,
+        pitch: camera.pitch,
+        seed: args.seed.unwrap_or(0x5eed),
+        magazine: mag_size,
+        ammo,
+        reserve,
+        grenades,
+        speed_scale: args.speed_scale.unwrap_or(1.0),
+        culling: !args.no_cull,
+        doors_open: args.doors_open,
+        model: model_path.display().to_string(),
+        no_models: args.no_models,
+        model_yaw: args.model_yaw,
+        actor: args.actor.clone(),
+    }));
     let mut sim = sim::Sim::new(
         level.clone(),
         world,
         sim::Config {
             magazine: mag_size,
+            ammo,
             reserve,
-            grenades: 3,
+            grenades,
             speed_scale: args.speed_scale.unwrap_or(1.0),
             seed: args.seed.unwrap_or(0x5eed),
             culling: !args.no_cull,
@@ -435,7 +503,12 @@ fn main() {
     }
     let all_doors: Vec<usize> = (0..sim.doors.len()).collect();
     // Keys pressed since the sim last ticked, which counts once
-    let (mut use_pressed, mut reload_pressed, mut gun_pressed, mut grenade_pressed) = (false, false, false, false);
+    let (mut use_pressed, mut reload_pressed, mut gun_pressed, mut grenade_pressed, mut culling_pressed) = (false, false, false, false, false);
+    // A scripted run, or a replay, takes one tick a frame instead of keeping time
+    let fixed_step = args.walk.is_some() || (playback.is_some() && args.screenshot.is_some());
+    // What the player did in the last tick, which the animation follows
+    let mut shown;
+    let mut was_free = false;
     let mut drawn_rooms: Vec<String> = Vec::new();
     let mut blink_enabled = !args.no_blink;
     // Sound is optional: no output device just means silence
@@ -503,7 +576,7 @@ fn main() {
                             use_pressed = true;
                         }
                         (Key::V, Action::Press) => {
-                            sim.culling = !sim.culling;
+                            culling_pressed = true;
                         }
                         (Key::G, Action::Press) => {
                             room_debug = !room_debug;
@@ -527,14 +600,9 @@ fn main() {
                         (Key::R, Action::Press) => {
                             reload_pressed = true;
                         }
-                        (Key::F1, Action::Press) => {
+                        (Key::F1, Action::Press) if playback.is_none() => {
+                            // Into the player's body, who drops in from wherever the view is, and out again
                             first_person = !first_person;
-                            if first_person {
-                                // Drop in from wherever the camera is
-                                let feet = [camera.position[0], camera.position[1] - eye_height, -camera.position[2]];
-                                sim.place_player(feet);
-                                prev_feet = feet;
-                            }
                         }
                         (k, Action::Press) => {
                             keys.insert(k);
@@ -546,8 +614,8 @@ fn main() {
                     }
                 }
                 WindowEvent::CursorPos(xpos, ypos) => {
-                    // A scripted run (--walk) is not steered by a real mouse
-                    if let (Some((last_x, last_y)), None) = (last_cursor_pos, args.walk) {
+                    // A scripted run (--walk) or a replay is not steered by a real mouse
+                    if let (Some((last_x, last_y)), None, false) = (last_cursor_pos, args.walk, playback.is_some()) {
                         let dx = xpos - last_x;
                         let dy = ypos - last_y;
                         camera.yaw -= dx as f32 * 0.1;
@@ -596,7 +664,6 @@ fn main() {
             }
             // L starts a reload on the first frame (for testing the animation)
             if held.contains('L') && frames_drawn == 0 {
-                sim.ammo = 10;
                 reload_pressed = true;
             }
             walk_held = frames_drawn < n && held.contains('R');
@@ -613,10 +680,10 @@ fn main() {
         let raw_dt = last_step.elapsed().as_secs_f32();
         let real_dt = raw_dt.min(0.05);
         last_step = Instant::now();
-        let step_dt = if args.walk.is_some() { 1.0 / 60.0 } else { real_dt };
+        let step_dt = if fixed_step { sim::TICK } else { real_dt };
 
         // Free-fly: WASD moves the view (hold LeftShift to move faster)
-        if !first_person {
+        if !first_person && playback.is_none() {
             let mut speed = base_speed;
             if keys.contains(&Key::LeftShift) {
                 speed *= 5.0;
@@ -661,21 +728,52 @@ fn main() {
             reload: reload_pressed,
             gun: gun_pressed,
             grenade: grenade_pressed,
+            toggle_culling: culling_pressed,
             observer: (!first_person).then(|| [camera.position[0], camera.position[1], -camera.position[2]]),
         };
+        shown = input;
         tick_budget += step_dt;
         let mut events: Vec<sim::Event> = Vec::new();
         let mut ticks = 0;
         while tick_budget >= sim::TICK && ticks < 5 {
+            // What the player does comes from the keys, or from the recording
+            let tick_input = match playback.as_mut() {
+                Some(pb) => match pb.next_input() {
+                    Some(i) => i,
+                    None => break,
+                },
+                None => input,
+            };
             prev_feet = sim.player.pos;
-            events.extend(sim.tick(&input, sim::TICK));
+            events.extend(sim.tick(&tick_input, sim::TICK));
+            if let Some(rec) = recorder.as_mut() {
+                rec.after_tick(&tick_input, &sim);
+            }
+            if let Some(pb) = playback.as_mut() {
+                if let Some(d) = pb.after_tick(&sim) {
+                    eprintln!("DESYNC: {d}");
+                }
+                // The view follows the recorded player
+                camera.yaw = tick_input.yaw;
+                camera.pitch = tick_input.pitch;
+                first_person = tick_input.observer.is_none();
+                if let Some(o) = tick_input.observer {
+                    camera.position = [o[0], o[1], -o[2]];
+                }
+            }
+            // Dropping in from the free view is a jump, not something to glide through
+            if was_free && tick_input.observer.is_none() {
+                prev_feet = sim.player.pos;
+            }
+            was_free = tick_input.observer.is_some();
+            shown = tick_input;
             // A key press counts once
-            (input.use_key, input.reload, input.gun, input.grenade) = (false, false, false, false);
+            (input.use_key, input.reload, input.gun, input.grenade, input.toggle_culling) = (false, false, false, false, false);
             tick_budget -= sim::TICK;
             ticks += 1;
         }
         if ticks > 0 {
-            (use_pressed, reload_pressed, gun_pressed, grenade_pressed) = (false, false, false, false);
+            (use_pressed, reload_pressed, gun_pressed, grenade_pressed, culling_pressed) = (false, false, false, false, false);
         }
         // Past the limit the rest is dropped rather than caught up
         if tick_budget >= sim::TICK {
@@ -685,7 +783,7 @@ fn main() {
 
         // The view is at the player's eyes, between where they were a tick ago and now
         let draw_feet = if first_person {
-            let alpha = if args.walk.is_some() { 1.0 } else { (tick_budget / sim::TICK).clamp(0.0, 1.0) };
+            let alpha = if fixed_step { 1.0 } else { (tick_budget / sim::TICK).clamp(0.0, 1.0) };
             let (a, b) = (prev_feet, sim.player.pos);
             let feet = [a[0] * (1.0 - alpha) + b[0] * alpha, a[1] * (1.0 - alpha) + b[1] * alpha, a[2] * (1.0 - alpha) + b[2] * alpha];
             camera.position = [feet[0], feet[1] + eye_height, -feet[2]];
@@ -780,11 +878,7 @@ fn main() {
             // The animation follows what the player is trying to do, and plays at the pace
             // they actually move (a wall stops it)
             let dt = step_dt;
-            let wanted = movement_from_keys(
-                keys.contains(&Key::W), keys.contains(&Key::S),
-                keys.contains(&Key::A), keys.contains(&Key::D),
-                !walk_held,
-            );
+            let wanted = movement_from_keys(shown.forward, shown.back, shown.left, shown.right, shown.run);
             let moved = sim.moved_speed;
             // A wall stops the walking animation; standing still can fire or reload
             let walking = wanted != Movement::Idle && moved >= 5.0;
@@ -1372,9 +1466,20 @@ fn main() {
         } else {
             format!("ROOM: {} (CULLING OFF)", current_rooms.join(" "))
         };
+        let demo_text = match (&recorder, &playback) {
+            (Some(r), _) => format!("REC {:.0} S", r.ticks() as f32 * sim::TICK),
+            (_, Some(p)) => {
+                let (done, all) = p.progress();
+                format!("DEMO {:.0}/{:.0} S", done as f32 * sim::TICK, all as f32 * sim::TICK)
+            }
+            _ => String::new(),
+        };
         let mut debug_lines: Vec<&str> = vec![&level_text, &fps_text, &render_text];
         if room_debug {
             debug_lines.push(&rooms_text);
+        }
+        if !demo_text.is_empty() {
+            debug_lines.push(&demo_text);
         }
         draw_debug_text(w, h, &debug_lines);
 
@@ -1421,8 +1526,14 @@ fn main() {
         if frames_drawn > BENCH_WARMUP {
             bench = (bench.0 + 1, bench.1 + render_ms as f64, bench.2 + raw_dt as f64 * 1000.0);
         }
+        // A replay ends when the recording does
+        let replay_over = playback.as_ref().is_some_and(|p| p.finished());
+        if replay_over && args.screenshot.is_none() {
+            window.set_should_close(true);
+        }
         if let Some(path) = &args.screenshot {
-            if frames_drawn >= args.walk.map_or(3, |n| n.max(3)) {
+            let done = if playback.is_some() { replay_over } else { frames_drawn >= args.walk.map_or(3, |n| n.max(3)) };
+            if done {
                 if bench.0 > 0 {
                     println!("timing over {} frames: render {:.3} ms, whole frame {:.3} ms", bench.0, bench.1 / bench.0 as f64, bench.2 / bench.0 as f64);
                 }
@@ -1450,6 +1561,24 @@ fn main() {
                 } else {
                     std::hint::spin_loop();
                 }
+            }
+        }
+    }
+
+    if let (Some(rec), Some(path)) = (recorder, &args.record) {
+        let rec = rec.finish(&sim);
+        match rec.write(path) {
+            Ok(()) => println!("recorded {} ticks ({:.1} s) to {}", rec.inputs.len(), rec.seconds(), path.display()),
+            Err(e) => eprintln!("{e:#}"),
+        }
+    }
+    if let Some(pb) = &playback {
+        let (done, all) = pb.progress();
+        match pb.desync() {
+            None => println!("played {done} of {all} ticks: the game matched the recording"),
+            Some(d) => {
+                println!("played {done} of {all} ticks: {d}");
+                std::process::exit(1);
             }
         }
     }
