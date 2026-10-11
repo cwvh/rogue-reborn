@@ -18,6 +18,18 @@ type V3 = [f32; 3];
 /// Where one other player was in a snapshot: their slot, position and look
 pub type Seen = (usize, V3, (u16, u16));
 
+/// A grenade in the air: who threw it, where it is and how far it has turned
+pub type Flying = (u8, V3, f32);
+
+/// What moves in the game, as it was in a snapshot or as it is shown: the other players, the
+/// characters (position and facing in degrees) and the grenades
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Frame {
+    pub players: Vec<Seen>,
+    pub npcs: Vec<(V3, f32)>,
+    pub grenades: Vec<Flying>,
+}
+
 /// How many snapshot intervals behind the newest snapshot other players are shown, so that
 /// there is nearly always a later snapshot to be moving toward
 const VIEW_DELAY: f64 = 2.0;
@@ -70,7 +82,7 @@ pub struct Client {
     /// Snapshots received
     pub snapshots: u32,
     /// The other players in the latest snapshots, by server tick
-    history: VecDeque<(u32, Vec<Seen>)>,
+    history: VecDeque<(u32, Frame)>,
     /// The latest snapshots received, without their events: what the server may say a snapshot
     /// is the difference from
     received: VecDeque<Snapshot>,
@@ -216,18 +228,21 @@ impl Client {
 
     fn remember(&mut self, now: f64, snap: &Snapshot) {
         self.arrived = now;
-        let seen = snap.players.iter().map(|p| (p.slot as usize, p.pos, p.look)).collect();
-        self.history.push_back((snap.tick, seen));
+        self.history.push_back((snap.tick, Frame {
+            players: snap.players.iter().map(|p| (p.slot as usize, p.pos, p.look)).collect(),
+            npcs: snap.npcs.iter().map(|n| (n.pos, n.yaw)).collect(),
+            grenades: snap.thrown.iter().map(|t| (t.owner, t.pos, t.spin)).collect(),
+        }));
         while self.history.len() > HISTORY {
             self.history.pop_front();
         }
     }
 
-    /// The other players as they are shown at time `now`: a little behind the newest snapshot,
+    /// What moves, as it is shown at time `now`: a little behind the newest snapshot,
     /// moving smoothly between the two that surround that moment, however unevenly they came.
     /// Call it once a frame.
-    pub fn others(&mut self, now: f64) -> Vec<Seen> {
-        let Some(newest) = self.history.back().map(|h| h.0) else { return Vec::new() };
+    pub fn view(&mut self, now: f64) -> Frame {
+        let Some(newest) = self.history.back().map(|h| h.0) else { return Frame::default() };
         let interval = match self.history.len() {
             0 | 1 => 3.0,
             n => (newest - self.history[n - 2].0).max(1) as f64,
@@ -271,9 +286,9 @@ impl Client {
     }
 }
 
-/// The other players at server tick `t`, between the two snapshots that surround it
-fn blend(history: &VecDeque<(u32, Vec<Seen>)>, t: f64) -> Vec<Seen> {
-    let Some(first) = history.front() else { return Vec::new() };
+/// The moving parts of the game at server tick `t`, between the two snapshots that surround it
+fn blend(history: &VecDeque<(u32, Frame)>, t: f64) -> Frame {
+    let Some(first) = history.front() else { return Frame::default() };
     let (a, b) = match history.iter().position(|h| h.0 as f64 >= t) {
         Some(0) => (first, first),
         Some(i) => (&history[i - 1], &history[i]),
@@ -284,14 +299,33 @@ fn blend(history: &VecDeque<(u32, Vec<Seen>)>, t: f64) -> Vec<Seen> {
     };
     let span = (b.0 - a.0) as f64;
     let f = if span > 0.0 { ((t - a.0 as f64) / span).clamp(0.0, 1.0) as f32 } else { 1.0 };
-    b.1.iter().map(|&(slot, pos, look)| match a.1.iter().find(|s| s.0 == slot) {
+    let (a, b) = (&a.1, &b.1);
+    let lerp = |from: V3, to: V3| [0, 1, 2].map(|i| from[i] + (to[i] - from[i]) * f);
+
+    let players = b.players.iter().map(|&(slot, pos, look)| match a.players.iter().find(|s| s.0 == slot) {
         // Just arrived in the game: there is nothing earlier to move from
         None => (slot, pos, look),
-        Some(&(_, from, from_look)) => {
-            let p = [0, 1, 2].map(|i| from[i] + (pos[i] - from[i]) * f);
-            (slot, p, (turn_between(from_look.0, look.0, f), turn_between(from_look.1, look.1, f)))
+        Some(&(_, from, from_look)) => (slot, lerp(from, pos), (turn_between(from_look.0, look.0, f), turn_between(from_look.1, look.1, f))),
+    }).collect();
+
+    let npcs = if a.npcs.len() == b.npcs.len() {
+        a.npcs.iter().zip(&b.npcs).map(|(&(from, from_yaw), &(to, to_yaw))| (lerp(from, to), degrees_between(from_yaw, to_yaw, f))).collect()
+    } else {
+        b.npcs.clone()
+    };
+
+    // A grenade is the same one in both if it is the same thrower's first, second, and so on
+    let nth = |list: &[Flying], owner: u8, n: usize| list.iter().filter(|g| g.0 == owner).nth(n).copied();
+    let mut counted = [0usize; 256];
+    let grenades = b.grenades.iter().map(|&(owner, pos, spin)| {
+        let n = counted[owner as usize];
+        counted[owner as usize] += 1;
+        match nth(&a.grenades, owner, n) {
+            Some((_, from, from_spin)) => (owner, lerp(from, pos), from_spin + (spin - from_spin) * f),
+            None => (owner, pos, spin),
         }
-    }).collect()
+    }).collect();
+    Frame { players, npcs, grenades }
 }
 
 /// A quantized angle part of the way from `a` to `b`, by the shorter way round
@@ -300,27 +334,52 @@ fn turn_between(a: u16, b: u16, f: f32) -> u16 {
     (a as i32 + (delta as f32 * f).round() as i32) as u16
 }
 
+/// An angle in degrees part of the way from `a` to `b`, by the shorter way round
+fn degrees_between(a: f32, b: f32, f: f32) -> f32 {
+    a + ((b - a + 540.0).rem_euclid(360.0) - 180.0) * f
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn history(points: &[(u32, f32, u16)]) -> VecDeque<(u32, Vec<Seen>)> {
-        points.iter().map(|&(t, x, yaw)| (t, vec![(1, [x, 0.0, 0.0], (yaw, 0))])).collect()
+    fn history(points: &[(u32, f32, u16)]) -> VecDeque<(u32, Frame)> {
+        points.iter().map(|&(t, x, yaw)| (t, Frame {
+            players: vec![(1, [x, 0.0, 0.0], (yaw, 0))],
+            npcs: vec![([x, 0.0, 0.0], yaw as f32)],
+            grenades: vec![(2, [x, 1.0, 0.0], x * 10.0)],
+        })).collect()
     }
 
     #[test]
     fn blends_between_snapshots_and_holds_at_the_ends() {
         let h = history(&[(10, 0.0, 0), (12, 2.0, 100), (14, 6.0, 200)]);
-        assert_eq!(blend(&h, 11.0)[0].1[0], 1.0);
-        assert_eq!(blend(&h, 13.0)[0].1[0], 4.0);
-        assert_eq!(blend(&h, 11.0)[0].2.0, 50);
-        assert_eq!(blend(&h, 5.0)[0].1[0], 0.0);
-        assert_eq!(blend(&h, 99.0)[0].1[0], 6.0);
+        assert_eq!(blend(&h, 11.0).players[0].1[0], 1.0);
+        assert_eq!(blend(&h, 13.0).players[0].1[0], 4.0);
+        assert_eq!(blend(&h, 11.0).players[0].2.0, 50);
+        assert_eq!(blend(&h, 5.0).players[0].1[0], 0.0);
+        assert_eq!(blend(&h, 99.0).players[0].1[0], 6.0);
+    }
+
+    #[test]
+    fn characters_and_grenades_blend_too() {
+        let h = history(&[(10, 0.0, 0), (12, 2.0, 100)]);
+        let f = blend(&h, 11.0);
+        assert_eq!(f.npcs[0], ([1.0, 0.0, 0.0], 50.0));
+        assert_eq!(f.grenades[0], (2, [1.0, 1.0, 0.0], 10.0));
+        // A grenade with nothing earlier to match is where it is; one that has gone is not drawn
+        let mut h = h;
+        h[1].1.grenades.push((2, [9.0; 3], 0.0));
+        assert_eq!(blend(&h, 11.0).grenades[1], (2, [9.0; 3], 0.0));
+        h[1].1.grenades.clear();
+        assert!(blend(&h, 11.0).grenades.is_empty());
     }
 
     #[test]
     fn turns_the_short_way_round() {
         assert_eq!(turn_between(65000, 500, 0.5), 65518);
         assert_eq!(turn_between(500, 65000, 0.5), 65518);
+        assert_eq!(degrees_between(350.0, 10.0, 0.5), 360.0);
+        assert_eq!(degrees_between(10.0, 350.0, 0.5), 0.0);
     }
 }

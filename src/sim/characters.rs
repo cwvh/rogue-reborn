@@ -15,6 +15,7 @@ use crate::util::find_file;
 type V3 = [f32; 3];
 
 /// A character in the level
+#[derive(Clone)]
 pub struct Npc {
     pub health: Health,
     /// The model's origin in map space

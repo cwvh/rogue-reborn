@@ -1172,12 +1172,25 @@ fn main() {
                 glColor3f(1.0, 1.0, 1.0);
             }
 
+            // On a server, what moves is shown a little in the past, between its snapshots, so that
+            // it moves smoothly
+            let view = net.as_mut().map(|(client, _)| client.view(net_clock.elapsed().as_secs_f64()));
+
             // Characters at the spawn points, posed for what they are doing
             if let Some(chars) = &sim.characters {
                 let c = &chars.model;
                 glDisable(0x0DE1); // GL_TEXTURE_2D
                 let clock = start_time.elapsed().as_secs_f32();
                 for (i, spot) in sim.npcs.iter().enumerate() {
+                    let mut moved;
+                    let spot = match view.as_ref().and_then(|v| v.npcs.get(i)) {
+                        Some(&(pos, yaw)) => {
+                            moved = spot.clone();
+                            (moved.pos[0], moved.pos[2], moved.yaw) = (pos[0], pos[2], yaw);
+                            &moved
+                        }
+                        None => spot,
+                    };
                     let idle = args.anim_frame.unwrap_or_else(|| game_time * args.anim_fps.unwrap_or(30.0) + spot.stagger * 9.0);
                     let posed = chars.pose(spot, game_time, idle);
                     let verts: &[[f32; 3]] = if posed.is_empty() { &c.vertices } else { &posed };
@@ -1201,9 +1214,8 @@ fn main() {
             // The other players on the server, standing about as the characters do
             if let Some(chars) = &sim.characters {
                 glDisable(0x0DE1); // GL_TEXTURE_2D
-                // Shown a little in the past, between the snapshots, so they move smoothly
-                let others = net.as_mut().map_or(Vec::new(), |(client, _)| client.others(net_clock.elapsed().as_secs_f64()));
-                for (slot, pos, look) in others.into_iter().filter(|(i, ..)| *i != me) {
+                let others = view.as_ref().map_or(&[][..], |v| &v.players[..]);
+                for &(slot, pos, look) in others.iter().filter(|(i, ..)| *i != me) {
                     let ghost = Npc {
                         health: combat::Health::new(),
                         pos,
@@ -1277,11 +1289,14 @@ fn main() {
 
             // Grenades in the air
             if let Some(gd) = &grenade_draw {
-                for t in &sim.thrown {
-                    let g = &t.grenade;
+                let flying: Vec<([f32; 3], f32)> = match &view {
+                    Some(v) => v.grenades.iter().map(|&(_, pos, spin)| (pos, spin)).collect(),
+                    None => sim.thrown.iter().map(|t| (t.grenade.pos, t.grenade.spin)).collect(),
+                };
+                for (pos, spin) in flying {
                     glPushMatrix();
-                    glTranslatef(g.pos[0], g.pos[1], g.pos[2]);
-                    glRotatef(g.spin, 1.0, 0.3, 0.0);
+                    glTranslatef(pos[0], pos[1], pos[2]);
+                    glRotatef(spin, 1.0, 0.3, 0.0);
                     // Model space (forward -Y, up +Z) turned so its length runs the way it spins
                     glTranslatef(-gd.center[0], -gd.center[1], -gd.center[2]);
                     draw_weapon(gd, textured, false);

@@ -38,7 +38,7 @@ Map parser
 
 Network play
 * [net] Snapshots are already sent as what changed since the one the client last confirmed. Positions are still full floats; sending them as small integers relative to the baseline would shrink moving players further, and the client could stop acknowledging every snapshot.
-* [net] Interpolate thrown grenades and the characters too; only other players are shown between snapshots so far.
+* [net] Remote players, characters and grenades are shown between snapshots, but the characters' animation clocks and weapon use are not. Extrapolate when snapshots stop for long, and fit the view delay to the measured jitter.
 * [net] Players cannot hurt each other: shots and blasts pass through other players. Needs a hit shape (or the posed character), health, death and respawn.
 * [net] A player's own shots, sounds and muzzle flash wait for the server's answer (a round trip). Predict the ones that cannot be wrong, and take them back if they were.
 * [net] Hit detection ignores latency: a player has to lead a moving target by their ping. Rewind the other players and characters to what the shooter saw (lag compensation).
