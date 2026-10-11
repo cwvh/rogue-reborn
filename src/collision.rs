@@ -80,6 +80,8 @@ struct Tri {
     n: V3,
     /// Switched off, like a pane of glass that has broken
     off: bool,
+    /// Left out because its room is not one that counts around the player right now
+    hidden: bool,
     /// The MAP material this face uses (`usize::MAX` for none)
     material: usize,
     /// The room this face belongs to (`NO_ROOM` when its object is not a room's)
@@ -113,8 +115,26 @@ pub struct CollisionWorld {
     rows: usize,
     cells: Vec<Vec<u32>>,
     params: Params,
-    /// Which room numbers are solid right now; None means all of them
-    active: Option<Vec<bool>>,
+}
+
+/// A room that is solid around the player, and how much of it
+#[derive(Clone, Debug, PartialEq)]
+pub struct SolidRoom {
+    pub room: u32,
+    /// Planes (a, b, c, d) with a*x + b*y + c*z + d >= 0 on the kept side. When there
+    /// are any, only the parts of the room on the kept side of at least one count. A room
+    /// next door overlaps the player's, and only what is beyond the portal between them
+    /// is really in it.
+    pub keep: Vec<[f32; 4]>,
+    /// Like `keep`, but every plane must be satisfied: the parts of the player's own room
+    /// that run past a portal they are standing in, into the room beyond
+    pub cut: Vec<[f32; 4]>,
+}
+
+impl SolidRoom {
+    pub fn whole(room: u32) -> Self {
+        Self { room, keep: Vec::new(), cut: Vec::new() }
+    }
 }
 
 impl CollisionWorld {
@@ -152,7 +172,7 @@ impl CollisionWorld {
                         if gl <= 1e-6 { continue; }
                         n = scale(gn, 1.0 / gl);
                     }
-                    tris.push(Tri { a, b, c, n, off: false, material: od.mn as usize, room });
+                    tris.push(Tri { a, b, c, n, off: false, hidden: false, material: od.mn as usize, room });
                 }
             }
         }
@@ -166,7 +186,7 @@ impl CollisionWorld {
                 let gn = cross(sub(b, a), sub(c, a));
                 let gl = len(gn);
                 if gl <= 1e-6 { continue; }
-                tris.push(Tri { a, b, c, n: scale(gn, 1.0 / gl), off: false, material: usize::MAX, room: NO_ROOM });
+                tris.push(Tri { a, b, c, n: scale(gn, 1.0 / gl), off: false, hidden: false, material: usize::MAX, room: NO_ROOM });
             }
             groups.push((pane.name.clone(), first..tris.len()));
         }
@@ -198,7 +218,6 @@ impl CollisionWorld {
             rows,
             cells: vec![Vec::new(); cols * rows],
             params,
-            active: None,
         };
 
         for ti in 0..world.tris.len() {
@@ -224,18 +243,46 @@ impl CollisionWorld {
     /// stays solid), or all of them with None. The level overlaps itself: the outside
     /// of a plane sits inside its cabin, so only the rooms around the player may count.
     pub fn set_active_rooms(&mut self, rooms: Option<&[u32]>) {
-        self.active = rooms.map(|rooms| {
-            let mut on = vec![false; rooms.iter().copied().max().map_or(0, |m| m as usize + 1)];
-            for &r in rooms {
-                on[r as usize] = true;
+        let whole: Option<Vec<SolidRoom>> = rooms.map(|r| r.iter().map(|&n| SolidRoom::whole(n)).collect());
+        self.set_solid_rooms(whole.as_deref());
+    }
+
+    /// Like `set_active_rooms`, but a room can be solid in part only (see `SolidRoom`)
+    pub fn set_solid_rooms(&mut self, rooms: Option<&[SolidRoom]>) {
+        let side = |planes: &[[f32; 4]], c: V3| planes.iter().map(|p| p[0] * c[0] + p[1] * c[1] + p[2] * c[2] + p[3] >= 0.0).collect::<Vec<bool>>();
+        for t in &mut self.tris {
+            t.hidden = match rooms {
+                None => false,
+                Some(_) if t.room == NO_ROOM => false,
+                Some(rooms) => {
+                    let middle = scale(add(add(t.a, t.b), t.c), 1.0 / 3.0);
+                    // A room listed more than once counts wherever any entry has it
+                    !rooms.iter().filter(|r| r.room == t.room).any(|r| {
+                        (r.keep.is_empty() || side(&r.keep, middle).iter().any(|&ok| ok)) && side(&r.cut, middle).iter().all(|&ok| ok)
+                    })
+                }
+            };
+        }
+    }
+
+    /// The room whose floor is under `feet`: the first face below, whatever rooms are
+    /// active, so it can be asked where the player stands before deciding what is solid.
+    pub fn floor_room(&self, feet: [f32; 3]) -> Option<u32> {
+        let origin = [feet[0], feet[1] + 60.0, feet[2]];
+        let mut best: Option<(f32, u32)> = None;
+        for t in self.tris.iter().filter(|t| !t.off) {
+            if let Some(d) = crate::combat::ray_triangle(origin, [0.0, -1.0, 0.0], t.a, t.b, t.c) {
+                if d <= 220.0 && best.is_none_or(|(b, _)| d < b) {
+                    best = Some((d, t.room));
+                }
             }
-            on
-        });
+        }
+        best.and_then(|(_, room)| (room != NO_ROOM).then_some(room))
     }
 
     /// Whether a face can currently stop anything
     fn solid(&self, t: &Tri) -> bool {
-        !t.off && (t.room == NO_ROOM || self.active.as_ref().is_none_or(|on| on.get(t.room as usize).copied().unwrap_or(false)))
+        !t.off && !t.hidden
     }
 
     /// Distance along the unit vector `dir` from `origin` to the nearest

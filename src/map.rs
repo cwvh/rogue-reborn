@@ -1381,6 +1381,24 @@ pub struct Rooms {
 }
 
 impl Rooms {
+    /// The rooms the point is well inside, as indices into `rooms`: in a level volume
+    /// at least `fraction` of its narrowest width (up to `max`) from every wall.
+    /// Volumes overlap their neighbours by a wall's thickness, so the edge of a volume
+    /// does not make a room the player's.
+    pub fn well_inside(&self, p: [f32; 3], fraction: f32, max: f32) -> Vec<usize> {
+        (0..self.rooms.len()).filter(|&i| {
+            self.rooms[i].sherman_levels.iter().flat_map(|l| &l.tm_with_aabb)
+                .any(|b| b.depth(p).is_some_and(|d| d >= (b.narrowest() * fraction).min(max)))
+        }).collect()
+    }
+
+    /// Every room with a volume that contains the point, as indices into `rooms`
+    pub fn containing(&self, p: [f32; 3]) -> Vec<usize> {
+        (0..self.rooms.len()).filter(|&i| {
+            self.rooms[i].sherman_levels.iter().flat_map(|l| &l.tm_with_aabb).any(|b| b.measure(p).0 == 0.0)
+        }).collect()
+    }
+
     /// The one room a map-space point belongs to, as an index into `rooms`.
     ///
     /// Room volumes overlap (a hull around a cabin, a floor slab under the next level), so
@@ -1453,6 +1471,42 @@ pub struct Room {
 }
 
 impl Room {
+    /// The floor plan of each level volume as (min x, min z, max x, max z) in map space
+    pub fn footprints(&self) -> Vec<[f32; 4]> {
+        self.sherman_levels.iter().flat_map(|l| &l.tm_with_aabb).map(|b| {
+            let (o, a) = (&b.tm.position, &b.aabb);
+            let mut f = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+            for corner in 0..8 {
+                let local = [
+                    if corner & 1 == 0 { a[0] } else { a[3] },
+                    if corner & 2 == 0 { a[1] } else { a[4] },
+                    if corner & 4 == 0 { a[2] } else { a[5] },
+                ];
+                let (x, y, z) = (&b.tm.x_axis, &b.tm.y_axis, &b.tm.z_axis);
+                let wx = o.x + x.x * local[0] + y.x * local[1] + z.x * local[2];
+                let wz = o.z + x.z * local[0] + y.z * local[1] + z.z * local[2];
+                f = [f[0].min(wx), f[1].min(wz), f[2].max(wx), f[3].max(wz)];
+            }
+            f
+        }).collect()
+    }
+
+    /// How much of this room's floor plan lies inside `outer`'s: 1.0 for a stairwell
+    /// standing wholly inside a hall, near 0 for rooms that merely touch or share a wall.
+    pub fn nested_in(&self, outer: &Room) -> f32 {
+        let outer = outer.footprints();
+        let (mut inside, mut total) = (0.0, 0.0);
+        for r in self.footprints() {
+            let area = (r[2] - r[0]).max(0.0) * (r[3] - r[1]).max(0.0);
+            let best = outer.iter().map(|o| {
+                (r[2].min(o[2]) - r[0].max(o[0])).max(0.0) * (r[3].min(o[3]) - r[1].max(o[1])).max(0.0)
+            }).fold(0.0, f32::max);
+            inside += best;
+            total += area;
+        }
+        if total > 0.0 { inside / total } else { 0.0 }
+    }
+
     /// Whether a map-space point is inside one of the room's level volumes.
     ///
     /// Each level is a box (an AABB placed at the level's transform position).
@@ -1592,6 +1646,26 @@ pub struct TransformationWithAABB {
 }
 
 impl TransformationWithAABB {
+    /// How far inside the box a map-space point is, sideways: the distance to the nearest
+    /// side wall, or None when the point is outside (height included) or it has no depth.
+    pub fn depth(&self, p: [f32; 3]) -> Option<f32> {
+        let o = &self.tm.position;
+        let d = [p[0] - o.x, p[1] - o.y, p[2] - o.z];
+        let dot = |v: &Vec3f| d[0] * v.x + d[1] * v.y + d[2] * v.z;
+        let l = [dot(&self.tm.x_axis), dot(&self.tm.y_axis), dot(&self.tm.z_axis)];
+        let a = &self.aabb;
+        if l[1] < a[1] || l[1] > a[4] {
+            return None;
+        }
+        let depth = (l[0] - a[0]).min(a[3] - l[0]).min(l[2] - a[2]).min(a[5] - l[2]);
+        (depth >= 0.0).then_some(depth)
+    }
+
+    /// The smaller of the box's two sideways sizes
+    pub fn narrowest(&self) -> f32 {
+        (self.aabb[3] - self.aabb[0]).min(self.aabb[5] - self.aabb[2])
+    }
+
     /// How far a map-space point is outside the box (0 when inside) and the box's volume.
     fn measure(&self, p: [f32; 3]) -> (f32, f32) {
         // Into the box's local space: the transform axes are orthonormal
@@ -1707,6 +1781,17 @@ pub struct PlanningLevels {
 }
 
 impl PlanningLevels {
+    /// The floor a body standing at height `y` is on: the highest one whose floor is at
+    /// or below that, allowing a little for stairs and for standing on a step. None for a
+    /// map with no floors listed.
+    pub fn level_at(&self, y: f32) -> Option<&PlanningLevel> {
+        const STEP: f32 = 60.0;
+        self.levels.iter()
+            .filter(|l| l.floor_height <= y + STEP)
+            .max_by(|a, b| a.floor_height.total_cmp(&b.floor_height))
+            .or_else(|| self.levels.iter().min_by(|a, b| a.floor_height.total_cmp(&b.floor_height)))
+    }
+
     fn read(buf: &mut Cursor<Vec<u8>>) -> Result<Self> {
         let (section_id, section_name) = section_header(buf)
             .context("planning levels")?;

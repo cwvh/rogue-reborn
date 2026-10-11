@@ -8,6 +8,7 @@ use rogue_reborn::{actor, combat, crp, motion, skeleton, sound, tga, weapon};
 use rogue_reborn::ambience;
 use rogue_reborn::glass;
 use rogue_reborn::impact::{self, Surface};
+use rogue_reborn::visibility;
 
 #[cfg_attr(windows, link(name = "opengl32"))]
 #[cfg_attr(target_os = "macos", link(name = "OpenGL", kind = "framework"))]
@@ -16,7 +17,13 @@ unsafe extern "C" {
     fn glViewport(x: i32, y: i32, width: i32, height: i32);
     fn glClearColor(r: f32, g: f32, b: f32, a: f32);
     fn glEnable(cap: u32);
-    fn glScissor(x: i32, y: i32, width: i32, height: i32);
+    fn glClipPlane(plane: u32, equation: *const f64);
+    fn glStencilFunc(func: u32, reference: i32, mask: u32);
+    fn glStencilOp(fail: u32, zfail: u32, zpass: u32);
+    fn glClearStencil(s: i32);
+    fn glColorMask(r: u8, g: u8, b: u8, a: u8);
+    fn glDepthFunc(func: u32);
+    fn glDepthRange(near: f64, far: f64);
     fn glGetFloatv(pname: u32, params: *mut f32);
     fn glPolygonMode(face: u32, mode: u32);
     fn glClear(mask: u32);
@@ -85,6 +92,8 @@ struct Args {
     dump: bool,
     /// Draw every room instead of only the ones visible through portals
     no_cull: bool,
+    /// Rooms to leave out of the drawing, to find which one a stray surface belongs to
+    hide_rooms: Vec<u32>,
     collisions: bool,
     first_person: bool,
     info: bool,
@@ -154,6 +163,7 @@ fn parse_args() -> Args {
             "--rooms" => args.rooms = true,
             "--dump" => args.dump = true,
             "--no-cull" => args.no_cull = true,
+            "--hide-rooms" => args.hide_rooms = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default(),
             "--info" => args.info = true,
             "--spawn-zone" => args.spawn_zone = it.next(),
             "--model" => args.model = it.next().map(PathBuf::from),
@@ -784,7 +794,8 @@ fn main() {
     let mut culling = !args.no_cull;
     let visibility = rogue_reborn::visibility::Visibility::new(&level);
     let mut current_room: Option<usize> = None;
-    let mut collision_rooms: Option<Vec<u32>> = None;
+    let mut collision_rooms: Option<Vec<rogue_reborn::collision::SolidRoom>> = None;
+    let mut last_render_rooms: Vec<u32> = Vec::new();
     let mut drawn_rooms: Vec<String> = Vec::new();
     let mut blink_enabled = !args.no_blink;
     // Combat state; times are in game seconds
@@ -1246,13 +1257,32 @@ fn main() {
         // Only the player's room and the rooms its portals lead to can stop movement or
         // bullets: the level overlaps itself, and the exterior of a plane must not block
         // anyone inside it
-        let wanted: Option<Vec<u32>> = if culling {
-            current_room.and_then(|i| level.rooms.rooms[i].section_name.parse().ok()).map(|n| visibility.with_neighbours(&level, n))
+        let player_rooms = visibility.player_rooms(&level, probe, current_room);
+        // The room drawing starts from: the one whose floor the player stands on, as
+        // overlapping rooms (a stairwell beside a hall, an upstairs over a downstairs)
+        // all claim the same spot. Airborne, the last one stays; flying, the smallest
+        // room around the camera.
+        let floor_room = if first_person {
+            world.floor_room([probe[0], probe[1] - 10.0, probe[2]])
+                .filter(|n| level.rooms.rooms.iter().any(|r| r.section_name == n.to_string()))
+        } else {
+            None
+        };
+        let render_rooms: Vec<u32> = match floor_room {
+            Some(n) => vec![n],
+            None if first_person && !last_render_rooms.is_empty() => last_render_rooms.clone(),
+            None => current_room.and_then(|i| level.rooms.rooms[i].section_name.parse().ok()).map(|n| vec![n]).unwrap_or_else(|| player_rooms.clone()),
+        };
+        last_render_rooms = render_rooms.clone();
+        // What stops the player: their room, the rooms through its portals but only
+        // beyond them, and the other rooms they are well inside (they can hold the floor)
+        let wanted: Option<Vec<rogue_reborn::collision::SolidRoom>> = if culling && !render_rooms.is_empty() {
+            Some(visibility.solid_rooms(&level, &render_rooms, &player_rooms, &body))
         } else {
             None
         };
         if wanted != collision_rooms {
-            world.set_active_rooms(wanted.as_deref());
+            world.set_solid_rooms(wanted.as_deref());
             collision_rooms = wanted;
         }
         let current_rooms: Vec<&str> = current_room.map(|i| level.rooms.rooms[i].section_name.as_str()).into_iter().collect();
@@ -1272,7 +1302,8 @@ fn main() {
 
         render_time = Instant::now();
         unsafe {
-            glClear(0x00004000 | 0x00000100); // GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
+            glClearStencil(1);
+            glClear(0x00004000 | 0x00000100 | 0x00000400); // GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT
             glMatrixMode(0x1701); // GL_PROJECTION
             glLoadIdentity();
             glu_perspective(60.0, aspect, z_near, z_far);
@@ -1295,24 +1326,26 @@ fn main() {
             apply_camera(&view);
             glScalef(1.0, 1.0, -1.0);
 
-            // Which rooms the portals show from here, each with the part of the screen
-            // it can be seen through
-            let mut drawn: Option<HashMap<u32, rogue_reborn::visibility::Rect>> = None;
-            if culling {
-                if let Some(start) = current_room.and_then(|i| level.rooms.rooms[i].section_name.parse::<u32>().ok()) {
-                    let (mut modelview, mut projection) = ([0f32; 16], [0f32; 16]);
-                    glGetFloatv(0x0BA6, modelview.as_mut_ptr()); // GL_MODELVIEW_MATRIX
-                    glGetFloatv(0x0BA7, projection.as_mut_ptr()); // GL_PROJECTION_MATRIX
-                    let clip = |v: [f32; 3]| mul_mat4(&projection, mul_mat4(&modelview, [v[0], v[1], v[2], 1.0]));
-                    drawn = Some(visibility.visible(&level, start, &body, &clip));
-                }
+            // What the portals show from here: the rooms the player is in, and each room
+            // seen through the previous one's portals (see visibility::plan)
+            let cam_eye = [view.position[0], view.position[1], -view.position[2]];
+            let mut plan: Vec<rogue_reborn::visibility::PlanNode> = Vec::new();
+            if culling && !render_rooms.is_empty() {
+                let (mut modelview, mut projection) = ([0f32; 16], [0f32; 16]);
+                glGetFloatv(0x0BA6, modelview.as_mut_ptr()); // GL_MODELVIEW_MATRIX
+                glGetFloatv(0x0BA7, projection.as_mut_ptr()); // GL_PROJECTION_MATRIX
+                let clip = |v: [f32; 3]| mul_mat4(&projection, mul_mat4(&modelview, [v[0], v[1], v[2], 1.0]));
+                plan = render_rooms.iter().map(|&r| visibility.plan(&level, r, &body, cam_eye, &clip)).collect();
             }
-            drawn_rooms = drawn.as_ref().map(|d| {
-                let mut v: Vec<u32> = d.keys().copied().collect();
+            drawn_rooms = {
+                let mut v: Vec<u32> = Vec::new();
+                for node in &plan {
+                    node.rooms(&mut v);
+                }
                 v.sort();
+                v.dedup();
                 v.iter().map(|n| n.to_string()).collect()
-            }).unwrap_or_default();
-            let (fb_w, fb_h) = window.get_framebuffer_size();
+            };
 
             // Combined
             {
@@ -1324,6 +1357,7 @@ fn main() {
                     glDisable(0x0DE1); // GL_TEXTURE_2D
                     glPolygonMode(0x0408, 0x1B01); // GL_FRONT_AND_BACK, GL_LINE
                 }
+                let level_mode = if textured { 0x1B02 } else { 0x1B01 };
 
                 // Determine which room names are active for this planning level (if any)
                 let use_filter = false; // !level.planning_levels.levels.is_empty();
@@ -1331,30 +1365,29 @@ fn main() {
                 if room_debug {
                     glDisable(0x0DE1); // GL_TEXTURE_2D
                 }
-                for object in &level.geometries.objects {
-                    // Panes are drawn in place below
-                    if panes.iter().any(|g| g.name == object.name) {
-                        continue;
-                    }
-                    // An object belongs to the room its name starts with ("204", "20_doormetal").
-                    // Rooms the portals don't show are skipped; the rest are drawn only
-                    // through the part of the screen their portals cover.
-                    let room = map::object_room(&object.name).filter(|n| level.rooms.rooms.iter().any(|r| r.section_name == n.to_string()));
-                    glDisable(0x0C11); // GL_SCISSOR_TEST
-                    if let (Some(drawn), Some(n)) = (&drawn, room) {
-                        let Some(rect) = drawn.get(&n) else { continue };
-                        if *rect != [-1.0, -1.0, 1.0, 1.0] {
-                            let to_px = |v: f32, size: i32| (v + 1.0) / 2.0 * size as f32;
-                            let (x0, y0) = ((to_px(rect[0], fb_w) - 2.0).floor().max(0.0), (to_px(rect[1], fb_h) - 2.0).floor().max(0.0));
-                            let (x1, y1) = ((to_px(rect[2], fb_w) + 2.0).ceil().min(fb_w as f32), (to_px(rect[3], fb_h) + 2.0).ceil().min(fb_h as f32));
-                            glEnable(0x0C11);
-                            glScissor(x0 as i32, y0 as i32, (x1 - x0).max(0.0) as i32, (y1 - y0).max(0.0) as i32);
+
+                // Draws some of the level's objects, and only the part beyond `plane`.
+                // An object belongs to the room its name starts with ("204", "20_doormetal").
+                let mut draw_objects = |which: Which, planes: &[[f32; 4]]| {
+                    set_clip_planes(planes);
+                    for object in &level.geometries.objects {
+                        // Panes are drawn in place below
+                        if panes.iter().any(|g| g.name == object.name) {
+                            continue;
                         }
-                    }
-                    if room_debug {
-                        let [r, g, b] = room_color(&object.name, current_rooms.iter().any(|n| *n == object.name));
-                        glColor3f(r, g, b);
-                    }
+                        let room = map::object_room(&object.name).filter(|n| level.rooms.rooms.iter().any(|r| r.section_name == n.to_string()));
+                        match which {
+                            Which::Room(n) if room != Some(n) => continue,
+                            Which::Unowned if room.is_some() => continue,
+                            _ => {}
+                        }
+                        if room.is_some_and(|n| args.hide_rooms.contains(&n)) {
+                            continue;
+                        }
+                        if room_debug {
+                            let [r, g, b] = room_color(&object.name, current_rooms.iter().any(|n| *n == object.name));
+                            glColor3f(r, g, b);
+                        }
                     for od in &object.object_datas {
                         if use_filter {
                             let rooms = &level.planning_levels.levels[planning_level_index].room_names;
@@ -1403,8 +1436,21 @@ fn main() {
                             glEnd();
                         }
                     }
+                    }
+                };
+
+                if plan.is_empty() {
+                    draw_objects(Which::All, &[]);
+                } else {
+                    // Things that belong to no room first, then each room through its portals
+                    draw_objects(Which::Unowned, &[]);
+                    glEnable(0x0B90); // GL_STENCIL_TEST
+                    for node in &plan {
+                        draw_plan(node, 1, level_mode, textured && !room_debug, &mut |room, planes| draw_objects(Which::Room(room), planes));
+                    }
+                    glDisable(0x0B90);
                 }
-                glDisable(0x0C11); // GL_SCISSOR_TEST
+                set_clip_planes(&[]);
                 glColor3f(1.0, 1.0, 1.0);
             }
 
@@ -1699,7 +1745,7 @@ fn main() {
             let report = DebugReport {
                 map_path, map_num: &map_num, level: &level, eye, feet, yaw: camera.yaw, pitch: camera.pitch, dir,
                 hit, first_person, third_person, textured, room_debug, show_portals, show_collisions,
-                fps, render_ms, culling, room: current_rooms.first().copied(), drawn: &drawn_rooms, collision: &collision_rooms,
+                fps, render_ms, culling, room: current_rooms.first().copied(), drawn: &drawn_rooms, collision: &collision_rooms, player_rooms: &player_rooms, render_rooms: &render_rooms,
             };
             match write_debug_dump(&report, &rgb, fw as u32, fh as u32) {
                 Ok(stem) => println!("wrote {stem}.png and {stem}.txt"),
@@ -2124,6 +2170,119 @@ fn mul_mat4(m: &[f32; 16], v: [f32; 4]) -> [f32; 4] {
     std::array::from_fn(|row| (0..4).map(|col| m[col * 4 + row] * v[col]).sum())
 }
 
+/// Cut the drawing at these planes (a, b, c, d), keeping a*x + b*y + c*z + d >= 0, and
+/// stop cutting at any plane not given
+unsafe fn set_clip_planes(planes: &[[f32; 4]]) {
+    unsafe {
+        for i in 0..6u32 {
+            match planes.get(i as usize) {
+                Some(p) => {
+                    glClipPlane(0x3000 + i, [p[0] as f64, p[1] as f64, p[2] as f64, p[3] as f64].as_ptr());
+                    glEnable(0x3000 + i);
+                }
+                None => glDisable(0x3000 + i),
+            }
+        }
+    }
+}
+
+/// Which of the level's objects to draw
+#[derive(Clone, Copy)]
+enum Which {
+    All,
+    /// The objects of one room
+    Room(u32),
+    /// Those that belong to no room
+    Unowned,
+}
+
+/// Draw a room of the plan, then the rooms seen through its portals. `level` is the
+/// stencil value of the part of the screen this room owns. Each portal's opening is
+/// marked in the stencil buffer where it can be seen, the depth there is wiped, and the
+/// room beyond is drawn only into the mark: whatever the room in front has past the
+/// portal (rooms overlap each other) cannot show in the doorway.
+unsafe fn draw_plan(node: &visibility::PlanNode, level: i32, fill_mode: u32, textured: bool, draw: &mut dyn FnMut(u32, &[[f32; 4]])) {
+    const EQUAL: u32 = 0x0202;
+    const KEEP: u32 = 0x1E00;
+    unsafe {
+        glStencilFunc(EQUAL, level, !0);
+        glStencilOp(KEEP, KEEP, KEEP);
+        // Cut where the portal it is seen through begins, and at the portals the player is
+        // standing in (on this room's side)
+        let mut planes: Vec<[f32; 4]> = node.plane.into_iter().collect();
+        for child in node.children.iter().filter(|c| c.touched) {
+            if let Some(p) = child.plane {
+                planes.push([-p[0], -p[1], -p[2], -p[3]]);
+            }
+        }
+        planes.truncate(6);
+        draw(node.room, &planes);
+
+        for child in &node.children {
+            // Standing in the doorway: both rooms are drawn, each cut at the portal's plane
+            if child.touched {
+                draw_plan(child, level, fill_mode, textured, draw);
+                continue;
+            }
+            let opening = || {
+                glBegin(0x0006); // GL_TRIANGLE_FAN
+                for p in &child.polygon {
+                    glVertex3f(p[0], p[1], p[2]);
+                }
+                glEnd();
+            };
+            set_clip_planes(&[]);
+            glDisable(0x0DE1); // GL_TEXTURE_2D
+            glPolygonMode(0x0408, 0x1B02);
+            glColorMask(0, 0, 0, 0);
+            glDepthMask(0);
+
+            // Mark the part of the opening that is not behind something nearer. The polygon
+            // is nudged deeper, so walls lying in the portal's own plane are not wiped.
+            glStencilFunc(EQUAL, level, !0);
+            glStencilOp(KEEP, KEEP, 0x1E02); // GL_INCR
+            glEnable(0x8037); // GL_POLYGON_OFFSET_FILL
+            glPolygonOffset(2.0, 2.0);
+            opening();
+            glDisable(0x8037);
+            // Wipe the depth there, so the room beyond competes only with itself
+            glStencilFunc(EQUAL, level + 1, !0);
+            glStencilOp(KEEP, KEEP, KEEP);
+            glDepthFunc(0x0207); // GL_ALWAYS
+            glDepthMask(1);
+            glDepthRange(1.0, 1.0);
+            opening();
+            glDepthRange(0.0, 1.0);
+            glDepthFunc(0x0201); // GL_LESS
+            glColorMask(1, 1, 1, 1);
+            glPolygonMode(0x0408, fill_mode);
+            if textured {
+                glEnable(0x0DE1);
+            }
+
+            draw_plan(child, level + 1, fill_mode, textured, draw);
+
+            // The opening is done: nothing else may draw into it
+            set_clip_planes(&[]);
+            glColorMask(0, 0, 0, 0);
+            glDepthMask(0);
+            glDisable(0x0B71); // GL_DEPTH_TEST
+            glPolygonMode(0x0408, 0x1B02);
+            glStencilFunc(EQUAL, level + 1, !0);
+            glStencilOp(KEEP, KEEP, 0x0000); // GL_ZERO
+            opening();
+            glEnable(0x0B71);
+            glDepthMask(1);
+            glColorMask(1, 1, 1, 1);
+            glPolygonMode(0x0408, fill_mode);
+            if textured {
+                glEnable(0x0DE1);
+            }
+            glStencilOp(KEEP, KEEP, KEEP);
+        }
+    }
+}
+
 /// A stable colour for a room's name, so the same room looks the same every run.
 /// The rooms the player is standing in are drawn white.
 fn room_color(name: &str, current: bool) -> [f32; 3] {
@@ -2170,7 +2329,11 @@ struct DebugReport<'a> {
     /// The rooms drawn this frame, when culling is on
     drawn: &'a [String],
     /// The rooms that can stop movement and bullets, when culling is on
-    collision: &'a Option<Vec<u32>>,
+    collision: &'a Option<Vec<rogue_reborn::collision::SolidRoom>>,
+    /// Every room whose volume holds the player (rooms overlap)
+    player_rooms: &'a [u32],
+    /// The room drawing starts from (the floor's room)
+    render_rooms: &'a [u32],
 }
 
 // Write debug/dump-<time>.png and .txt; returns the path without extension
@@ -2197,9 +2360,14 @@ fn write_debug_dump(r: &DebugReport, rgb: &[u8], width: u32, height: u32) -> any
     writeln!(t, "yaw {:.1}, pitch {:.1}; looking along ({:.3}, {:.3}, {:.3})", r.yaw, r.pitch, r.dir[0], r.dir[1], r.dir[2])?;
     writeln!(t, "rooms whose volumes contain the feet: {in_rooms:?}")?;
     writeln!(t, "room the player is in: {}", r.room.unwrap_or("none"))?;
+    writeln!(t, "rooms whose volumes hold the player (collide): {:?}", r.player_rooms)?;
+    writeln!(t, "room drawing starts from (floor under the feet): {:?}", r.render_rooms)?;
     if r.culling {
         writeln!(t, "rooms drawn (visible through portals): {}", r.drawn.join(" "))?;
-        writeln!(t, "rooms that collide (the room and its portal neighbours): {:?}", r.collision.as_deref().unwrap_or_default())?;
+        let collide: Vec<String> = r.collision.as_deref().unwrap_or_default().iter()
+            .map(|c| if c.keep.is_empty() && c.cut.is_empty() { c.room.to_string() } else { format!("{} (part)", c.room) })
+            .collect();
+        writeln!(t, "rooms that collide (\"part\" is cut at a portal): {}", collide.join(" "))?;
     } else {
         writeln!(t, "room culling is off: every room is drawn")?;
     }
