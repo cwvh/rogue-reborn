@@ -538,6 +538,11 @@ fn main() {
     let mut was_reloading = false;
     let mut step_phase = 0i32;
     let mut remote_anim = rogue_reborn::net::animation::Animators::default();
+    // The latest kills, with when they leave the screen and their color, and how this player died:
+    // by whom, and where they were looking before
+    let mut feed: Vec<(f32, String, [f32; 3])> = Vec::new();
+    let mut killed_by: Option<Option<usize>> = None;
+    let mut alive_look: Option<(f32, f32)> = None;
     let mut trigger = false;
     // Right mouse button held: walk instead of the default run
     let mut walk_held = false;
@@ -820,6 +825,37 @@ fn main() {
             sim.players[me].player.pos
         };
 
+        feed.retain(|(until, ..)| *until > game_time);
+
+        // Dead on a server: the view sinks to the floor and turns to whoever did it, and is given
+        // back the way it was when the player comes back
+        match net.as_ref().and_then(|_| sim.players[me].respawn_at) {
+            Some(until) if first_person => {
+                let (yaw0, pitch0) = *alive_look.get_or_insert((camera.yaw, camera.pitch));
+                let fall = ((game_time - (until - sim::RESPAWN_SECONDS)) / 0.6).clamp(0.0, 1.0);
+                camera.position[1] -= (eye_height - 25.0) * fall * fall * (3.0 - 2.0 * fall);
+                let (want_yaw, want_pitch) = match killed_by.flatten().filter(|&k| k != me && sim.players[k].active) {
+                    Some(k) => {
+                        let t = sim.players[k].player.pos;
+                        let d = [t[0] - camera.position[0], t[1] + 100.0 - camera.position[1], -t[2] - camera.position[2]];
+                        let flat = d[0].hypot(d[2]);
+                        ((-d[0]).atan2(-d[2]).to_degrees(), d[1].atan2(flat).to_degrees())
+                    }
+                    None => (yaw0, pitch0),
+                };
+                let k = 1.0 - (-5.0 * step_dt).exp();
+                camera.yaw += ((want_yaw - camera.yaw + 540.0).rem_euclid(360.0) - 180.0) * k;
+                camera.pitch += (want_pitch - camera.pitch) * k;
+            }
+            Some(_) => {}
+            None => {
+                if let Some((yaw, pitch)) = alive_look.take() {
+                    (camera.yaw, camera.pitch) = (yaw, pitch);
+                }
+                killed_by = None;
+            }
+        }
+
         // A blast leaves the view shaken and whited out, and the sound muffled, for a while
         shake = (shake - 1.4 * step_dt).max(0.0);
         veil = (veil - 1.6 * step_dt).max(0.0);
@@ -903,6 +939,23 @@ fn main() {
                 }
                 // What happened to other players is not felt here
                 sim::Event::PlayerBlast { .. } => {}
+                sim::Event::Kill { killer, victim, cause } => {
+                    let who = |s: usize| format!("PLAYER {}", s + 1);
+                    let text = match (killer, cause) {
+                        (Some(k), sim::Cause::HeadShot) => format!("{} HEAD SHOT {}", who(k), who(victim)),
+                        (Some(k), sim::Cause::Shot) => format!("{} SHOT {}", who(k), who(victim)),
+                        (Some(k), sim::Cause::Grenade) => format!("{} BLEW UP {}", who(k), who(victim)),
+                        (None, _) => format!("{} KILLED THEMSELVES", who(victim)),
+                    };
+                    let color = if victim == me { [1.0, 0.35, 0.3] } else if killer == Some(me) { [1.0, 0.85, 0.3] } else { [1.0, 1.0, 1.0] };
+                    feed.push((game_time + 6.0, text, color));
+                    if feed.len() > 5 {
+                        feed.remove(0);
+                    }
+                    if victim == me {
+                        killed_by = Some(killer);
+                    }
+                }
             }
         }
 
@@ -1570,7 +1623,9 @@ fn main() {
             }
             let msg = if game_time < sim.players[me].message.1 { sim.players[me].message.0.as_str() } else { "" };
             let marker = tracer.is_some_and(|t| t.2 && game_time < t.3);
-            draw_hud(w, h, &status, msg, marker, veil);
+            let lines: Vec<(String, [f32; 3])> = feed.iter().map(|(_, text, color)| (text.clone(), *color)).collect();
+            let dead = net.is_some() && sim.players[me].respawn_at.is_some();
+            draw_hud(w, h, &status, msg, marker, veil, &lines, dead);
         }
         let rooms_text = if sim.culling {
             format!("ROOM: {} DRAWN: {}", current_rooms.join(" "), drawn_rooms.join(" "))

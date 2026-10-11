@@ -13,12 +13,12 @@ use crate::grenade::Grenade;
 use crate::impact::Surface;
 use crate::net::link::MAX_PACKET;
 use crate::sim::characters::REACTION_MOTIONS;
-use crate::sim::{Event, Input, MAX_PLAYERS, Sim, Throw};
+use crate::sim::{Cause, Event, Input, MAX_PLAYERS, Sim, Throw};
 
 type V3 = [f32; 3];
 
 /// Bumped whenever the messages change, so that a client and server that disagree notice
-pub const PROTOCOL: u8 = 3;
+pub const PROTOCOL: u8 = 4;
 
 const MAGIC: u16 = 0x5252;
 
@@ -359,6 +359,12 @@ fn write_event(w: &mut Writer, e: &Event) -> bool {
             w.f32(*shake);
             w.f32(*veil);
         }
+        Event::Kill { killer, victim, cause } => {
+            w.u8(6);
+            w.u8(killer.map_or(255, |k| k as u8));
+            w.u8(*victim as u8);
+            w.u8(match cause { Cause::Shot => 0, Cause::HeadShot => 1, Cause::Grenade => 2 });
+        }
     }
     true
 }
@@ -374,6 +380,11 @@ fn read_event(r: &mut Reader) -> Result<Event> {
         3 => Event::Glass { pane: r.u16()? as usize, at: r.v3()?, dir: r.v3()?, seed: r.u64()? },
         4 => Event::Blast { point: r.v3()?, normal: r.v3()?, surface: surface_from(r.u8()?)?, on_surface: r.bool()?, seed: r.u64()? },
         5 => Event::PlayerBlast { player: r.u8()? as usize, shake: r.f32()?, veil: r.f32()? },
+        6 => Event::Kill {
+            killer: Some(r.u8()?).filter(|&k| k != 255).map(|k| k as usize),
+            victim: r.u8()? as usize,
+            cause: match r.u8()? { 0 => Cause::Shot, 1 => Cause::HeadShot, 2 => Cause::Grenade, c => bail!("no such cause of death as {c}") },
+        },
         t => bail!("no such event as {t}"),
     })
 }
@@ -931,6 +942,8 @@ mod tests {
                 (13, Event::Glass { pane: 4, at: [1.0; 3], dir: [0.0, 0.0, 1.0], seed: 5 }),
                 (14, Event::Blast { point: [1.0; 3], normal: [0.0, 1.0, 0.0], surface: Surface::Glass, on_surface: false, seed: 6 }),
                 (15, Event::PlayerBlast { player: 1, shake: 0.5, veil: 0.25 }),
+                (16, Event::Kill { killer: Some(0), victim: 1, cause: Cause::HeadShot }),
+                (17, Event::Kill { killer: None, victim: 1, cause: Cause::Grenade }),
             ],
         }
     }
@@ -951,12 +964,12 @@ mod tests {
         }
         let mut snap = snapshot();
         let (bytes, sent) = ToClient::Snapshot(snap.clone()).encode();
-        assert_eq!(sent, 6);
+        assert_eq!(sent, 8);
         assert_eq!(ToClient::decode(&bytes).unwrap(), ToClient::Snapshot(snap.clone()));
         // The server's own log is not sent, and does not count against what was not
         snap.events.insert(1, (99, Event::Log("t=1.00 door opening".to_string())));
         let (bytes, sent) = ToClient::Snapshot(snap.clone()).encode();
-        assert_eq!(sent, 7);
+        assert_eq!(sent, 9);
         snap.events.remove(1);
         assert_eq!(ToClient::decode(&bytes).unwrap(), ToClient::Snapshot(snap));
         for m in [

@@ -352,6 +352,11 @@ fn a_player_shot_dead_is_dead_for_everyone_and_comes_back_where_the_server_says(
         assert!(seen.respawn_at.is_some() && seen.hp == 0.0, "peer {peer}: {:?} {}", seen.respawn_at, seen.hp);
     }
     assert!(distance(game.me(target), game.server_pos(b)) < 1.0);
+    // And everyone was told who killed whom
+    for peer in [shooter, target] {
+        let told = game.peers[peer].events.iter().filter(|e| matches!(e, Event::Kill { killer: Some(k), victim, .. } if (*k, *victim) == (a, b))).count();
+        assert_eq!(told, 1, "peer {peer}");
+    }
     game.run(sim::RESPAWN_SECONDS + 1.0);
     let server = &game.server.sim.players[b];
     assert!(server.respawn_at.is_none() && server.hp == sim::PLAYER_HP);

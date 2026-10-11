@@ -122,6 +122,14 @@ impl Input {
     }
 }
 
+/// What killed a player
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Cause {
+    Shot,
+    HeadShot,
+    Grenade,
+}
+
 /// Something that happened in a tick
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
@@ -139,6 +147,8 @@ pub enum Event {
     Blast { point: V3, normal: V3, surface: Surface, on_surface: bool, seed: u64 },
     /// What a blast did to a player: how hard it shook them, and how white it made their view
     PlayerBlast { player: usize, shake: f32, veil: f32 },
+    /// A player died: who killed them (none if they did it to themselves) and how
+    Kill { killer: Option<usize>, victim: usize, cause: Cause },
 }
 
 /// FNV-1a, a simple hash that gives the same answer on every machine
@@ -868,7 +878,7 @@ impl Sim {
         let hit_player = hit_player.filter(|h| wall.is_none_or(|w| h.1 <= w) && best.as_ref().is_none_or(|(_, b)| h.1 < b.distance));
         if let Some((victim, dist, part)) = hit_player {
             let point = [eye[0] + dir[0] * dist, eye[1] + dir[1] * dist, eye[2] + dir[2] * dist];
-            self.hurt_player(victim, Some(slot), combat::damage(part), point, if part == combat::BodyPart::Head { "HEAD SHOT KILL" } else { "KILLED" }, ev);
+            self.hurt_player(victim, Some(slot), combat::damage(part), point, if part == combat::BodyPart::Head { Cause::HeadShot } else { Cause::Shot }, ev);
             ev.push(Event::Shot { player: slot, start, end: point, hit_character: true });
             return;
         }
@@ -1023,7 +1033,7 @@ impl Sim {
                 if strength < 0.02 || !(grenade::clear_between(&self.world, c, chest) || grenade::clear_between(&self.world, c, head)) {
                     continue;
                 }
-                self.hurt_player(i, Some(owner), PLAYER_HP * strength, chest, "GRENADE KILL", ev);
+                self.hurt_player(i, Some(owner), PLAYER_HP * strength, chest, Cause::Grenade, ev);
             }
         }
 
@@ -1105,8 +1115,8 @@ impl Sim {
     }
 
     /// Take health from a player. If it is all of it they die, and `attacker` (who is not the
-    /// victim) is credited, with `kill_text` on their screen.
-    fn hurt_player(&mut self, victim: usize, attacker: Option<usize>, amount: f32, at: V3, kill_text: &str, ev: &mut Vec<Event>) {
+    /// victim) is credited, with the kill on their screen.
+    fn hurt_player(&mut self, victim: usize, attacker: Option<usize>, amount: f32, at: V3, cause: Cause, ev: &mut Vec<Event>) {
         let now = self.time;
         let p = &mut self.players[victim];
         if p.respawn_at.is_some() {
@@ -1139,12 +1149,18 @@ impl Sim {
         match attacker.filter(|&a| a != victim) {
             Some(a) => {
                 self.players[a].kills += 1;
-                self.announce(a, kill_text, 1.2);
+                let text = match cause {
+                    Cause::HeadShot => "HEAD SHOT KILL",
+                    Cause::Shot => "KILLED",
+                    Cause::Grenade => "GRENADE KILL",
+                };
+                self.announce(a, text, 1.2);
                 self.announce(victim, &format!("KILLED BY PLAYER {}", a + 1), RESPAWN_SECONDS);
             }
             None => self.announce(victim, "YOU KILLED YOURSELF", RESPAWN_SECONDS),
         }
         ev.push(Event::Log(format!("t={now:.2} player {victim} died")));
+        ev.push(Event::Kill { killer: attacker.filter(|&a| a != victim), victim, cause });
     }
 
     /// A dead player comes back at the spawn point farthest from the players still standing, with
@@ -1400,7 +1416,8 @@ mod tests {
     fn a_bullet_hurts_the_player_it_hits_by_where_it_hits() {
         // Level with the eyes is the head, and a head shot kills
         let mut sim = duel();
-        sim.tick(&[aim(0.0), holding()], TICK);
+        let events = sim.tick(&[aim(0.0), holding()], TICK);
+        assert!(events.contains(&Event::Kill { killer: Some(0), victim: 1, cause: Cause::HeadShot }));
         assert_eq!(sim.players[1].hp, 0.0);
         assert!(sim.players[1].respawn_at.is_some());
         assert_eq!((sim.players[0].kills, sim.players[1].deaths), (1, 1));
@@ -1476,6 +1493,8 @@ mod tests {
         assert!(events.iter().any(|e| matches!(e, Event::Blast { .. })));
         assert_eq!(sim.players[1].hp, 0.0);
         assert_eq!(sim.players[0].kills, 1);
+        assert!(events.contains(&Event::Kill { killer: Some(0), victim: 1, cause: Cause::Grenade }));
+        assert!(events.contains(&Event::Kill { killer: None, victim: 0, cause: Cause::Grenade }));
         // So close that the thrower is caught too: that is a death, but not a kill
         assert_eq!((sim.players[0].kills, sim.players[0].deaths), (1, 1));
     }

@@ -2,10 +2,10 @@
 
 use crate::opengl::*;
 
-// Heads-up display: crosshair at the center, status lines bottom-left and a
-// message under the crosshair. Leaves the 2D projection set; the debug text
-// that follows re-enables depth testing.
-pub fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_marker: bool, veil: f32) {
+// Heads-up display: crosshair at the center, status lines bottom-left, the latest kills top-left
+// (each with its color) and a message under the crosshair. A dead player's view is tinted red.
+// Leaves the 2D projection set; the debug text that follows re-enables depth testing.
+pub fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_marker: bool, veil: f32, feed: &[(String, [f32; 3])], dead: bool) {
     unsafe {
         glMatrixMode(0x1701); // GL_PROJECTION
         glLoadIdentity();
@@ -20,6 +20,18 @@ pub fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_ma
             glEnable(0x0BE2); // GL_BLEND
             glBlendFunc(0x0302, 0x0303);
             glColor4f(1.0, 0.97, 0.92, veil.min(1.0) * 0.9);
+            glBegin(0x0007); // GL_QUADS
+            for (x, y) in [(0.0, 0.0), (win_w as f32, 0.0), (win_w as f32, win_h as f32), (0.0, win_h as f32)] {
+                glVertex3f(x, y, 0.0);
+            }
+            glEnd();
+            glDisable(0x0BE2);
+        }
+
+        if dead {
+            glEnable(0x0BE2); // GL_BLEND
+            glBlendFunc(0x0302, 0x0303);
+            glColor4f(0.45, 0.0, 0.0, 0.4);
             glBegin(0x0007); // GL_QUADS
             for (x, y) in [(0.0, 0.0), (win_w as f32, 0.0), (win_w as f32, win_h as f32), (0.0, win_h as f32)] {
                 glVertex3f(x, y, 0.0);
@@ -44,6 +56,14 @@ pub fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_ma
             let mut x = 12.0;
             for ch in line.chars() {
                 draw_glyph(ch, x, 12.0 + i as f32 * scale * 1.5, scale);
+                x += adv;
+            }
+        }
+        for (i, (line, color)) in feed.iter().enumerate() {
+            glColor3f(color[0], color[1], color[2]);
+            let mut x = 12.0;
+            for ch in line.chars() {
+                draw_glyph(ch, x, win_h as f32 - 24.0 - i as f32 * scale * 1.5, scale);
                 x += adv;
             }
         }
