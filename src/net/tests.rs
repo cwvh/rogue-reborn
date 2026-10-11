@@ -1,7 +1,7 @@
 //! The server and its clients, run against each other on a pretend network and a pretend clock.
 
 use crate::net::client::{Client, Status};
-use crate::net::link::{Conditions, FakeLink, FakeNet, Link};
+use crate::net::link::{Conditions, FakeLink, FakeNet};
 use crate::net::proto::Setup;
 use crate::net::server::Server;
 use crate::net::setup::build_sim;

@@ -153,6 +153,12 @@ pub fn spawns(npcs: usize) -> Vec<[f32; 3]> {
     points
 }
 
+/// Where up to `MAX_PLAYERS` players start, side by side near the south wall
+pub fn player_spawns(count: usize) -> Vec<[f32; 3]> {
+    let count = count.clamp(1, crate::sim::MAX_PLAYERS);
+    (0..count).map(|i| [(i as f32 - (count as f32 - 1.0) / 2.0) * 90.0, 0.0, -DEPTH / 2.0 + 150.0]).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
