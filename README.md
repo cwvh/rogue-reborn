@@ -99,7 +99,7 @@ On other platforms, or without the aliases:
 | `--viewmodel` | draw the gun in front of the camera (the original didn't) |
 | `--screenshot FILE` | render a few frames, save a PNG and exit |
 
-The client, `src/main.rs`, has many more (animation, camera and weapon tweaks).
+The client has many more, listed in `src/args.rs` (animation, camera and weapon tweaks).
 
 ## Other tools
 
