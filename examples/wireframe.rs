@@ -4,7 +4,7 @@ use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 use rogue_reborn::{map, rsb};
 use rogue_reborn::collision::{CollisionWorld, Params, Player};
-use rogue_reborn::{actor, combat, crp, motion, skeleton, sound, tga, weapon};
+use rogue_reborn::{actor, combat, crp, grenade, motion, skeleton, sound, tga, weapon};
 use rogue_reborn::ambience;
 use rogue_reborn::glass;
 use rogue_reborn::impact::{self, Surface};
@@ -301,6 +301,8 @@ enum Movement {
     /// Standing and shooting, or reloading, with the weapon
     Fire,
     Reload,
+    /// Throwing a grenade
+    Throw,
 }
 
 struct PlayerMotions {
@@ -312,6 +314,7 @@ struct PlayerMotions {
     right: Option<motion::Motion>,
     fire: Option<motion::Motion>,
     reload: Option<motion::Motion>,
+    throw: Option<motion::Motion>,
 }
 
 impl PlayerMotions {
@@ -325,11 +328,49 @@ impl PlayerMotions {
             Movement::StrafeRight => &self.right,
             Movement::Fire => &self.fire,
             Movement::Reload => &self.reload,
+            Movement::Throw => &self.throw,
         }.as_ref()
     }
 }
 
 const RELOAD_SECONDS: f32 = 2.2;
+
+/// A grenade throw: from the start of the swing to the end, and how far into it the grenade
+/// leaves the hand (0..1)
+const THROW_SECONDS: f32 = 0.85;
+const THROW_RELEASE: f32 = 0.35;
+/// Soot marks a blast can leave
+const SCORCH_VARIANTS: usize = 4;
+
+/// A throw under way
+#[derive(Clone, Copy)]
+struct Throw {
+    start: f32,
+    /// How long the throw was held for before letting go (0..1)
+    charge: f32,
+    /// Whether the grenade has left the hand
+    thrown: bool,
+}
+
+fn next_rng(r: &mut u64) -> u64 {
+    *r ^= *r << 13;
+    *r ^= *r >> 7;
+    *r ^= *r << 17;
+    *r
+}
+
+fn dist3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+fn mul3(a: [f32; 3], s: f32) -> [f32; 3] {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+
+fn unit3(a: [f32; 3]) -> [f32; 3] {
+    let l = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt().max(1e-6);
+    [a[0] / l, a[1] / l, a[2] / l]
+}
 
 // Bones driven by the weapon hold rather than the locomotion cycle
 fn is_upper_body(name: &str) -> bool {
@@ -344,7 +385,7 @@ fn is_upper_body(name: &str) -> bool {
 // slip is left.
 fn nominal_speed(m: Movement) -> f32 {
     match m {
-        Movement::Idle | Movement::Fire | Movement::Reload => 1.0,
+        Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw => 1.0,
         Movement::Walk => 257.0,
         Movement::Run => 440.0,
         Movement::Back => 126.0,
@@ -592,6 +633,7 @@ fn main() {
         right: slot_motion("right", "tms_r2"),
         fire: slot_motion("fire", "fire_up_mp5k"),
         reload: slot_motion("reload", "twru_s9"),
+        throw: slot_motion("throw", "gr_ov_up"),
     };
 
     // Motions other characters play: idle (or --anim), injury reactions and deaths
@@ -606,8 +648,8 @@ fn main() {
 
     // The MP5K: definition, model and texture
     let weapon_def = weapon::read(Path::new("data/kit/pw_mp5k.wpn")).ok();
-    let weapon_draw = weapon_def.as_ref().and_then(|w| {
-        let model = map::read_model(&Path::new("data/model").join(&w.model)).ok()?;
+    let load_model_draw = |file: &str, muzzle: [f32; 3]| -> Option<WeaponDraw> {
+        let model = map::read_model(&Path::new("data/model").join(file)).ok()?;
         let mut verts = Vec::new();
         let mut uvs = Vec::new();
         for object in &model.geometries.objects {
@@ -630,7 +672,7 @@ fn main() {
         let texture = find_file(Path::new("data/texture"), &stem, "rsb")
             .and_then(|p| rsb::read(&p).ok())
             .and_then(|t| upload_rsb_to_gl(&t));
-        println!("loaded weapon {} ({} triangles, texture {})", w.model, verts.len() / 3, if texture.is_some() { "ok" } else { "missing" });
+        println!("loaded {} ({} triangles, texture {})", file, verts.len() / 3, if texture.is_some() { "ok" } else { "missing" });
         let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
         for v in &verts {
             for a in 0..3 {
@@ -640,8 +682,11 @@ fn main() {
         }
         let center = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
         let length = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f32::max).max(1.0);
-        Some(WeaponDraw { verts, uvs, texture, muzzle: w.muzzle, center, length })
-    });
+        Some(WeaponDraw { verts, uvs, texture, muzzle, center, length })
+    };
+    let weapon_draw = weapon_def.as_ref().and_then(|w| load_model_draw(&w.model, w.muzzle));
+    // The grenade in the hand (the original's grenade.qob is a flat inventory picture)
+    let grenade_draw = load_model_draw("rsw_smokegrenade.qob", [0.0; 3]);
 
     // Bullet holes: the game own sprites, or with --realistic-decals pictures drawn for each surface
     const HOLE_VARIANTS: usize = 6;
@@ -676,6 +721,17 @@ fn main() {
         impact::key_alpha(&mut px, t.width as usize, t.height as usize);
         upload_rgba_to_gl(t.width as u32, t.height as u32, &px)
     });
+    // A blast: its flash, its smoke, the ring of its shockwave, and the soot it leaves
+    let sprite = |stem: &str| find_file(Path::new("data/texture"), stem, "rsb").and_then(|p| rsb::read(&p).ok()).and_then(|t| upload_rsb_to_gl(&t));
+    let glare_tex = sprite("TGAgrenade_explosion_1");
+    let smoke_tex = sprite("TGAgrenade_blast_03");
+    let ring_tex = sprite("TGAgrenade_smoke_ring_1");
+    for v in 0..SCORCH_VARIANTS {
+        let px = impact::hole_texture(Surface::Scorch, 0x5C0 + v as u64 * 3571);
+        if let Some(id) = upload_rgba_to_gl(impact::TEXTURE_SIZE as u32, impact::TEXTURE_SIZE as u32, &px) {
+            hole_tex.insert((Surface::Scorch, v), id);
+        }
+    }
     let mut decals: Vec<impact::Decal> = Vec::new();
     let mut effects = impact::Effects::default();
     const MAX_DECALS: usize = 300;
@@ -867,6 +923,15 @@ fn main() {
     let mut message = (String::new(), 0.0f32);
     let mut target_hp: Option<f32> = None;
     let mut flash_until = 0.0f32;
+    // Grenades: key 3 takes one out, hold the trigger to wind up and let go to throw
+    let mut equipped_grenade = false;
+    let mut grenades_left = 3u32;
+    let mut charge_from: Option<f32> = None;
+    let mut throw: Option<Throw> = None;
+    let mut thrown: Vec<grenade::Grenade> = Vec::new();
+    // A blast leaves the player shaken (the view), dazzled (a white veil) and deafened (muffled sound)
+    let (mut shake, mut veil, mut deaf) = (0.0f32, 0.0f32, 0.0f32);
+    let master_volume = args.volume.unwrap_or(1.0).clamp(0.0, 1.0);
     // Last shot: start, end, whether it struck a character, and when it fades
     let mut tracer: Option<([f32; 3], [f32; 3], bool, f32)> = None;
     let mut rng = args.seed.unwrap_or(0x5eed) | 1;
@@ -929,9 +994,24 @@ fn main() {
                         (Key::F, Action::Press) => {
                             third_person = !third_person;
                         }
+                        (Key::Num1, Action::Press) => {
+                            // Back to the gun
+                            if throw.is_none() {
+                                equipped_grenade = false;
+                                charge_from = None;
+                            }
+                        }
+                        (Key::Num3, Action::Press) => {
+                            if first_person && throw.is_none() && reload_until.is_none() {
+                                equipped_grenade = true;
+                                if grenades_left == 0 {
+                                    message = ("NO GRENADES".to_string(), game_time + 1.0);
+                                }
+                            }
+                        }
                         (Key::R, Action::Press) => {
                             // Reload: takes time, then fills the magazine from the reserve
-                            if first_person && reload_until.is_none() && ammo < mag_size && reserve > 0 {
+                            if first_person && !equipped_grenade && reload_until.is_none() && ammo < mag_size && reserve > 0 {
                                 reload_until = Some(game_time + RELOAD_SECONDS);
                             }
                         }
@@ -994,6 +1074,11 @@ fn main() {
             // --hold picks the keys to press: W A S D, and R for walk (right mouse button)
             let held = args.hold.as_deref().unwrap_or("W").to_ascii_uppercase();
             trigger = frames_drawn < n && held.contains('F');
+            // T takes out a grenade and throws it after holding for half a second
+            if held.contains('T') {
+                equipped_grenade = true;
+                trigger = frames_drawn < 30;
+            }
             // U presses the use key (Space) on frame 5, to open or close the door in front
             if held.contains('U') && frames_drawn == 5 {
                 use_pressed = true;
@@ -1012,6 +1097,9 @@ fn main() {
                     player.pos[0], player.pos[1], player.pos[2], player.on_ground);
             }
         }
+
+        // The trigger fires the gun, unless a grenade is out
+        let gun_trigger = trigger && !equipped_grenade;
 
         // WASD movement (free-fly: hold LeftShift to move faster)
         let mut speed = base_speed;
@@ -1154,9 +1242,11 @@ fn main() {
             let walking = wanted != Movement::Idle && moved >= 5.0;
             let now = if walking {
                 wanted
+            } else if throw.is_some() {
+                Movement::Throw
             } else if reload_until.is_some() {
                 Movement::Reload
-            } else if trigger && ammo > 0 {
+            } else if gun_trigger && ammo > 0 {
                 Movement::Fire
             } else {
                 Movement::Idle
@@ -1165,11 +1255,13 @@ fn main() {
                 movement = now;
                 player_frame = 0.0;
             }
-            let rate = if matches!(movement, Movement::Idle | Movement::Fire | Movement::Reload) { 1.0 } else { (moved / (ground_speed(movement) * args.speed_scale.unwrap_or(1.0))).clamp(0.5, 3.0) * args.anim_scale.unwrap_or(1.5) };
+            let rate = if matches!(movement, Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw) { 1.0 } else { (moved / (ground_speed(movement) * args.speed_scale.unwrap_or(1.0))).clamp(0.5, 3.0) * args.anim_scale.unwrap_or(1.5) };
             let frames = player_motions.get(movement).map_or(1, |m| m.frames.max(1)) as f32;
             player_frame = if let (Movement::Reload, Some(t)) = (movement, reload_until) {
                 // Spread the reload animation across the whole reload time
                 (1.0 - (t - game_time) / RELOAD_SECONDS).clamp(0.0, 1.0) * (frames - 1.0)
+            } else if let (Movement::Throw, Some(th)) = (movement, throw) {
+                ((game_time - th.start) / THROW_SECONDS).clamp(0.0, 1.0) * (frames - 1.0)
             } else {
                 (player_frame + rate * 30.0 * dt) % frames
             };
@@ -1189,11 +1281,59 @@ fn main() {
                 -player.pos[2],
             ];
 
+            // A grenade: hold the trigger to wind up, let go to throw. The swing plays for a
+            // moment (in third person you see it), and the grenade leaves the hand part of the way in.
+            if equipped_grenade {
+                let mut finished = false;
+                match throw.as_mut() {
+                    None => {
+                        if trigger && grenades_left > 0 {
+                            charge_from.get_or_insert(game_time);
+                        } else if let Some(from) = charge_from.take() {
+                            let charge = ((game_time - from) / grenade::CHARGE_SECONDS).clamp(0.0, 1.0);
+                            throw = Some(Throw { start: game_time, charge, thrown: false });
+                        } else if trigger && grenades_left == 0 && game_time >= message.1 {
+                            message = ("NO GRENADES".to_string(), game_time + 0.8);
+                        }
+                    }
+                    Some(th) => {
+                        let progress = (game_time - th.start) / THROW_SECONDS;
+                        if !th.thrown && progress >= THROW_RELEASE {
+                            th.thrown = true;
+                            grenades_left -= 1;
+                            let eye = [player.pos[0], player.pos[1] + eye_height, player.pos[2]];
+                            let f = camera.get_forward();
+                            // Thrown a little upward, as a lob
+                            let aim = unit3([f[0], f[1] + 0.14, -f[2]]);
+                            let side = listener_of(&camera).right;
+                            let want = [eye[0] + aim[0] * 28.0 + side[0] * 10.0, eye[1] + aim[1] * 28.0 - 12.0, eye[2] + aim[2] * 28.0 + side[2] * 10.0];
+                            // Not through a wall that is right in front of the player
+                            let to = unit3([want[0] - eye[0], want[1] - eye[1], want[2] - eye[2]]);
+                            let reach = dist3(eye, want);
+                            let from = match world.raycast(eye, to, reach + grenade::RADIUS) {
+                                Some(d) => { let d = (d - grenade::RADIUS - 1.0).max(0.0); [eye[0] + to[0] * d, eye[1] + to[1] * d, eye[2] + to[2] * d] }
+                                None => want,
+                            };
+                            thrown.push(grenade::Grenade::thrown(from, aim, th.charge, [0.0; 3]));
+                            println!("t={game_time:.2} threw a grenade at {:.0}% power", th.charge * 100.0);
+                        }
+                        finished = progress >= 1.0;
+                    }
+                }
+                if finished {
+                    throw = None;
+                    if grenades_left == 0 {
+                        equipped_grenade = false;
+                        message = ("OUT OF GRENADES".to_string(), game_time + 1.2);
+                    }
+                }
+            }
+
             // Shooting: a ray from the eye along the view, stopped by walls
-            if trigger && reload_until.is_none() && ammo == 0 && reserve > 0 {
+            if gun_trigger && reload_until.is_none() && ammo == 0 && reserve > 0 {
                 reload_until = Some(game_time + RELOAD_SECONDS);
             }
-            if trigger && reload_until.is_none() && ammo > 0 && game_time >= next_shot {
+            if gun_trigger && reload_until.is_none() && ammo > 0 && game_time >= next_shot {
                 ammo -= 1;
                 next_shot = game_time + 60.0 / 800.0; // the MP5K fires about 800 rounds a minute
                 flash_until = game_time + 0.05;
@@ -1316,6 +1456,154 @@ fn main() {
             camera.position[2] += mv[1] * step_dt * 60.0;
         }
 
+        // Grenades in the air: they bounce off the level and go off when the fuse runs out
+        shake = (shake - 1.4 * step_dt).max(0.0);
+        veil = (veil - 1.6 * step_dt).max(0.0);
+        deaf = (deaf - 0.2 * step_dt).max(0.0);
+        if let Some(snd) = sound.as_mut() {
+            snd.master = master_volume * (1.0 - 0.85 * deaf.min(1.0));
+        }
+        let mut blasts: Vec<[f32; 3]> = Vec::new();
+        for g in thrown.iter_mut() {
+            for b in g.update(step_dt, &world) {
+                // Glass: it goes through, shattering the pane, slowed and knocked off line
+                let heading = unit3(b.incoming);
+                let behind = [b.point[0] - heading[0] * 20.0, b.point[1] - heading[1] * 20.0, b.point[2] - heading[2] * 20.0];
+                let pane = panes.iter().enumerate()
+                    .filter(|(i, _)| broken_at[*i].is_none())
+                    .filter_map(|(i, p)| p.raycast(behind, heading).filter(|d| *d < 45.0).map(|d| (i, d)))
+                    .min_by(|a, c| a.1.total_cmp(&c.1));
+                if let Some((gi, _)) = pane {
+                    broken_at[gi] = Some(game_time);
+                    world.switch_off(&panes[gi].name);
+                    next_rng(&mut rng);
+                    fractures.push(glass::shatter(&panes[gi], b.point, heading, rng));
+                    let wobble = |bits: u64| ((bits & 0xFFFF) as f32 / 32768.0 - 1.0) * 0.18;
+                    let (sx, sy, sz) = (wobble(rng >> 8), wobble(rng >> 24), wobble(rng >> 40));
+                    let speed = (b.incoming[0].powi(2) + b.incoming[1].powi(2) + b.incoming[2].powi(2)).sqrt() * 0.6;
+                    g.vel = mul3(unit3([heading[0] + sx, heading[1] + sy, heading[2] + sz]), speed);
+                    g.pos = [b.point[0] + heading[0] * 12.0, b.point[1] + heading[1] * 12.0, b.point[2] + heading[2] * 12.0];
+                    g.at_rest = false;
+                    if let Some(snd) = sound.as_mut() {
+                        snd.play_at("C_GBRKMD.WAV", b.point, listener_of(&camera), 1.0);
+                    }
+                    continue;
+                }
+                if let Some(snd) = sound.as_mut() {
+                    let surface = b.material.and_then(|m| level.materials.materials.get(m)).map_or(Surface::Concrete, |m| Surface::classify(&m.filename));
+                    let name = match surface {
+                        Surface::Metal => "C_GRMET.WAV",
+                        Surface::Wood => "C_GRWOD.WAV",
+                        Surface::Earth | Surface::Soft => "C_GREAR.WAV",
+                        _ => "C_GRCON.WAV",
+                    };
+                    snd.play_at(name, b.point, listener_of(&camera), (b.speed / 500.0).clamp(0.25, 1.0));
+                }
+            }
+            if g.goes_off() {
+                blasts.push(g.pos);
+            }
+        }
+        thrown.retain(|g| !g.goes_off());
+        for c in blasts {
+            // The surface it went off against, the nearest of the six directions
+            let mut near: Option<(f32, [f32; 3], [f32; 3], Option<usize>)> = None;
+            for d in [[0.0, -1.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0]] {
+                if let Some(h) = world.raycast_hit(c, d, 80.0) {
+                    if near.is_none_or(|n| h.dist < n.0) {
+                        near = Some((h.dist, [c[0] + d[0] * h.dist, c[1] + d[1] * h.dist, c[2] + d[2] * h.dist], h.normal, h.material));
+                    }
+                }
+            }
+            let (point, normal, material) = near.map_or((c, [0.0, 1.0, 0.0], None), |n| (n.1, n.2, n.3));
+            let surface = material.and_then(|m| level.materials.materials.get(m)).map_or(Surface::Concrete, |m| Surface::classify(&m.filename));
+            next_rng(&mut rng);
+            // In mid-air (nothing within a metre) there is no ground to scorch or throw dust along
+            let on_surface = near.is_some_and(|n| n.0 < 100.0);
+            effects.explosion(point, normal, rng, on_surface);
+            if on_surface && surface != Surface::Glass {
+                let roll = ((rng >> 20) & 0xFFFF) as f32 / 65536.0;
+                decals.push(impact::Decal::scorch(point, normal, 100.0 + (rng >> 50) as f32 % 40.0, (rng >> 33) as usize % SCORCH_VARIANTS, roll));
+                if decals.len() > MAX_DECALS {
+                    decals.remove(0);
+                }
+            }
+            println!("t={game_time:.2} grenade went off at ({:.0}, {:.0}, {:.0}) on {surface:?}", c[0], c[1], c[2]);
+            if let Some(snd) = sound.as_mut() {
+                snd.play_at("C_GRFRAG.WAV", c, listener_of(&camera), 1.0);
+            }
+
+            // Characters: killed close in, hurt further out, and shielded by walls
+            for i in 0..model_spots.len() {
+                if model_spots[i].health.is_dead() {
+                    continue;
+                }
+                let place = placement(&model_spots[i]);
+                let chest = [place.pos[0], place.pos[1] + 100.0, place.pos[2]];
+                let head = [place.pos[0], place.pos[1] + 160.0, place.pos[2]];
+                let strength = grenade::blast_strength(dist3(c, chest));
+                if strength < 0.02 || !(grenade::clear_between(&world, c, chest) || grenade::clear_between(&world, c, head)) {
+                    continue;
+                }
+                let from = place.facing_of_shot(unit3([chest[0] - c[0], chest[1] - c[1], chest[2] - c[2]]));
+                next_rng(&mut rng);
+                let result = model_spots[i].health.apply_blast(100.0 * strength, from, game_time, (rng >> 33) as u32);
+                target_hp = Some(model_spots[i].health.hp);
+                println!("t={game_time:.2} grenade hit character {i} at {:.0} units: {result:?}, hp now {}", dist3(c, chest), model_spots[i].health.hp);
+                if matches!(result, combat::HitResult::Killed) {
+                    kills += 1;
+                    message = ("GRENADE KILL".to_string(), game_time + 1.2);
+                }
+                if let Some(snd) = sound.as_mut() {
+                    let (name, n) = if matches!(result, combat::HitResult::Killed) { ("re_ded", 2) } else { ("re_wnd", 3) };
+                    snd.play_at(&format!("English/{name}{}.wav", 1 + (rng >> 40) as u32 % n), model_spots[i].pos, listener_of(&camera), 1.0);
+                }
+            }
+
+            // Glass in reach breaks, the nearest panes first
+            let mut panes_near: Vec<(usize, f32)> = panes.iter().enumerate()
+                .filter(|(i, _)| broken_at[*i].is_none())
+                .map(|(i, p)| (i, p.distance_to(c)))
+                .filter(|(_, d)| *d <= grenade::GLASS_REACH)
+                .collect();
+            panes_near.sort_by(|a, b| a.1.total_cmp(&b.1));
+            let mut heard = 0;
+            for (gi, _) in panes_near {
+                let at = panes[gi].center();
+                if !grenade::clear_between(&world, c, at) {
+                    continue;
+                }
+                broken_at[gi] = Some(game_time);
+                world.switch_off(&panes[gi].name);
+                next_rng(&mut rng);
+                fractures.push(glass::shatter(&panes[gi], at, unit3([at[0] - c[0], at[1] - c[1], at[2] - c[2]]), rng));
+                if heard < 3 {
+                    heard += 1;
+                    if let Some(snd) = sound.as_mut() {
+                        snd.play_at("C_GBRKMD.WAV", at, listener_of(&camera), 1.0);
+                    }
+                }
+            }
+
+            // The player: shaken, dazzled and deafened more the nearer, and less behind a wall
+            if first_person {
+                let eye = [player.pos[0], player.pos[1] + eye_height, player.pos[2]];
+                let d = dist3(c, eye);
+                let open = grenade::clear_between(&world, c, eye);
+                let s = grenade::shake(d, open);
+                shake = shake.max(s);
+                if open {
+                    veil = veil.max(((900.0 - d) / 900.0).clamp(0.0, 1.0));
+                }
+                if s > 0.1 {
+                    deaf = deaf.max(s.min(1.0));
+                    if let Some(snd) = sound.as_mut() {
+                        snd.ring(3.5 * s.min(1.0) + 1.0, 0.2 * s.min(1.0));
+                    }
+                }
+            }
+        }
+
         // Reload sound when a reload starts (by key or running dry)
         if reload_until.is_some() && !was_reloading {
             if let Some(snd) = sound.as_mut() {
@@ -1326,7 +1614,7 @@ fn main() {
 
         // Full auto: the firing sound runs while the trigger is held with rounds to fire,
         // then stops with a closing crack
-        let firing = first_person && trigger && reload_until.is_none() && ammo > 0;
+        let firing = first_person && gun_trigger && reload_until.is_none() && ammo > 0;
         if let Some(snd) = sound.as_mut() {
             if firing && firing_sound.is_none() {
                 firing_sound = snd.play_loop("C_SB5KB.WAV", 1.0);
@@ -1412,6 +1700,14 @@ fn main() {
 
             glMatrixMode(0x1700); // GL_MODELVIEW
             glLoadIdentity();
+            // A blast shakes the view: a quick tremble that dies away
+            if shake > 0.002 {
+                let t = game_time;
+                let s = shake.min(1.0);
+                glRotatef(5.0 * s * (t * 47.0).sin(), 0.0, 0.0, 1.0);
+                glTranslatef(9.0 * s * (t * 61.0 + 1.0).sin(), 7.0 * s * (t * 53.0 + 2.0).sin(), 0.0);
+                glRotatef(2.5 * s * (t * 39.0 + 3.0).sin(), 1.0, 0.0, 0.0);
+            }
             // Third person: pull the view back behind and above the player's eyes
             let view = if first_person && third_person {
                 // Orbit the view around the player to see them from the side
@@ -1627,17 +1923,35 @@ fn main() {
                     glScalef(scale[0], scale[1], scale[2]);
                     draw_character(c, &verts, &part_textures, face, textured);
 
-                    // The MP5K in the right hand
-                    if let (Some(wd), Some((hand, off))) = (&weapon_draw, &weapon_attach) {
+                    // The MP5K in the right hand, or a grenade until it is thrown
+                    let in_hand = if equipped_grenade { throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
+                    if let (Some(Some(wd)), Some((hand, off))) = (in_hand, &weapon_attach) {
                         glPushMatrix();
                         glMultMatrixf(pose[*hand].matrix().as_ptr());
                         glMultMatrixf(off.matrix().as_ptr());
-                        draw_weapon(wd, textured, game_time < flash_until);
+                        if equipped_grenade {
+                            glTranslatef(-wd.center[0], -wd.center[1], -wd.center[2]);
+                        }
+                        draw_weapon(wd, textured, !equipped_grenade && game_time < flash_until);
                         glPopMatrix();
                     }
                     glPopMatrix();
                     glColor4f(1.0, 1.0, 1.0, 1.0);
                 }
+            }
+
+            // Grenades in the air
+            if let Some(gd) = &grenade_draw {
+                for g in &thrown {
+                    glPushMatrix();
+                    glTranslatef(g.pos[0], g.pos[1], g.pos[2]);
+                    glRotatef(g.spin, 1.0, 0.3, 0.0);
+                    // Model space (forward -Y, up +Z) turned so its length runs the way it spins
+                    glTranslatef(-gd.center[0], -gd.center[1], -gd.center[2]);
+                    draw_weapon(gd, textured, false);
+                    glPopMatrix();
+                }
+                glColor4f(1.0, 1.0, 1.0, 1.0);
             }
 
             // Bullet holes on the walls, then the debris thrown from them
@@ -1671,22 +1985,43 @@ fn main() {
                 glDepthMask(0);
                 // Soft clouds and the flash of a spark, as sprites facing the camera
                 for puff in &effects.puffs {
-                    let (tex, additive) = match puff.kind {
-                        impact::PuffKind::Dust => (cloud_tex, false),
-                        impact::PuffKind::Flash => (flash_tex, true),
+                    let (tex, additive, strength) = match puff.kind {
+                        impact::PuffKind::Dust => (cloud_tex, false, 0.55),
+                        impact::PuffKind::Flash => (flash_tex, true, 1.0),
+                        impact::PuffKind::Glare => (glare_tex, true, 1.0),
+                        impact::PuffKind::Smoke => (smoke_tex, false, 0.6),
+                        impact::PuffKind::Ring => (ring_tex, false, 0.9),
                     };
                     let Some(id) = tex else { continue };
                     glEnable(0x0DE1);
                     glBindTexture(0x0DE1, id);
                     glBlendFunc(0x0302, if additive { 1 } else { 0x0303 }); // SRC_ALPHA, ONE or ONE_MINUS_SRC_ALPHA
-                    let a = puff.alpha() * if additive { 1.0 } else { 0.35 };
-                    glColor4f(puff.color[0], puff.color[1], puff.color[2], a);
+                    // A blast fades quickly at first, then lingers; the rest fade steadily
+                    let fade = if puff.kind == impact::PuffKind::Smoke { puff.alpha().sqrt() * puff.alpha() } else { puff.alpha() };
+                    glColor4f(puff.color[0], puff.color[1], puff.color[2], fade * strength);
                     let h = puff.current_size() / 2.0;
-                    let (p, u) = (puff.pos, [0.0, 1.0, 0.0]);
+                    // Facing the camera, or lying in the surface for a shockwave ring
+                    let (r, u) = match puff.axis {
+                        Some(n) => {
+                            let across = if n[1].abs() > 0.95 { [1.0, 0.0, 0.0] } else { unit3([n[2], 0.0, -n[0]]) };
+                            (across, [n[1] * across[2] - n[2] * across[1], n[2] * across[0] - n[0] * across[2], n[0] * across[1] - n[1] * across[0]])
+                        }
+                        None => (right, [0.0, 1.0, 0.0]),
+                    };
+                    // Dust hugs the ground as a low bank and smoke sits on it as a ball, so
+                    // neither is cut off by the floor where the flat sprite meets it
+                    let (squash, lift) = match (puff.kind, puff.axis) {
+                        (_, Some(_)) => (1.0, 0.0),
+                        (impact::PuffKind::Dust, _) => (0.55, 0.55),
+                        (impact::PuffKind::Smoke, _) => (1.0, 0.85),
+                        _ => (1.0, 0.0),
+                    };
+                    let p = [puff.pos[0], puff.pos[1] + lift * h, puff.pos[2]];
                     glBegin(0x0007); // GL_QUADS
                     for (dx, dy, tu, tv) in [(-1.0, -1.0, 0.0, 1.0), (1.0, -1.0, 1.0, 1.0), (1.0, 1.0, 1.0, 0.0), (-1.0, 1.0, 0.0, 0.0)] {
                         glTexCoord2f(tu, tv);
-                        glVertex3f(p[0] + right[0] * dx * h + u[0] * dy * h, p[1] + right[1] * dx * h + u[1] * dy * h, p[2] + right[2] * dx * h + u[2] * dy * h);
+                        let dy = dy * squash;
+                        glVertex3f(p[0] + r[0] * dx * h + u[0] * dy * h, p[1] + r[1] * dx * h + u[1] * dy * h, p[2] + r[2] * dx * h + u[2] * dy * h);
                     }
                     glEnd();
                 }
@@ -1783,10 +2118,19 @@ fn main() {
             }
         }
 
-        // The held weapon in front of the camera, over the scene
-        if let (true, true, false, Some(wd)) = (args.viewmodel, first_person, third_person, &weapon_draw) {
+        // The held weapon in front of the camera, over the scene. A grenade is small, so it is held
+        // further out in proportion, drawn back by the wind-up, and gone once it has been thrown.
+        let held = if equipped_grenade { grenade_draw.as_ref().filter(|_| throw.is_none_or(|t| !t.thrown)) } else { weapon_draw.as_ref() };
+        if let (true, true, false, Some(wd)) = (args.viewmodel, first_person, third_person, held) {
             let l = wd.length;
-            let [ox, oy, oz] = args.viewmodel_offset.unwrap_or([0.45, -0.45, 1.5]);
+            let [ox, oy, oz] = if equipped_grenade {
+                let held_for = charge_from.map_or(0.0, |from| ((game_time - from) / grenade::CHARGE_SECONDS).clamp(0.0, 1.0));
+                let swing = throw.map_or(0.0, |t| t.charge.max(((game_time - t.start) / THROW_SECONDS / THROW_RELEASE).clamp(0.0, 1.0)));
+                let wind = held_for.max(swing);
+                [1.7 + 0.9 * wind, -1.2 - 0.6 * wind, 8.0 - 1.8 * wind]
+            } else {
+                args.viewmodel_offset.unwrap_or([0.45, -0.45, 1.5])
+            };
             // Recoil pushes the gun back at the player; a reload dips it out of view
             let kick = ((flash_until - game_time) / 0.05).clamp(0.0, 1.0) * 0.04 * l;
             let dip = reload_until.map_or(0.0, |t| {
@@ -1826,14 +2170,18 @@ fn main() {
         if first_person {
             let mut status = vec![
                 format!("KILLS: {kills}"),
-                if reload_until.is_some() { "RELOADING".to_string() } else { format!("AMMO: {ammo}/{reserve}") },
+                if equipped_grenade { format!("GRENADES: {grenades_left}") }
+                    else if reload_until.is_some() { "RELOADING".to_string() } else { format!("AMMO: {ammo}/{reserve}") },
             ];
+            if let Some(from) = charge_from {
+                status.insert(0, format!("POWER: {:.0}", ((game_time - from) / grenade::CHARGE_SECONDS).clamp(0.0, 1.0) * 100.0));
+            }
             if let Some(hp) = target_hp {
                 status.insert(0, format!("TARGET: {hp:.0}"));
             }
             let msg = if game_time < message.1 { message.0.as_str() } else { "" };
             let marker = tracer.is_some_and(|t| t.2 && game_time < t.3);
-            draw_hud(w, h, &status, msg, marker);
+            draw_hud(w, h, &status, msg, marker, veil);
         }
         let rooms_text = if culling {
             format!("ROOM: {} DRAWN: {}", current_rooms.join(" "), drawn_rooms.join(" "))
@@ -2257,7 +2605,7 @@ fn glu_perspective(fov_y: f32, aspect: f32, z_near: f32, z_far: f32) {
 // Heads-up display: crosshair at the centre, status lines bottom-left and a
 // message under the crosshair. Leaves the 2D projection set; the debug text
 // that follows re-enables depth testing.
-fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_marker: bool) {
+fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_marker: bool, veil: f32) {
     unsafe {
         glMatrixMode(0x1701); // GL_PROJECTION
         glLoadIdentity();
@@ -2266,6 +2614,19 @@ fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_marker
         glLoadIdentity();
         glDisable(0x0B71); // GL_DEPTH_TEST
         glDisable(0x0DE1); // GL_TEXTURE_2D
+
+        // The white-out from a blast close by
+        if veil > 0.01 {
+            glEnable(0x0BE2); // GL_BLEND
+            glBlendFunc(0x0302, 0x0303);
+            glColor4f(1.0, 0.97, 0.92, veil.min(1.0) * 0.9);
+            glBegin(0x0007); // GL_QUADS
+            for (x, y) in [(0.0, 0.0), (win_w as f32, 0.0), (win_w as f32, win_h as f32), (0.0, win_h as f32)] {
+                glVertex3f(x, y, 0.0);
+            }
+            glEnd();
+            glDisable(0x0BE2);
+        }
 
         let (cx, cy) = (win_w as f32 / 2.0, win_h as f32 / 2.0);
         if hit_marker { glColor3f(1.0, 0.2, 0.2); } else { glColor3f(1.0, 1.0, 1.0); }

@@ -72,6 +72,7 @@ On other platforms, or without the aliases:
 | Right mouse (hold) | walk instead of run |
 | Space or Backspace | open or close the door you are looking at (within about 2 m) |
 | R | reload |
+| 1 / 3 | the gun / a frag grenade (3 of them). With a grenade out, hold left mouse to wind up and let go to throw: the longer the hold, the harder the throw. It bounces, goes off after 3 s, kills characters within about 3 m (hurts them out to about 6 m, walls shield them), breaks glass, and shakes and deafens you if close |
 | F | toggle third-person view |
 | F1 | toggle between first person and free-fly (collision off, Shift = faster, scroll = zoom) |
 | T | textured / wireframe |

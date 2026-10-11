@@ -284,6 +284,22 @@ impl CollisionWorld {
         world
     }
 
+    /// A world that is one level square floor at height `y`, `half` units either way from the
+    /// origin: for trying out things that move through the level without a MAP
+    pub fn flat_floor(y: f32, half: f32) -> Self {
+        let n = [0.0, 1.0, 0.0];
+        let corner = |x: f32, z: f32| [x, y, z];
+        let tri = |a, b, c| Tri { a, b, c, n, off: false, hidden: false, material: usize::MAX, room: NO_ROOM };
+        let tris = vec![
+            tri(corner(-half, -half), corner(half, -half), corner(half, half)),
+            tri(corner(-half, -half), corner(half, half), corner(-half, half)),
+        ];
+        let cell = 2.0 * half;
+        let mut world = Self { tris, groups: Vec::new(), min_x: -half, min_z: -half, cell, cols: 1, rows: 1, cells: vec![vec![0, 1]], params: Params::default(), doors: Vec::new() };
+        world.cells[0] = vec![0, 1];
+        world
+    }
+
     pub fn params(&self) -> &Params { &self.params }
 
     /// The doors, in the order `set_door_open` takes them

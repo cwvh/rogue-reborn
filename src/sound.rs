@@ -105,6 +105,21 @@ impl Sound {
         player.detach();
     }
 
+    /// A high whine that fades out over `seconds`: the ringing in the ears after a loud bang. It
+    /// ignores `master`, which is turned down to muffle everything else at the same time.
+    pub fn ring(&mut self, seconds: f32, gain: f32) {
+        const RATE: u32 = 44100;
+        let samples: Vec<f32> = (0..(seconds * RATE as f32) as usize).map(|i| {
+            let t = i as f32 / RATE as f32;
+            let fade = (1.0 - t / seconds).max(0.0).powi(2);
+            ((t * 3400.0 * std::f32::consts::TAU).sin() * 0.6 + (t * 5200.0 * std::f32::consts::TAU).sin() * 0.25) * fade
+        }).collect();
+        let player = Player::connect_new(self.device.mixer());
+        player.set_volume(gain);
+        player.append(SamplesBuffer::new(std::num::NonZero::new(1).unwrap(), std::num::NonZero::new(RATE).unwrap(), samples));
+        player.detach();
+    }
+
     /// Start a looping sound, which stops when the returned player is dropped
     pub fn play_loop(&mut self, name: &str, gain: f32) -> Option<Player> {
         use rodio::Source;

@@ -31,6 +31,8 @@ pub enum Surface {
     Glass,
     /// Fabric and the like: marks but no debris
     Soft,
+    /// The soot a blast leaves. Never what a material classifies as.
+    Scorch,
 }
 
 impl Surface {
@@ -109,6 +111,11 @@ impl Decal {
         up = add(mul(up, angle.cos()), mul(side, angle.sin()));
         // Sit just off the surface so it is not lost in it
         Decal { pos: add(pos, mul(n, 0.5)), normal: n, up, size: surface.decal_size(realistic), surface, variant }
+    }
+
+    /// The soot a blast leaves on a surface, `size` across
+    pub fn scorch(pos: V3, normal: V3, size: f32, variant: usize, roll: f32) -> Decal {
+        Decal { size, ..Decal::new(pos, normal, Surface::Scorch, true, variant, roll) }
     }
 
     /// The four corners, counter-clockwise seen from the front, starting bottom-left,
@@ -381,6 +388,21 @@ fn metal_hole(seed: u64) -> Vec<u8> {
     cv.into_rgba()
 }
 
+/// Soot thrown out from a blast: dark and thick in the middle, with ragged, streaky edges
+fn scorch(seed: u64) -> Vec<u8> {
+    let mut cv = Canvas::new();
+    let r_max = TEXTURE_SIZE as f32 * 0.47;
+    cv.lay(|x, y| {
+        let a = y.atan2(x);
+        let r = (x * x + y * y).sqrt();
+        let reach = r_max * (0.55 + 0.45 * noise(seed ^ 1, 3.0 + a.cos() * 2.5, 3.0 + a.sin() * 2.5));
+        let streak = (0.75 + 0.5 * noise(seed ^ 2, a * 7.0, 1.0)).min(1.1);
+        let grain = fbm(seed ^ 3, x * 0.22, y * 0.22);
+        ([0.05, 0.045, 0.04], 0.85 * (1.0 - smooth(r / (reach * streak))) * (0.55 + 0.6 * grain))
+    });
+    cv.into_rgba()
+}
+
 /// The picture of a hole in `surface`, `TEXTURE_SIZE` pixels square, RGBA. `seed` makes each one different.
 pub fn hole_texture(surface: Surface, seed: u64) -> Vec<u8> {
     match surface {
@@ -389,6 +411,7 @@ pub fn hole_texture(surface: Surface, seed: u64) -> Vec<u8> {
         Surface::Earth => crater(seed, [0.42, 0.33, 0.22]),
         Surface::Soft => crater(seed, [0.45, 0.44, 0.42]),
         Surface::Concrete | Surface::Glass => crater(seed, [0.80, 0.78, 0.72]),
+        Surface::Scorch => scorch(seed),
     }
 }
 
@@ -439,6 +462,12 @@ pub enum PuffKind {
     Dust,
     /// A bright flash, drawn with a spark sprite
     Flash,
+    /// The white-hot instant of a blast
+    Glare,
+    /// Dark smoke and dust thrown up by a blast
+    Smoke,
+    /// The shockwave: a ring spreading over the surface (see `Puff::axis`)
+    Ring,
 }
 
 /// A soft cloud that swells and fades
@@ -451,6 +480,8 @@ pub struct Puff {
     pub life: f32,
     pub size: (f32, f32),
     pub color: [f32; 3],
+    /// For a ring: the direction it faces (the surface's normal). Other puffs face the camera.
+    pub axis: Option<V3>,
 }
 
 impl Puff {
@@ -530,7 +561,7 @@ impl Effects {
                             gravity: 500.0,
                         });
                     }
-                    self.puffs.push(Puff { kind: PuffKind::Flash, pos: p, vel: [0.0; 3], age: 0.0, life: 0.04, size: (4.0, 7.0), color: [1.0, 0.9, 0.6] });
+                    self.puffs.push(Puff { kind: PuffKind::Flash, pos: p, vel: [0.0; 3], age: 0.0, life: 0.04, size: (4.0, 7.0), color: [1.0, 0.9, 0.6], axis: None });
                 }
             }
             Surface::Concrete | Surface::Earth => {
@@ -550,9 +581,78 @@ impl Effects {
                 }
                 self.dust(&mut rng, p, n, dust, 3, 0.35);
             }
-            Surface::Glass | Surface::Soft => {}
+            Surface::Glass | Surface::Soft | Surface::Scorch => {}
         }
         sparked
+    }
+
+    /// A grenade going off at `point` on a surface facing `normal`. Not flames: a hard white
+    /// flash, a shockwave spreading over the surface, a wave of dust and a dark cloud lifting
+    /// off it, and debris flung out.
+    /// `on_surface` is false for a blast in mid-air, which has no ground to throw dust along.
+    pub fn explosion(&mut self, point: V3, normal: V3, seed: u64, on_surface: bool) {
+        let mut rng = Rng::new(seed);
+        let n = norm(normal);
+        let p = add(point, mul(n, 6.0));
+        let along = |rng: &mut Rng| {
+            let r = norm([rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)]);
+            r
+        };
+        let puff = |kind, pos, vel, life, size, color, axis| Puff { kind, pos, vel, age: 0.0, life, size, color, axis };
+        // The flash, and the ring racing out
+        self.puffs.push(puff(PuffKind::Glare, add(p, mul(n, 25.0)), [0.0; 3], 0.22, (260.0, 1000.0), [1.0, 0.96, 0.88], None));
+        self.puffs.push(puff(PuffKind::Flash, add(p, mul(n, 25.0)), [0.0; 3], 0.10, (200.0, 500.0), [1.0, 0.9, 0.7], None));
+        if on_surface {
+            self.puffs.push(puff(PuffKind::Ring, add(point, mul(n, 3.0)), [0.0; 3], 0.6, (100.0, 1500.0), [0.95, 0.93, 0.88], Some(n)));
+        }
+        // A wave of dust along the surface
+        for _ in 0..if on_surface { 30 } else { 0 } {
+            let d = along(&mut rng);
+            let flat = norm(sub(d, mul(n, dot(d, n))));
+            let vel = add(mul(flat, rng.range(500.0, 1700.0)), mul(n, rng.range(20.0, 260.0)));
+            self.puffs.push(puff(PuffKind::Dust, p, vel, rng.range(1.6, 3.2), (rng.range(80.0, 140.0), rng.range(340.0, 600.0)), mix([0.78, 0.75, 0.7], [0.55, 0.52, 0.48], rng.next()), None));
+        }
+        // Dark smoke and dust billowing up from the middle
+        for _ in 0..10 {
+            let d = along(&mut rng);
+            let flat = norm(sub(d, mul(n, dot(d, n))));
+            let vel = if on_surface {
+                add(mul(flat, rng.range(60.0, 320.0)), mul(n, rng.range(200.0, 650.0)))
+            } else {
+                // Spreading every way from the burst
+                mul(d, rng.range(80.0, 380.0))
+            };
+            self.puffs.push(puff(PuffKind::Smoke, add(p, mul(n, 10.0)), vel, rng.range(2.5, 4.5), (rng.range(120.0, 180.0), rng.range(380.0, 650.0)), mix([0.34, 0.32, 0.3], [0.7, 0.66, 0.6], rng.next()), None));
+        }
+        // Debris flung out, mostly low and fast
+        for _ in 0..70 {
+            let d = along(&mut rng);
+            let v = add(mul(d, rng.range(400.0, 2200.0)), if on_surface { mul(n, rng.range(150.0, 900.0)) } else { [0.0; 3] });
+            self.particles.push(Particle {
+                kind: Kind::Chip,
+                pos: p,
+                vel: v,
+                age: 0.0,
+                life: rng.range(0.6, 1.5),
+                color: mix([0.7, 0.67, 0.62], [0.32, 0.3, 0.28], rng.next()),
+                len: rng.range(0.8, 2.2),
+                gravity: 980.0,
+            });
+        }
+        // A few fast glints of casing
+        for _ in 0..10 {
+            let d = along(&mut rng);
+            self.particles.push(Particle {
+                kind: Kind::Spark,
+                pos: p,
+                vel: mul(d, rng.range(1400.0, 3200.0)),
+                age: 0.0,
+                life: rng.range(0.08, 0.22),
+                color: mix([1.0, 0.95, 0.8], [1.0, 0.7, 0.3], rng.next()),
+                len: rng.range(8.0, 22.0),
+                gravity: 400.0,
+            });
+        }
     }
 
     fn dust(&mut self, rng: &mut Rng, p: V3, n: V3, color: [f32; 3], count: usize, strength: f32) {
@@ -566,6 +666,7 @@ impl Effects {
                 life: rng.range(0.5, 1.0),
                 size: (rng.range(2.0, 4.0), rng.range(9.0, 17.0)),
                 color: mul(color, 1.0 + strength * 0.0),
+                axis: None,
             });
         }
     }

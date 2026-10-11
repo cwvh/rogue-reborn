@@ -320,6 +320,24 @@ impl Health {
     }
 }
 
+impl Health {
+    /// Hurt by a blast for `damage` health, thrown `from` the side the blast came
+    pub fn apply_blast(&mut self, damage: f32, from: Facing, now: f32, roll: u32) -> HitResult {
+        if self.is_dead() {
+            return HitResult::Ignored;
+        }
+        self.hp -= damage;
+        if self.hp <= 0.0 {
+            self.hp = 0.0;
+            self.state = NpcState::Dead { motion: death_motion(BodyPart::Torso, roll), start: now };
+            HitResult::Killed
+        } else {
+            self.state = NpcState::Reacting { motion: hit_reaction(BodyPart::Torso, from), start: now };
+            HitResult::Injured
+        }
+    }
+}
+
 impl Default for Health {
     fn default() -> Self { Self::new() }
 }
@@ -331,6 +349,16 @@ mod tests {
 
     fn hit(part: BodyPart) -> Hit {
         Hit { distance: 1.0, part, facing: Facing::Front, point: [0.0; 3] }
+    }
+
+    #[test]
+    fn a_blast_that_does_enough_kills() {
+        let mut h = Health::new();
+        assert_eq!(h.apply_blast(40.0, Facing::Front, 1.0, 0), HitResult::Injured);
+        assert!(matches!(h.state, NpcState::Reacting { motion: "thiu_cf", .. }));
+        assert_eq!(h.apply_blast(100.0, Facing::Back, 2.0, 1), HitResult::Killed);
+        assert!(h.is_dead());
+        assert_eq!(h.apply_blast(100.0, Facing::Back, 3.0, 1), HitResult::Ignored);
     }
 
     #[test]
