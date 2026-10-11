@@ -16,8 +16,8 @@ cd "$(dirname "$0")/.." || exit 1
 [ -n "$1" ] || { echo "usage: scripts/shots.sh DIR"; exit 1; }
 TARGET="${TARGET:-x86_64-pc-windows-gnu}"
 mkdir -p "$1"
-cargo build -q --release --target "$TARGET" --example wireframe 2>&1 | grep -E "^error" -A6
-EXE="target/$TARGET/release/examples/wireframe"
+cargo build -q --release --target "$TARGET" --bin rr 2>&1 | grep -E "^error" -A6
+EXE="target/$TARGET/release/rr"
 [ -f "$EXE.exe" ] && EXE="$EXE.exe"
 # Standing still for 40 frames at a fixed time step, so the characters pose the same each time
 C="--first-person --textured --walk 40 --hold X --doors-open 1"

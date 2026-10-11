@@ -55,13 +55,13 @@ starts the first-person demo on the default level (citystreet_large) at spawn po
 textures, realistic bullet holes and a 144 fps cap. Other shortcuts:
 
 ```
-cargo wireframe --level rm11 --first-person --textured   # any level, any options
-cargo wireframe --list-levels                            # what is in data/map
+cargo rr --level rm11 --first-person --textured   # any level, any options
+cargo rr --list-levels                            # what is in data/map
 cargo wtest                                              # run the tests
 ```
 
 On other platforms, or without the aliases:
-`cargo run --release --example wireframe -- --first-person --textured --spawn 1`.
+`cargo run --release --bin rr -- --first-person --textured --spawn 1`.
 
 ### Controls
 
@@ -99,7 +99,7 @@ On other platforms, or without the aliases:
 | `--viewmodel` | draw the gun in front of the camera (the original didn't) |
 | `--screenshot FILE` | render a few frames, save a PNG and exit |
 
-The example `examples/wireframe.rs` has many more (animation, camera and weapon tweaks).
+The client, `src/main.rs`, has many more (animation, camera and weapon tweaks).
 
 ## Other tools
 

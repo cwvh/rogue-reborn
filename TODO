@@ -23,7 +23,7 @@ Game
 * [game] Surface-specific footsteps; explosions that break glass (glass::Pane::distance_to is ready for it).
 
 Housekeeping
-* [build] Cargo.toml still has the raylib feature and [[bin]] although build.rs no longer links raylib; src/main.rs, src/raylib.rs and src/map.old look unused.
+* [build] src/map.old looks unused.
 * [docs] docs/walking.md still mentions the deleted opencode.rs.
 * [docs] README says the Linux build was not tried recently. Try it.
 * [scripts] bench.sh drifts: two runs minutes apart differed by 30% on this machine while the same two builds run alternately matched within 3%. Compare against a baseline build, alternating the two.

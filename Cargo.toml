@@ -7,13 +7,11 @@ edition = "2024"
 default = []
 serde = ["dep:serde", "dep:serde_json"]
 get-size = ["dep:get-size"]
-# The raylib demo in src/main.rs; needs the raylib library (see build.rs)
-raylib = []
 
+# The game client
 [[bin]]
-name = "rogue-reborn"
+name = "rr"
 path = "src/main.rs"
-required-features = ["raylib"]
 
 [[example]]
 name = "map-dump"
