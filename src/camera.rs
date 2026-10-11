@@ -1,5 +1,6 @@
 //! The view: where it is and which way it looks.
 
+use rogue_reborn::sim::movement;
 use rogue_reborn::sound;
 use crate::opengl::*;
 
@@ -19,21 +20,11 @@ impl Camera {
     }
 
     pub fn get_forward(&self) -> [f32; 3] {
-        let (yaw_rad, pitch_rad) = (self.yaw.to_radians(), self.pitch.to_radians());
-        [
-            -yaw_rad.sin() * pitch_rad.cos(),
-            pitch_rad.sin(),
-            -yaw_rad.cos() * pitch_rad.cos(),
-        ]
+        movement::forward(self.yaw, self.pitch)
     }
 
     pub fn get_right(&self) -> [f32; 3] {
-        let yaw_rad = self.yaw.to_radians();
-        [
-            yaw_rad.cos(),
-            0.0,
-            -yaw_rad.sin(),
-        ]
+        movement::right(self.yaw)
     }
 }
 

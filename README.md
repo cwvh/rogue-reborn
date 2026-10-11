@@ -101,6 +101,16 @@ On other platforms, or without the aliases:
 
 The client has many more, listed in `src/args.rs` (animation, camera and weapon tweaks).
 
+## How the code is laid out
+
+The game itself is `src/sim/`, part of the library: the player, weapon, grenades, characters,
+doors and glass, and what a tick of time does to them. It reads no clock, window or sound
+device, and takes its randomness from its own generator, so the same inputs always give the
+same game (a test checks this). Each tick takes an `Input` and returns `Event`s.
+
+The client, `src/main.rs` and its modules, is a window around that: it turns keys and the mouse
+into `Input`, steps the sim in fixed 60 Hz ticks, and draws, plays sounds and prints the events.
+
 ## Other tools
 
 `examples/` has small inspectors for the data: `rsb-png` (texture contact sheets), `room-graph`
@@ -119,6 +129,8 @@ would drop out).
 - `scripts/bench.sh LABEL` prints average frame times for a few fixed views.
 - `scripts/shots.sh DIR` renders a fixed set of views, and `python scripts/pngdiff.py OLD NEW`
   counts the pixels that differ between two such runs (see the comments in `shots.sh`).
+- `scripts/golden.sh DIR` plays a few scripted runs (shooting, a grenade, a door) and records the
+  log and a screenshot of each, to compare before and after a change to how the game works.
 
 For debugging a level, `--rooms` (or `G`) colors each room, `--no-cull` (or `V`) draws every
 room, `--hide-rooms 5,224` leaves rooms out, and F2 writes a screenshot and a log of where you

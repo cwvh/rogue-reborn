@@ -17,3 +17,5 @@ pub mod visibility;
 pub mod door;
 pub mod grenade;
 pub mod demo;
+pub mod sim;
+pub mod util;

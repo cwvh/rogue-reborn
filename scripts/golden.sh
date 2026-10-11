@@ -19,9 +19,10 @@ EXE="target/$TARGET/release/rr"
 
 run() {
     name=$1; shift
-    # The frame-rate lines and the file names differ from run to run
+    # The frame-rate lines and the file names differ from run to run, and which animation the
+    # body plays is the viewer's business, so the position is kept and the rest is cut
     "$EXE" --first-person --textured --no-sound --max-fps 10000 --screenshot "$1/$name.png" "${@:2}" 2>&1 \
-        | grep -vE "^(timing|wrote|loaded|spawning at)" > "$1/$name.txt"
+        | grep -vE "^(timing|wrote|loaded|spawning at)"         | sed -E 's/ movement=.*//' > "$1/$name.txt"
 }
 
 D="$1"

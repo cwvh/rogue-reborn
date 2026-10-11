@@ -7,20 +7,22 @@ mod levels;
 mod opengl;
 mod player;
 mod textures;
-mod util;
 
 use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
-use rogue_reborn::{map, rsb, actor, combat, crp, demo, grenade, motion, skeleton, sound, weapon, ambience, glass, door};
-use rogue_reborn::collision::{CollisionWorld, Params, Player};
+use std::sync::Arc;
+use rogue_reborn::{map, rsb, actor, combat, crp, demo, grenade, motion, skeleton, sim, sound, weapon, ambience, glass};
+use rogue_reborn::sim::characters::{Characters, Npc, Rig};
+use rogue_reborn::sim::movement::{Movement, ground_speed, movement_from_keys};
+use rogue_reborn::collision::{CollisionWorld, Params};
 use rogue_reborn::impact::{self, Surface};
 use crate::opengl::*;
 use crate::args::parse_args;
 use crate::camera::{Camera, listener_of, apply_camera};
-use crate::util::{next_rng, dist3, mul3, unit3};
-use crate::player::{Movement, PlayerMotions, RELOAD_SECONDS, THROW_SECONDS, THROW_RELEASE, Throw, is_upper_body, ground_speed, movement_from_keys};
+use rogue_reborn::util::unit3;
+use crate::player::{PlayerMotions, is_upper_body};
 use crate::draw::{WeaponDraw, draw_weapon, draw_character, draw_glass, draw_fracture, build_mesh, Which, draw_plan, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
@@ -61,15 +63,13 @@ fn main() {
     };
     let map_path = map_buf.as_path();
     let map_num = extract_map_num(map_path).unwrap_or_else(|| String::from("m00"));
-    let level = if args.demo { demo::map() } else { map::read(map_path).expect("Failed to load map") };
+    let level = Arc::new(if args.demo { demo::map() } else { map::read(map_path).expect("Failed to load map") });
 
     // Build a flattened mesh from the MAP geometry
     let mesh = build_mesh(&level);
     // Collision world built from the render triangles (MAP space)
-    let mut world = CollisionWorld::from_map(&level, Params::default());
-    // Glass panes, which break when shot; their shards fall for a moment afterwards
-    let panes = glass::panes(&level);
-    let mut broken_at: Vec<Option<f32>> = vec![None; panes.len()];
+    let world = CollisionWorld::from_map(&level, Params::default());
+    // The shards of broken glass fall for a moment afterwards
     let mut fractures: Vec<glass::Fracture> = Vec::new();
 
     if args.info {
@@ -345,22 +345,16 @@ fn main() {
         }
     }).collect();
 
-    struct ModelSpot {
-        health: combat::Health,
-        pos: [f32; 3],
-        floor: f32,
-        yaw: f32,
-        actor: Option<usize>,
-        blink_offset: f32,
-    }
-    let mut model_spots: Vec<ModelSpot> = Vec::new();
+    let mut npcs: Vec<Npc> = Vec::new();
+    // Which team member's face each character wears
+    let mut npc_actor: Vec<Option<usize>> = Vec::new();
     if let (false, Some(c)) = (args.no_models, &character) {
         let feet_to_origin = -c.bounds().0[1];
         for (n, (i, p)) in mission_spawns.iter().enumerate().filter(|(i, _)| own_spawn != Some(*i)).enumerate() {
             let floor = world.ground_at(p[0], p[2], p[1] + 100.0).unwrap_or(p[1]);
             let actor = (!actors.is_empty()).then(|| n % actors.len());
             let scale_y = actor.map_or(1.0, |a| actors[a].scale[1]);
-            model_spots.push(ModelSpot {
+            npcs.push(Npc {
                 health: combat::Health::new(),
                 pos: [p[0], floor + feet_to_origin * scale_y, p[2]],
                 floor,
@@ -370,44 +364,44 @@ fn main() {
                     Some(player) if args.demo => (player[0] - p[0]).atan2(player[2] - p[2]).to_degrees(),
                     _ => i as f32 * 137.5,
                 }),
-                actor,
-                blink_offset: i as f32 * 0.73,
+                scale: actor.map_or([1.0; 3], |a| actors[a].scale),
+                stagger: i as f32 * 0.73,
             });
+            npc_actor.push(actor);
         }
     }
-
-    // Pose a character for its state: idling, reacting to a hit or dead
-    let npc_verts = |npc: &ModelSpot, now: f32| -> Vec<[f32; 3]> {
-        let (Some(c), Some((skel, skin))) = (&character, &rig) else { return Vec::new() };
-        let (name, frame, looping): (&str, f32, bool) = match npc.health.state {
-            combat::NpcState::Idle => (
-                idle_name.as_str(),
-                args.anim_frame.unwrap_or_else(|| now * args.anim_fps.unwrap_or(30.0) + npc.blink_offset * 9.0),
-                true,
-            ),
-            combat::NpcState::Reacting { motion, start } => (motion, (now - start) * 30.0, false),
-            combat::NpcState::Dead { motion, start } => (motion, (now - start) * 30.0, false),
-        };
-        let Some(mot) = npc_motions.get(name).or_else(|| npc_motions.get(idle_name.as_str())) else {
-            return c.vertices.clone();
-        };
-        let frames = mot.frames.max(1) as f32;
-        let f = if looping { frame % frames } else { frame.min(frames - 1.0) };
-        let (root, rots) = mot.sample(f);
-        // Hit and death motions carry the body along with them
-        let k0 = mot.keys[0].root;
-        let (dx, dz) = if looping { (0.0, 0.0) } else { (root[0] - k0[0], root[2] - k0[2]) };
-        skin.apply(&skel.pose([dx, root[1], dz], &rots))
-    };
-    let placement = |npc: &ModelSpot| combat::Placement {
-        pos: [npc.pos[0], if rig.is_some() { npc.floor } else { npc.pos[1] }, npc.pos[2]],
-        yaw_deg: npc.yaw,
-        scale: npc.actor.map_or([1.0; 3], |a| actors[a].scale),
-    };
+    let characters = character.map(|model| Characters {
+        model,
+        rig: rig.map(|(skeleton, skin)| Rig { skeleton, skin }),
+        motions: npc_motions,
+        idle: idle_name.clone(),
+    });
 
     if let Some(p) = args.pos { camera.position = p; }
     if let Some(y) = args.yaw { camera.yaw = y; }
     if let Some(p) = args.pitch { camera.pitch = p.clamp(-89.0, 89.0); }
+
+    // The game: the player stands on the floor below the camera
+    let eye_height = world.params().eye_height;
+    let (mag_size, reserve) = weapon_def.as_ref().map_or((30, 900), |w| (w.magazine, w.reserve));
+    let mut sim = sim::Sim::new(
+        level.clone(),
+        world,
+        sim::Config {
+            magazine: mag_size,
+            reserve,
+            grenades: 3,
+            speed_scale: args.speed_scale.unwrap_or(1.0),
+            seed: args.seed.unwrap_or(0x5eed),
+            culling: !args.no_cull,
+        },
+        characters,
+        npcs,
+        [camera.position[0], camera.position[1] - eye_height, -camera.position[2]],
+    );
+    if let Some(open) = args.doors_open {
+        sim.set_doors_open(open);
+    }
 
     let mut last_cursor_pos = None;
     window.set_cursor_mode(CursorMode::Disabled);
@@ -427,41 +421,23 @@ fn main() {
     let mut dump_requested = args.dump;
     // F3 closes the window and starts the viewer again with the same options
     let mut reload = false;
-    // Draw only the rooms the portals show (V toggles); drawn_rooms is last frame's set
-    let mut culling = !args.no_cull;
-    let visibility = rogue_reborn::visibility::Visibility::new(&level);
     // Which objects are glass panes (drawn in place), and every object's index
-    let pane_objects: Vec<bool> = level.geometries.objects.iter().map(|o| panes.iter().any(|g| g.name == o.name)).collect();
+    let pane_objects: Vec<bool> = level.geometries.objects.iter().map(|o| sim.panes.iter().any(|g| g.name == o.name)).collect();
     let all_objects: Vec<usize> = (0..level.geometries.objects.len()).collect();
-    // Doors: each leaf is drawn and collided with where the door is. Space or Backspace
-    // opens and closes the one being looked at.
-    let doors: Vec<door::Door> = world.doors().cloned().collect();
-    let mut door_states = vec![door::DoorState::default(); doors.len()];
-    let door_leaf: Vec<bool> = (0..level.geometries.objects.len()).map(|i| doors.iter().any(|d| d.model_index == i)).collect();
+    // Doors: each leaf is drawn where its door is. Space or Backspace opens and closes the
+    // one being looked at.
+    let door_leaf: Vec<bool> = (0..level.geometries.objects.len()).map(|i| sim.doors.iter().any(|d| d.model_index == i)).collect();
     let mut doors_by_room: HashMap<u32, Vec<usize>> = HashMap::new();
-    for (i, d) in doors.iter().enumerate() {
+    for (i, d) in sim.doors.iter().enumerate() {
         for &r in &d.rooms {
             doors_by_room.entry(r).or_default().push(i);
         }
     }
-    // Whether each portal is shut by a closed door
-    let mut blocked_portals = vec![false; level.portals.portals.len()];
-    let all_doors: Vec<usize> = (0..doors.len()).collect();
-    let mut use_pressed = false;
-    if let Some(open) = args.doors_open {
-        for (i, s) in door_states.iter_mut().enumerate() {
-            s.open = open.clamp(0.0, 1.0);
-            s.opening = open > 0.5;
-            world.set_door_open(i, s.open);
-        }
-    }
-    let mut current_room: Option<usize> = None;
-    let mut collision_rooms: Option<Vec<rogue_reborn::collision::SolidRoom>> = None;
-    let mut last_render_rooms: Vec<u32> = Vec::new();
+    let all_doors: Vec<usize> = (0..sim.doors.len()).collect();
+    // Keys pressed since the sim last ticked, which counts once
+    let (mut use_pressed, mut reload_pressed, mut gun_pressed, mut grenade_pressed) = (false, false, false, false);
     let mut drawn_rooms: Vec<String> = Vec::new();
     let mut blink_enabled = !args.no_blink;
-    // Combat state; times are in game seconds
-    let mut game_time = 0.0f32;
     // Sound is optional: no output device just means silence
     let mut sound = if args.no_sound { None } else { sound::Sound::open("data/sound") };
     if let Some(snd) = sound.as_mut() {
@@ -478,37 +454,18 @@ fn main() {
     let mut trigger = false;
     // Right mouse button held: walk instead of the default run
     let mut walk_held = false;
-    let (mag_size, mut reserve) = weapon_def.as_ref().map_or((30, 900), |w| (w.magazine, w.reserve));
-    let mut ammo = mag_size;
-    let mut reload_until: Option<f32> = None;
-    let mut next_shot = 0.0f32;
-    let mut kills = 0u32;
-    let mut message = (String::new(), 0.0f32);
-    let mut target_hp: Option<f32> = None;
-    let mut flash_until = 0.0f32;
-    // Grenades: key 3 takes one out, hold the trigger to wind up and let go to throw
-    let mut equipped_grenade = false;
-    let mut grenades_left = 3u32;
-    let mut charge_from: Option<f32> = None;
-    let mut throw: Option<Throw> = None;
-    let mut thrown: Vec<grenade::Grenade> = Vec::new();
     // A blast leaves the player shaken (the view), dazzled (a white veil) and deafened (muffled sound)
     let (mut shake, mut veil, mut deaf) = (0.0f32, 0.0f32, 0.0f32);
     let master_volume = args.volume.unwrap_or(1.0).clamp(0.0, 1.0);
     // Last shot: start, end, whether it struck a character, and when it fades
     let mut tracer: Option<([f32; 3], [f32; 3], bool, f32)> = None;
-    let mut rng = args.seed.unwrap_or(0x5eed) | 1;
     let mut third_person = args.third_person;
     let mut movement = Movement::Idle;
     let mut player_frame = 0.0f32;
     let start_time = Instant::now();
-    let eye_height = world.params().eye_height;
-    // Player body in MAP space; the camera is at the eyes with Z negated
-    let mut player = Player::new([
-        camera.position[0],
-        camera.position[1] - eye_height,
-        -camera.position[2],
-    ]);
+    // Time the sim has yet to run, and where the player stood a tick ago, to draw between ticks
+    let mut tick_budget = 0.0f32;
+    let mut prev_feet = sim.player.pos;
     let base_speed = 7.5;
     let mut frames_drawn = 0u32;
     // Frames timed, summed render ms and summed whole-frame ms
@@ -546,7 +503,7 @@ fn main() {
                             use_pressed = true;
                         }
                         (Key::V, Action::Press) => {
-                            culling = !culling;
+                            sim.culling = !sim.culling;
                         }
                         (Key::G, Action::Press) => {
                             room_debug = !room_debug;
@@ -562,35 +519,21 @@ fn main() {
                             third_person = !third_person;
                         }
                         (Key::Num1, Action::Press) => {
-                            // Back to the gun
-                            if throw.is_none() {
-                                equipped_grenade = false;
-                                charge_from = None;
-                            }
+                            gun_pressed = true;
                         }
                         (Key::Num3, Action::Press) => {
-                            if first_person && throw.is_none() && reload_until.is_none() {
-                                equipped_grenade = true;
-                                if grenades_left == 0 {
-                                    message = ("NO GRENADES".to_string(), game_time + 1.0);
-                                }
-                            }
+                            grenade_pressed = true;
                         }
                         (Key::R, Action::Press) => {
-                            // Reload: takes time, then fills the magazine from the reserve
-                            if first_person && !equipped_grenade && reload_until.is_none() && ammo < mag_size && reserve > 0 {
-                                reload_until = Some(game_time + RELOAD_SECONDS);
-                            }
+                            reload_pressed = true;
                         }
                         (Key::F1, Action::Press) => {
                             first_person = !first_person;
                             if first_person {
                                 // Drop in from wherever the camera is
-                                player = Player::new([
-                                    camera.position[0],
-                                    camera.position[1] - eye_height,
-                                    -camera.position[2],
-                                ]);
+                                let feet = [camera.position[0], camera.position[1] - eye_height, -camera.position[2]];
+                                sim.place_player(feet);
+                                prev_feet = feet;
                             }
                         }
                         (k, Action::Press) => {
@@ -644,7 +587,7 @@ fn main() {
             trigger = frames_drawn < n && held.contains('F');
             // T takes out a grenade and throws it after holding for half a second
             if held.contains('T') {
-                equipped_grenade = true;
+                grenade_pressed = true;
                 trigger = frames_drawn < 30;
             }
             // U presses the use key (Space) on frame 5, to open or close the door in front
@@ -653,8 +596,8 @@ fn main() {
             }
             // L starts a reload on the first frame (for testing the animation)
             if held.contains('L') && frames_drawn == 0 {
-                ammo = 10;
-                reload_until = Some(game_time + RELOAD_SECONDS);
+                sim.ammo = 10;
+                reload_pressed = true;
             }
             walk_held = frames_drawn < n && held.contains('R');
             for (ch, key) in [('W', Key::W), ('A', Key::A), ('S', Key::S), ('D', Key::D)] {
@@ -662,38 +605,8 @@ fn main() {
             }
             if frames_drawn % 10 == 0 {
                 println!("frame {frames_drawn:4} feet=({:.1}, {:.1}, {:.1}) on_ground={} movement={movement:?} anim_frame={player_frame:.1}",
-                    player.pos[0], player.pos[1], player.pos[2], player.on_ground);
+                    sim.player.pos[0], sim.player.pos[1], sim.player.pos[2], sim.player.on_ground);
             }
-        }
-
-        // The trigger fires the gun, unless a grenade is out
-        let gun_trigger = trigger && !equipped_grenade;
-
-        // WASD movement (free-fly: hold LeftShift to move faster)
-        let mut speed = base_speed;
-        if keys.contains(&Key::LeftShift) {
-            speed *= 5.0;
-        }
-        let right = camera.get_right();
-        let yaw_rad = camera.yaw.to_radians();
-        let fwd_flat = [-yaw_rad.sin(), 0.0, -yaw_rad.cos()];
-        // Desired horizontal displacement for this frame, in camera space
-        let mut mv = [0.0f32; 2];
-        if keys.contains(&Key::W) {
-            mv[0] += fwd_flat[0] * speed;
-            mv[1] += fwd_flat[2] * speed;
-        }
-        if keys.contains(&Key::S) {
-            mv[0] -= fwd_flat[0] * speed;
-            mv[1] -= fwd_flat[2] * speed;
-        }
-        if keys.contains(&Key::A) {
-            mv[0] -= (right[0] * speed) / 2.0;
-            mv[1] -= (right[2] * speed) / 2.0;
-        }
-        if keys.contains(&Key::D) {
-            mv[0] += (right[0] * speed) / 2.0;
-            mv[1] += (right[2] * speed) / 2.0;
         }
 
         // Time since the previous step, measured here so it covers render and vsync
@@ -701,121 +614,187 @@ fn main() {
         let real_dt = raw_dt.min(0.05);
         last_step = Instant::now();
         let step_dt = if args.walk.is_some() { 1.0 / 60.0 } else { real_dt };
-        game_time += step_dt;
 
-        // Space or Backspace opens or closes the door the player is looking at
-        if std::mem::take(&mut use_pressed) && first_person {
-            let eye = [camera.position[0], camera.position[1], -camera.position[2]];
-            let f = camera.get_forward();
-            let look = [f[0], f[1], -f[2]];
-            let mut best: Option<(usize, f32)> = None;
-            for (i, d) in doors.iter().enumerate() {
-                // Aim at the doorway, or at the leaf wherever it has gone (a door swung open
-                // to the side is still the one in front of you)
-                for c in [d.center(0.0), d.center(door_states[i].open)] {
-                    let to = [c[0] - eye[0], c[1] - eye[1], c[2] - eye[2]];
-                    let dist = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
-                    if dist > DOOR_REACH || dist < 1.0 {
-                        continue;
-                    }
-                    // Within 60 degrees of where they are looking
-                    let facing = (to[0] * look[0] + to[1] * look[1] + to[2] * look[2]) / dist;
-                    if facing < 0.5 {
-                        continue;
-                    }
-                    let score = dist * (2.0 - facing);
-                    if best.is_none_or(|(_, s)| score < s) {
-                        best = Some((i, score));
-                    }
-                }
+        // Free-fly: WASD moves the view (hold LeftShift to move faster)
+        if !first_person {
+            let mut speed = base_speed;
+            if keys.contains(&Key::LeftShift) {
+                speed *= 5.0;
             }
-            match best {
-                Some((i, _)) => {
-                    door_states[i].opening = !door_states[i].opening;
-                    let sound_name = if door_states[i].opening { &doors[i].open_sound } else { &doors[i].close_sound };
+            let right = camera.get_right();
+            let yaw_rad = camera.yaw.to_radians();
+            let fwd_flat = [-yaw_rad.sin(), 0.0, -yaw_rad.cos()];
+            // Desired horizontal displacement for this frame, in camera space
+            let mut mv = [0.0f32; 2];
+            if keys.contains(&Key::W) {
+                mv[0] += fwd_flat[0] * speed;
+                mv[1] += fwd_flat[2] * speed;
+            }
+            if keys.contains(&Key::S) {
+                mv[0] -= fwd_flat[0] * speed;
+                mv[1] -= fwd_flat[2] * speed;
+            }
+            if keys.contains(&Key::A) {
+                mv[0] -= (right[0] * speed) / 2.0;
+                mv[1] -= (right[2] * speed) / 2.0;
+            }
+            if keys.contains(&Key::D) {
+                mv[0] += (right[0] * speed) / 2.0;
+                mv[1] += (right[2] * speed) / 2.0;
+            }
+            // mv is per-frame at 60 FPS; scale so free-fly speed does not depend on frame rate
+            camera.position[0] += mv[0] * step_dt * 60.0;
+            camera.position[2] += mv[1] * step_dt * 60.0;
+        }
+
+        // The game runs in fixed ticks, however fast the frames come
+        let mut input = sim::Input {
+            yaw: camera.yaw,
+            pitch: camera.pitch,
+            forward: keys.contains(&Key::W),
+            back: keys.contains(&Key::S),
+            left: keys.contains(&Key::A),
+            right: keys.contains(&Key::D),
+            run: !walk_held,
+            fire: trigger,
+            use_key: use_pressed,
+            reload: reload_pressed,
+            gun: gun_pressed,
+            grenade: grenade_pressed,
+            observer: (!first_person).then(|| [camera.position[0], camera.position[1], -camera.position[2]]),
+        };
+        tick_budget += step_dt;
+        let mut events: Vec<sim::Event> = Vec::new();
+        let mut ticks = 0;
+        while tick_budget >= sim::TICK && ticks < 5 {
+            prev_feet = sim.player.pos;
+            events.extend(sim.tick(&input, sim::TICK));
+            // A key press counts once
+            (input.use_key, input.reload, input.gun, input.grenade) = (false, false, false, false);
+            tick_budget -= sim::TICK;
+            ticks += 1;
+        }
+        if ticks > 0 {
+            (use_pressed, reload_pressed, gun_pressed, grenade_pressed) = (false, false, false, false);
+        }
+        // Past the limit the rest is dropped rather than caught up
+        if tick_budget >= sim::TICK {
+            tick_budget = 0.0;
+        }
+        let game_time = sim.time;
+
+        // The view is at the player's eyes, between where they were a tick ago and now
+        let draw_feet = if first_person {
+            let alpha = if args.walk.is_some() { 1.0 } else { (tick_budget / sim::TICK).clamp(0.0, 1.0) };
+            let (a, b) = (prev_feet, sim.player.pos);
+            let feet = [a[0] * (1.0 - alpha) + b[0] * alpha, a[1] * (1.0 - alpha) + b[1] * alpha, a[2] * (1.0 - alpha) + b[2] * alpha];
+            camera.position = [feet[0], feet[1] + eye_height, -feet[2]];
+            feet
+        } else {
+            sim.player.pos
+        };
+
+        // A blast leaves the view shaken and whited out, and the sound muffled, for a while
+        shake = (shake - 1.4 * step_dt).max(0.0);
+        veil = (veil - 1.6 * step_dt).max(0.0);
+        deaf = (deaf - 0.2 * step_dt).max(0.0);
+        if let Some(snd) = sound.as_mut() {
+            snd.master = master_volume * (1.0 - 0.85 * deaf.min(1.0));
+        }
+
+        // What happened in the ticks: sounds to play, effects to draw, lines for the log
+        for event in events {
+            match event {
+                sim::Event::Sound { name, at, gain } => {
                     if let Some(snd) = sound.as_mut() {
-                        if !sound_name.eq_ignore_ascii_case("none") {
-                            snd.play_at(sound_name, doors[i].center(door_states[i].open), listener_of(&camera), 1.0);
+                        match at {
+                            Some(p) => snd.play_at(&name, p, listener_of(&camera), gain),
+                            None => snd.play(&name, gain),
                         }
                     }
-                    message = (format!("DOOR {}", if door_states[i].opening { "OPENING" } else { "CLOSING" }), game_time + 1.2);
-                    println!("t={game_time:.2} door {} {}", doors[i].name, if door_states[i].opening { "opening" } else { "closing" });
                 }
-                None => message = ("NO DOOR IN REACH".to_string(), game_time + 1.0),
-            }
-        }
-        // Doors move, and the collision and the portals follow
-        for (i, (d, s)) in doors.iter().zip(door_states.iter_mut()).enumerate() {
-            if s.advance(d, step_dt) {
-                world.set_door_open(i, s.open);
-            }
-            if let Some(p) = d.portal {
-                blocked_portals[p] = s.closed();
-            }
-        }
-        // Finish a reload
-        if reload_until.is_some_and(|t| game_time >= t) {
-            let take = (mag_size - ammo).min(reserve);
-            ammo += take;
-            reserve -= take;
-            reload_until = None;
-        }
-        // Injury reactions end and the character goes back to idling
-        for npc in model_spots.iter_mut() {
-            if let combat::NpcState::Reacting { motion, start } = npc.health.state {
-                let frames = npc_motions.get(motion).map_or(1, |m| m.frames) as f32;
-                if (game_time - start) * 30.0 >= frames {
-                    npc.health.state = combat::NpcState::Idle;
+                sim::Event::Log(line) => println!("{line}"),
+                sim::Event::Shot { start, end, hit_character } => {
+                    tracer = Some((start, end, hit_character, game_time + 0.1));
+                }
+                sim::Event::BulletHit { point, normal, dir, surface, material, dist, seed } => {
+                    // The bullet struck the level: leave a hole and throw some debris
+                    let surface = args.decal_surface.unwrap_or(surface);
+                    let mut sparked = false;
+                    if args.realistic_decals {
+                        sparked = effects.impact(surface, point, normal, dir, seed);
+                    }
+                    println!("t={game_time:.2} shot hit {surface:?} ({material}) at {dist:.0} units{}", if sparked { ", sparks" } else { "" });
+                    if surface != Surface::Glass {
+                        let (art, variant) = if args.realistic_decals {
+                            (surface, (seed >> 33) as usize % HOLE_VARIANTS)
+                        } else {
+                            (if surface == Surface::Wood { Surface::Wood } else { Surface::Concrete }, 0)
+                        };
+                        if hole_tex.contains_key(&(art, variant)) {
+                            let roll = ((seed >> 20) & 0xFFFF) as f32 / 65536.0;
+                            decals.push(impact::Decal::new(point, normal, art, args.realistic_decals, variant, roll));
+                            if decals.len() > MAX_DECALS {
+                                decals.remove(0);
+                            }
+                        }
+                    }
+                    if let Some(snd) = sound.as_mut() {
+                        let name = match surface {
+                            _ if sparked => if seed & 1 == 0 { "C_BLRIC1.WAV" } else { "C_BLRIC2.WAV" },
+                            Surface::Wood => "C_BLWOD.WAV",
+                            Surface::Metal => if seed & 1 == 0 { "C_BLMTTK.WAV" } else { "C_BLMTTN.WAV" },
+                            Surface::Earth => "C_BLEAR.WAV",
+                            _ => "C_BLCON.WAV",
+                        };
+                        snd.play_at(name, point, listener_of(&camera), 1.0);
+                    }
+                }
+                sim::Event::Glass { pane, at, dir, seed } => {
+                    fractures.push(glass::shatter(&sim.panes[pane], at, dir, seed));
+                }
+                sim::Event::Blast { point, normal, surface, on_surface, seed } => {
+                    effects.explosion(point, normal, seed, on_surface);
+                    if on_surface && surface != Surface::Glass {
+                        let roll = ((seed >> 20) & 0xFFFF) as f32 / 65536.0;
+                        decals.push(impact::Decal::scorch(point, normal, 100.0 + (seed >> 50) as f32 % 40.0, (seed >> 33) as usize % SCORCH_VARIANTS, roll));
+                        if decals.len() > MAX_DECALS {
+                            decals.remove(0);
+                        }
+                    }
+                }
+                sim::Event::PlayerBlast { shake: s, veil: v } => {
+                    shake = shake.max(s);
+                    veil = veil.max(v);
+                    if s > 0.1 {
+                        deaf = deaf.max(s.min(1.0));
+                        if let Some(snd) = sound.as_mut() {
+                            snd.ring(3.5 * s.min(1.0) + 1.0, 0.2 * s.min(1.0));
+                        }
+                    }
                 }
             }
         }
 
         if first_person {
-            // Speeds are map units per second, scaled by dt so the walk speed
-            // does not depend on the frame rate
+            // The animation follows what the player is trying to do, and plays at the pace
+            // they actually move (a wall stops it)
             let dt = step_dt;
-            // Walking speeds come from the animations so the feet do not slide;
-            // free-fly keeps its fast debug speeds
-            let (w, a, s_, d, run) = (
-                keys.contains(&Key::W), keys.contains(&Key::A), keys.contains(&Key::S),
-                keys.contains(&Key::D), !walk_held,
-            );
-            let scale = args.speed_scale.unwrap_or(1.0);
-            let fwd_speed = scale * if w == s_ { 0.0 }
-                else if w { ground_speed(if run { Movement::Run } else { Movement::Walk }) }
-                else { -ground_speed(Movement::Back) };
-            let side_speed = scale * if a == d { 0.0 }
-                else if d { ground_speed(Movement::StrafeRight) } else { -ground_speed(Movement::StrafeLeft) };
-            let mut vel = [
-                fwd_flat[0] * fwd_speed + right[0] * side_speed,
-                fwd_flat[2] * fwd_speed + right[2] * side_speed,
-            ];
-            // Moving diagonally is no faster than the faster of the two
-            let (len, cap) = ((vel[0] * vel[0] + vel[1] * vel[1]).sqrt(), fwd_speed.abs().max(side_speed.abs()));
-            if len > cap && len > 0.0 {
-                vel = [vel[0] / len * cap, vel[1] / len * cap];
-            }
-
-            let before = player.pos;
-            world.step(&mut player, [vel[0] * dt, -vel[1] * dt], dt);
-
-            // Choose the animation from what the player is trying to do, and
-            // play it at the pace the player actually moved (a wall stops it)
             let wanted = movement_from_keys(
                 keys.contains(&Key::W), keys.contains(&Key::S),
                 keys.contains(&Key::A), keys.contains(&Key::D),
                 !walk_held,
             );
-            let moved = ((player.pos[0] - before[0]).powi(2) + (player.pos[2] - before[2]).powi(2)).sqrt() / dt.max(1e-4);
+            let moved = sim.moved_speed;
             // A wall stops the walking animation; standing still can fire or reload
             let walking = wanted != Movement::Idle && moved >= 5.0;
             let now = if walking {
                 wanted
-            } else if throw.is_some() {
+            } else if sim.throw.is_some() {
                 Movement::Throw
-            } else if reload_until.is_some() {
+            } else if sim.reload_until.is_some() {
                 Movement::Reload
-            } else if gun_trigger && ammo > 0 {
+            } else if sim.gun_trigger && sim.ammo > 0 {
                 Movement::Fire
             } else {
                 Movement::Idle
@@ -826,11 +805,11 @@ fn main() {
             }
             let rate = if matches!(movement, Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw) { 1.0 } else { (moved / (ground_speed(movement) * args.speed_scale.unwrap_or(1.0))).clamp(0.5, 3.0) * args.anim_scale.unwrap_or(1.5) };
             let frames = player_motions.get(movement).map_or(1, |m| m.frames.max(1)) as f32;
-            player_frame = if let (Movement::Reload, Some(t)) = (movement, reload_until) {
+            player_frame = if let (Movement::Reload, Some(t)) = (movement, sim.reload_until) {
                 // Spread the reload animation across the whole reload time
-                (1.0 - (t - game_time) / RELOAD_SECONDS).clamp(0.0, 1.0) * (frames - 1.0)
-            } else if let (Movement::Throw, Some(th)) = (movement, throw) {
-                ((game_time - th.start) / THROW_SECONDS).clamp(0.0, 1.0) * (frames - 1.0)
+                (1.0 - (t - game_time) / sim::RELOAD_SECONDS).clamp(0.0, 1.0) * (frames - 1.0)
+            } else if let (Movement::Throw, Some(th)) = (movement, sim.throw) {
+                ((game_time - th.start) / sim::THROW_SECONDS).clamp(0.0, 1.0) * (frames - 1.0)
             } else {
                 (player_frame + rate * 30.0 * dt) % frames
             };
@@ -838,352 +817,25 @@ fn main() {
             let phase = (player_frame / (frames / 2.0).max(1.0)) as i32;
             if phase != step_phase {
                 step_phase = phase;
-                if walking && player.on_ground {
+                if walking && sim.player.on_ground {
                     if let Some(snd) = sound.as_mut() {
                         snd.play(if movement == Movement::Run { "F_HRCON1.WAV" } else { "F_HWCON1.WAV" }, 1.0);
-                    }
-                }
-            }
-            camera.position = [
-                player.pos[0],
-                player.pos[1] + eye_height,
-                -player.pos[2],
-            ];
-
-            // A grenade: hold the trigger to wind up, let go to throw. The swing plays for a
-            // moment (in third person you see it), and the grenade leaves the hand part of the way in.
-            if equipped_grenade {
-                let mut finished = false;
-                match throw.as_mut() {
-                    None => {
-                        if trigger && grenades_left > 0 {
-                            charge_from.get_or_insert(game_time);
-                        } else if let Some(from) = charge_from.take() {
-                            let charge = ((game_time - from) / grenade::CHARGE_SECONDS).clamp(0.0, 1.0);
-                            throw = Some(Throw { start: game_time, charge, thrown: false });
-                        } else if trigger && grenades_left == 0 && game_time >= message.1 {
-                            message = ("NO GRENADES".to_string(), game_time + 0.8);
-                        }
-                    }
-                    Some(th) => {
-                        let progress = (game_time - th.start) / THROW_SECONDS;
-                        if !th.thrown && progress >= THROW_RELEASE {
-                            th.thrown = true;
-                            grenades_left -= 1;
-                            let eye = [player.pos[0], player.pos[1] + eye_height, player.pos[2]];
-                            let f = camera.get_forward();
-                            // Thrown a little upward, as a lob
-                            let aim = unit3([f[0], f[1] + 0.14, -f[2]]);
-                            let side = listener_of(&camera).right;
-                            let want = [eye[0] + aim[0] * 28.0 + side[0] * 10.0, eye[1] + aim[1] * 28.0 - 12.0, eye[2] + aim[2] * 28.0 + side[2] * 10.0];
-                            // Not through a wall that is right in front of the player
-                            let to = unit3([want[0] - eye[0], want[1] - eye[1], want[2] - eye[2]]);
-                            let reach = dist3(eye, want);
-                            let from = match world.raycast(eye, to, reach + grenade::RADIUS) {
-                                Some(d) => { let d = (d - grenade::RADIUS - 1.0).max(0.0); [eye[0] + to[0] * d, eye[1] + to[1] * d, eye[2] + to[2] * d] }
-                                None => want,
-                            };
-                            thrown.push(grenade::Grenade::thrown(from, aim, th.charge, [0.0; 3]));
-                            println!("t={game_time:.2} threw a grenade at {:.0}% power", th.charge * 100.0);
-                        }
-                        finished = progress >= 1.0;
-                    }
-                }
-                if finished {
-                    throw = None;
-                    if grenades_left == 0 {
-                        equipped_grenade = false;
-                        message = ("OUT OF GRENADES".to_string(), game_time + 1.2);
-                    }
-                }
-            }
-
-            // Shooting: a ray from the eye along the view, stopped by walls
-            if gun_trigger && reload_until.is_none() && ammo == 0 && reserve > 0 {
-                reload_until = Some(game_time + RELOAD_SECONDS);
-            }
-            if gun_trigger && reload_until.is_none() && ammo > 0 && game_time >= next_shot {
-                ammo -= 1;
-                next_shot = game_time + 60.0 / 800.0; // the MP5K fires about 800 rounds a minute
-                flash_until = game_time + 0.05;
-
-                let eye = [player.pos[0], player.pos[1] + eye_height, player.pos[2]];
-                let f = camera.get_forward();
-                let dir = [f[0], f[1], -f[2]]; // camera space to MAP space
-                let mut wall = world.raycast(eye, dir, 20000.0);
-
-                let mut best: Option<(usize, combat::Hit)> = None;
-                if let (Some(c), Some((skel, skin))) = (&character, &rig) {
-                    for (i, npc) in model_spots.iter().enumerate() {
-                        if npc.health.is_dead() {
-                            continue;
-                        }
-                        let verts = npc_verts(npc, game_time);
-                        if let Some(h) = combat::raycast_character(c, skel, skin, &verts, &placement(npc), eye, dir) {
-                            if best.map_or(true, |(_, b)| h.distance < b.distance) {
-                                best = Some((i, h));
-                            }
-                        }
-                    }
-                }
-
-                // Glass in the way breaks and lets the bullet through
-                loop {
-                    let glass_hit = panes.iter().enumerate()
-                        .filter(|(i, _)| broken_at[*i].is_none())
-                        .filter_map(|(i, p)| p.raycast(eye, dir).map(|d| (i, d)))
-                        .min_by(|a, b| a.1.total_cmp(&b.1));
-                    let Some((gi, gd)) = glass_hit else { break };
-                    // Something solid, or a character, is in front of the glass
-                    if wall.is_some_and(|w| w < gd - 0.5) || best.as_ref().is_some_and(|(_, h)| h.distance < gd) {
-                        break;
-                    }
-                    broken_at[gi] = Some(game_time);
-                    world.switch_off(&panes[gi].name);
-                    rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
-                    let at = [eye[0] + dir[0] * gd, eye[1] + dir[1] * gd, eye[2] + dir[2] * gd];
-                    fractures.push(glass::shatter(&panes[gi], at, dir, rng));
-                    println!("t={game_time:.2} shot broke glass {}", panes[gi].name);
-                    if let Some(snd) = sound.as_mut() {
-                        snd.play_at("C_GBRKMD.WAV", panes[gi].center(), listener_of(&camera), 1.0);
-                    }
-                    wall = world.raycast(eye, dir, 20000.0);
-                }
-
-                let start = [eye[0] + dir[0] * 30.0, eye[1] + dir[1] * 30.0 - 8.0, eye[2] + dir[2] * 30.0];
-                match best {
-                    Some((i, hit)) if wall.map_or(true, |w| hit.distance <= w) => {
-                        rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
-                        let result = model_spots[i].health.apply_hit(&hit, game_time, (rng >> 33) as u32);
-                        target_hp = Some(model_spots[i].health.hp);
-                        println!("t={game_time:.2} shot hit character {i}: {:?} from the {:?}, {:?}, hp now {}", hit.part, hit.facing, result, model_spots[i].health.hp);
-                        message = (match result {
-                            combat::HitResult::Killed => {
-                                kills += 1;
-                                if hit.part == combat::BodyPart::Head { "HEAD SHOT KILL".to_string() } else { "KILLED".to_string() }
-                            }
-                            _ => format!("HIT {:?}", hit.part).to_uppercase(),
-                        }, game_time + 1.2);
-                        if let Some(snd) = sound.as_mut() {
-                            let listener = listener_of(&camera);
-                            snd.play_at("C_BHTHT.WAV", hit.point, listener, 1.0);
-                            // Voices: a grunt when hurt, a cry when killed
-                            let (name, n) = if matches!(result, combat::HitResult::Killed) { ("re_ded", 2) } else { ("re_wnd", 3) };
-                            let pick = 1 + (rng >> 40) as u32 % n;
-                            snd.play_at(&format!("English/{name}{pick}.wav"), model_spots[i].pos, listener, 1.0);
-                        }
-                        tracer = Some((start, hit.point, true, game_time + 0.1));
-                    }
-                    _ => {
-                        // The bullet struck the level: leave a hole and throw some debris
-                        if let Some(hit) = wall.and_then(|_| world.raycast_hit(eye, dir, 20000.0)) {
-                            let point = [eye[0] + dir[0] * hit.dist, eye[1] + dir[1] * hit.dist, eye[2] + dir[2] * hit.dist];
-                            let surface = hit.material
-                                .and_then(|m| level.materials.materials.get(m))
-                                .map_or(Surface::Concrete, |m| Surface::classify(&m.filename));
-                            let surface = args.decal_surface.unwrap_or(surface);
-                            let material = hit.material.and_then(|m| level.materials.materials.get(m)).map_or("?", |m| m.filename.as_str());
-                            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
-                            let mut sparked = false;
-                            if args.realistic_decals {
-                                sparked = effects.impact(surface, point, hit.normal, dir, rng);
-                            }
-                            println!("t={game_time:.2} shot hit {surface:?} ({material}) at {:.0} units{}", hit.dist, if sparked { ", sparks" } else { "" });
-                            if surface != Surface::Glass {
-                                let (art, variant) = if args.realistic_decals {
-                                    (surface, (rng >> 33) as usize % HOLE_VARIANTS)
-                                } else {
-                                    (if surface == Surface::Wood { Surface::Wood } else { Surface::Concrete }, 0)
-                                };
-                                if hole_tex.contains_key(&(art, variant)) {
-                                    let roll = ((rng >> 20) & 0xFFFF) as f32 / 65536.0;
-                                    decals.push(impact::Decal::new(point, hit.normal, art, args.realistic_decals, variant, roll));
-                                    if decals.len() > MAX_DECALS {
-                                        decals.remove(0);
-                                    }
-                                }
-                            }
-                            if let Some(snd) = sound.as_mut() {
-                                let name = match surface {
-                                    _ if sparked => if rng & 1 == 0 { "C_BLRIC1.WAV" } else { "C_BLRIC2.WAV" },
-                                    Surface::Wood => "C_BLWOD.WAV",
-                                    Surface::Metal => if rng & 1 == 0 { "C_BLMTTK.WAV" } else { "C_BLMTTN.WAV" },
-                                    Surface::Earth => "C_BLEAR.WAV",
-                                    _ => "C_BLCON.WAV",
-                                };
-                                snd.play_at(name, point, listener_of(&camera), 1.0);
-                            }
-                        }
-                        let d = wall.unwrap_or(5000.0);
-                        tracer = Some((start, [eye[0] + dir[0] * d, eye[1] + dir[1] * d, eye[2] + dir[2] * d], false, game_time + 0.1));
-                    }
-                }
-            }
-        } else {
-            // mv is per-frame at 60 FPS; scale so free-fly speed does not depend on frame rate
-            camera.position[0] += mv[0] * step_dt * 60.0;
-            camera.position[2] += mv[1] * step_dt * 60.0;
-        }
-
-        // Grenades in the air: they bounce off the level and go off when the fuse runs out
-        shake = (shake - 1.4 * step_dt).max(0.0);
-        veil = (veil - 1.6 * step_dt).max(0.0);
-        deaf = (deaf - 0.2 * step_dt).max(0.0);
-        if let Some(snd) = sound.as_mut() {
-            snd.master = master_volume * (1.0 - 0.85 * deaf.min(1.0));
-        }
-        let mut blasts: Vec<[f32; 3]> = Vec::new();
-        for g in thrown.iter_mut() {
-            for b in g.update(step_dt, &world) {
-                // Glass: it goes through, shattering the pane, slowed and knocked off line
-                let heading = unit3(b.incoming);
-                let behind = [b.point[0] - heading[0] * 20.0, b.point[1] - heading[1] * 20.0, b.point[2] - heading[2] * 20.0];
-                let pane = panes.iter().enumerate()
-                    .filter(|(i, _)| broken_at[*i].is_none())
-                    .filter_map(|(i, p)| p.raycast(behind, heading).filter(|d| *d < 45.0).map(|d| (i, d)))
-                    .min_by(|a, c| a.1.total_cmp(&c.1));
-                if let Some((gi, _)) = pane {
-                    broken_at[gi] = Some(game_time);
-                    world.switch_off(&panes[gi].name);
-                    next_rng(&mut rng);
-                    fractures.push(glass::shatter(&panes[gi], b.point, heading, rng));
-                    let wobble = |bits: u64| ((bits & 0xFFFF) as f32 / 32768.0 - 1.0) * 0.18;
-                    let (sx, sy, sz) = (wobble(rng >> 8), wobble(rng >> 24), wobble(rng >> 40));
-                    let speed = (b.incoming[0].powi(2) + b.incoming[1].powi(2) + b.incoming[2].powi(2)).sqrt() * 0.6;
-                    g.vel = mul3(unit3([heading[0] + sx, heading[1] + sy, heading[2] + sz]), speed);
-                    g.pos = [b.point[0] + heading[0] * 12.0, b.point[1] + heading[1] * 12.0, b.point[2] + heading[2] * 12.0];
-                    g.at_rest = false;
-                    if let Some(snd) = sound.as_mut() {
-                        snd.play_at("C_GBRKMD.WAV", b.point, listener_of(&camera), 1.0);
-                    }
-                    continue;
-                }
-                if let Some(snd) = sound.as_mut() {
-                    let surface = b.material.and_then(|m| level.materials.materials.get(m)).map_or(Surface::Concrete, |m| Surface::classify(&m.filename));
-                    let name = match surface {
-                        Surface::Metal => "C_GRMET.WAV",
-                        Surface::Wood => "C_GRWOD.WAV",
-                        Surface::Earth | Surface::Soft => "C_GREAR.WAV",
-                        _ => "C_GRCON.WAV",
-                    };
-                    snd.play_at(name, b.point, listener_of(&camera), (b.speed / 500.0).clamp(0.25, 1.0));
-                }
-            }
-            if g.goes_off() {
-                blasts.push(g.pos);
-            }
-        }
-        thrown.retain(|g| !g.goes_off());
-        for c in blasts {
-            // The surface it went off against, the nearest of the six directions
-            let mut near: Option<(f32, [f32; 3], [f32; 3], Option<usize>)> = None;
-            for d in [[0.0, -1.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0]] {
-                if let Some(h) = world.raycast_hit(c, d, 80.0) {
-                    if near.is_none_or(|n| h.dist < n.0) {
-                        near = Some((h.dist, [c[0] + d[0] * h.dist, c[1] + d[1] * h.dist, c[2] + d[2] * h.dist], h.normal, h.material));
-                    }
-                }
-            }
-            let (point, normal, material) = near.map_or((c, [0.0, 1.0, 0.0], None), |n| (n.1, n.2, n.3));
-            let surface = material.and_then(|m| level.materials.materials.get(m)).map_or(Surface::Concrete, |m| Surface::classify(&m.filename));
-            next_rng(&mut rng);
-            // In mid-air (nothing within a meter) there is no ground to scorch or throw dust along
-            let on_surface = near.is_some_and(|n| n.0 < 100.0);
-            effects.explosion(point, normal, rng, on_surface);
-            if on_surface && surface != Surface::Glass {
-                let roll = ((rng >> 20) & 0xFFFF) as f32 / 65536.0;
-                decals.push(impact::Decal::scorch(point, normal, 100.0 + (rng >> 50) as f32 % 40.0, (rng >> 33) as usize % SCORCH_VARIANTS, roll));
-                if decals.len() > MAX_DECALS {
-                    decals.remove(0);
-                }
-            }
-            println!("t={game_time:.2} grenade went off at ({:.0}, {:.0}, {:.0}) on {surface:?}", c[0], c[1], c[2]);
-            if let Some(snd) = sound.as_mut() {
-                snd.play_at("C_GRFRAG.WAV", c, listener_of(&camera), 1.0);
-            }
-
-            // Characters: killed close in, hurt further out, and shielded by walls
-            for i in 0..model_spots.len() {
-                if model_spots[i].health.is_dead() {
-                    continue;
-                }
-                let place = placement(&model_spots[i]);
-                let chest = [place.pos[0], place.pos[1] + 100.0, place.pos[2]];
-                let head = [place.pos[0], place.pos[1] + 160.0, place.pos[2]];
-                let strength = grenade::blast_strength(dist3(c, chest));
-                if strength < 0.02 || !(grenade::clear_between(&world, c, chest) || grenade::clear_between(&world, c, head)) {
-                    continue;
-                }
-                let from = place.facing_of_shot(unit3([chest[0] - c[0], chest[1] - c[1], chest[2] - c[2]]));
-                next_rng(&mut rng);
-                let result = model_spots[i].health.apply_blast(100.0 * strength, from, game_time, (rng >> 33) as u32);
-                target_hp = Some(model_spots[i].health.hp);
-                println!("t={game_time:.2} grenade hit character {i} at {:.0} units: {result:?}, hp now {}", dist3(c, chest), model_spots[i].health.hp);
-                if matches!(result, combat::HitResult::Killed) {
-                    kills += 1;
-                    message = ("GRENADE KILL".to_string(), game_time + 1.2);
-                }
-                if let Some(snd) = sound.as_mut() {
-                    let (name, n) = if matches!(result, combat::HitResult::Killed) { ("re_ded", 2) } else { ("re_wnd", 3) };
-                    snd.play_at(&format!("English/{name}{}.wav", 1 + (rng >> 40) as u32 % n), model_spots[i].pos, listener_of(&camera), 1.0);
-                }
-            }
-
-            // Glass in reach breaks, the nearest panes first
-            let mut panes_near: Vec<(usize, f32)> = panes.iter().enumerate()
-                .filter(|(i, _)| broken_at[*i].is_none())
-                .map(|(i, p)| (i, p.distance_to(c)))
-                .filter(|(_, d)| *d <= grenade::GLASS_REACH)
-                .collect();
-            panes_near.sort_by(|a, b| a.1.total_cmp(&b.1));
-            let mut heard = 0;
-            for (gi, _) in panes_near {
-                let at = panes[gi].center();
-                if !grenade::clear_between(&world, c, at) {
-                    continue;
-                }
-                broken_at[gi] = Some(game_time);
-                world.switch_off(&panes[gi].name);
-                next_rng(&mut rng);
-                fractures.push(glass::shatter(&panes[gi], at, unit3([at[0] - c[0], at[1] - c[1], at[2] - c[2]]), rng));
-                if heard < 3 {
-                    heard += 1;
-                    if let Some(snd) = sound.as_mut() {
-                        snd.play_at("C_GBRKMD.WAV", at, listener_of(&camera), 1.0);
-                    }
-                }
-            }
-
-            // The player: shaken, dazzled and deafened more the nearer, and less behind a wall
-            if first_person {
-                let eye = [player.pos[0], player.pos[1] + eye_height, player.pos[2]];
-                let d = dist3(c, eye);
-                let open = grenade::clear_between(&world, c, eye);
-                let s = grenade::shake(d, open);
-                shake = shake.max(s);
-                if open {
-                    veil = veil.max(((900.0 - d) / 900.0).clamp(0.0, 1.0));
-                }
-                if s > 0.1 {
-                    deaf = deaf.max(s.min(1.0));
-                    if let Some(snd) = sound.as_mut() {
-                        snd.ring(3.5 * s.min(1.0) + 1.0, 0.2 * s.min(1.0));
                     }
                 }
             }
         }
 
         // Reload sound when a reload starts (by key or running dry)
-        if reload_until.is_some() && !was_reloading {
+        if sim.reload_until.is_some() && !was_reloading {
             if let Some(snd) = sound.as_mut() {
                 snd.play("C_SBMAG1.WAV", 1.0);
             }
         }
-        was_reloading = reload_until.is_some();
+        was_reloading = sim.reload_until.is_some();
 
         // Full auto: the firing sound runs while the trigger is held with rounds to fire,
         // then stops with a closing crack
-        let firing = first_person && gun_trigger && reload_until.is_none() && ammo > 0;
+        let firing = sim.firing();
         if let Some(snd) = sound.as_mut() {
             if firing && firing_sound.is_none() {
                 firing_sound = snd.play_loop("C_SB5KB.WAV", 1.0);
@@ -1203,48 +855,7 @@ fn main() {
             amb.update(snd, &rooms, listener, game_time, step_dt);
         }
 
-        // The room the player is in: the point just above the feet (the camera when
-        // flying), low enough to land inside the thin slabs that stairs and ramps use.
-        // Where no room claims it, the last room stays.
-        // The camera's Z is negated relative to the map
-        let probe = [camera.position[0], camera.position[1] - if first_person { eye_height - 10.0 } else { 0.0 }, -camera.position[2]];
-        if let Some(i) = level.rooms.locate(probe, current_room) {
-            current_room = Some(i);
-        }
-        // Where the player's feet and eyes are, for portals they are standing in
-        let body = [probe, [camera.position[0], camera.position[1], -camera.position[2]]];
-        // Only the player's room and the rooms its portals lead to can stop movement or
-        // bullets: the level overlaps itself, and the exterior of a plane must not block
-        // anyone inside it
-        let player_rooms = visibility.player_rooms(&level, probe, current_room);
-        // The room drawing starts from: the one whose floor the player stands on, as
-        // overlapping rooms (a stairwell beside a hall, an upstairs over a downstairs)
-        // all claim the same spot. Airborne, the last one stays; flying, the smallest
-        // room around the camera.
-        let floor_room = if first_person {
-            world.floor_room([probe[0], probe[1] - 10.0, probe[2]])
-                .filter(|&n| visibility.is_room(n))
-        } else {
-            None
-        };
-        let render_rooms: Vec<u32> = match floor_room {
-            Some(n) => vec![n],
-            None if first_person && !last_render_rooms.is_empty() => last_render_rooms.clone(),
-            None => current_room.and_then(|i| visibility.number_of(i)).map(|n| vec![n]).unwrap_or_else(|| player_rooms.clone()),
-        };
-        last_render_rooms = render_rooms.clone();
-        // What stops the player: their room, the rooms through its portals but only
-        // beyond them, and the other rooms they are well inside (they can hold the floor)
-        let wanted: Option<Vec<rogue_reborn::collision::SolidRoom>> = if culling && !render_rooms.is_empty() {
-            Some(visibility.solid_rooms(&level, &render_rooms, &player_rooms, &body))
-        } else {
-            None
-        };
-        if wanted != collision_rooms {
-            world.set_solid_rooms(wanted.as_deref());
-            collision_rooms = wanted;
-        }
-        let current_rooms: Vec<&str> = current_room.map(|i| level.rooms.rooms[i].section_name.as_str()).into_iter().collect();
+        let current_rooms: Vec<&str> = sim.current_room.map(|i| level.rooms.rooms[i].section_name.as_str()).into_iter().collect();
         if room_debug && current_rooms != last_rooms {
             println!("in rooms: {current_rooms:?}");
             last_rooms = current_rooms.iter().map(|s| s.to_string()).collect();
@@ -1297,12 +908,12 @@ fn main() {
             // seen through the previous one's portals (see visibility::plan)
             let cam_eye = [view.position[0], view.position[1], -view.position[2]];
             let mut plan: Vec<rogue_reborn::visibility::PlanNode> = Vec::new();
-            if culling && !render_rooms.is_empty() {
+            if sim.culling && !sim.render_rooms.is_empty() {
                 let (mut modelview, mut projection) = ([0f32; 16], [0f32; 16]);
                 glGetFloatv(0x0BA6, modelview.as_mut_ptr()); // GL_MODELVIEW_MATRIX
                 glGetFloatv(0x0BA7, projection.as_mut_ptr()); // GL_PROJECTION_MATRIX
                 let clip = |v: [f32; 3]| mul_mat4(&projection, mul_mat4(&modelview, [v[0], v[1], v[2], 1.0]));
-                plan = render_rooms.iter().map(|&r| visibility.plan(&level, r, &body, cam_eye, &blocked_portals, &clip)).collect();
+                plan = sim.render_rooms.iter().map(|&r| sim.visibility.plan(&level, r, &sim.body, cam_eye, &sim.blocked_portals, &clip)).collect();
             }
             drawn_rooms = {
                 let mut v: Vec<u32> = Vec::new();
@@ -1339,8 +950,8 @@ fn main() {
                     set_clip_planes(planes);
                     let indices: &[usize] = match which {
                         Which::All => &all_objects,
-                        Which::Room(n) => visibility.objects_of(n),
-                        Which::Unowned => visibility.unowned_objects(),
+                        Which::Room(n) => sim.visibility.objects_of(n),
+                        Which::Unowned => sim.visibility.unowned_objects(),
                     };
                     // The doors of these rooms are drawn along with them, each leaf where
                     // its door is
@@ -1349,20 +960,20 @@ fn main() {
                         Which::Room(n) => doors_by_room.get(&n).map(Vec::as_slice).unwrap_or_default(),
                         Which::Unowned => &[],
                     };
-                    let items = indices.iter().map(|&i| (i, None)).chain(room_doors.iter().map(|&d| (doors[d].model_index, Some(d))));
+                    let items = indices.iter().map(|&i| (i, None)).chain(room_doors.iter().map(|&d| (sim.doors[d].model_index, Some(d))));
                     for (object_index, door) in items {
                         let object = &level.geometries.objects[object_index];
                         // Panes are drawn in place below, and door leaves with their doors
                         if pane_objects[object_index] || (door_leaf[object_index] && door.is_none()) {
                             continue;
                         }
-                        let room = visibility.room_of_object(object_index);
+                        let room = sim.visibility.room_of_object(object_index);
                         if room.is_some_and(|n| args.hide_rooms.contains(&n)) {
                             continue;
                         }
                         if let Some(d) = door {
                             glPushMatrix();
-                            glMultMatrixf(doors[d].matrix(door_states[d].open).as_ptr());
+                            glMultMatrixf(sim.doors[d].matrix(sim.door_states[d].open).as_ptr());
                         }
                         if room_debug {
                             let [r, g, b] = room_color(&object.name, current_rooms.iter().any(|n| *n == object.name));
@@ -1438,22 +1049,23 @@ fn main() {
             }
 
             // Characters at the spawn points, posed for what they are doing
-            if let Some(c) = &character {
+            if let Some(chars) = &sim.characters {
+                let c = &chars.model;
                 glDisable(0x0DE1); // GL_TEXTURE_2D
                 let clock = start_time.elapsed().as_secs_f32();
-                for spot in &model_spots {
-                    let posed = npc_verts(spot, game_time);
+                for (i, spot) in sim.npcs.iter().enumerate() {
+                    let idle = args.anim_frame.unwrap_or_else(|| game_time * args.anim_fps.unwrap_or(30.0) + spot.stagger * 9.0);
+                    let posed = chars.pose(spot, game_time, idle);
                     let verts: &[[f32; 3]] = if posed.is_empty() { &c.vertices } else { &posed };
                     let y = if posed.is_empty() { spot.pos[1] } else { spot.floor };
                     glPushMatrix();
                     glTranslatef(spot.pos[0], y, spot.pos[2]);
                     glRotatef(spot.yaw, 0.0, 1.0, 0.0);
-                    let scale = spot.actor.map_or([1.0; 3], |a| actors[a].scale);
-                    glScalef(scale[0], scale[1], scale[2]);
+                    glScalef(spot.scale[0], spot.scale[1], spot.scale[2]);
                     // Eyes shut for 0.15 s every 4 s, staggered per model; the dead keep them shut
                     let blinking = args.eyes_closed || spot.health.is_dead()
-                        || (blink_enabled && (clock + spot.blink_offset) % 4.0 < 0.15);
-                    let face = spot.actor.map(|a| face_textures[a]).and_then(|(main, blink)| {
+                        || (blink_enabled && (clock + spot.stagger) % 4.0 < 0.15);
+                    let face = npc_actor[i].map(|a| face_textures[a]).and_then(|(main, blink)| {
                         if blinking { blink.or(main) } else { main }
                     });
                     draw_character(c, verts, &part_textures, face, textured);
@@ -1463,7 +1075,9 @@ fn main() {
             }
 
             // The player's own body, shown in third person
-            if let (true, true, Some(c), Some((skel, skin))) = (first_person, third_person, &character, &rig) {
+            if let (true, true, Some(chars)) = (first_person, third_person, &sim.characters) {
+                if let Some(Rig { skeleton: skel, skin }) = &chars.rig {
+                let c = &chars.model;
                 if let Some(mot) = player_motions.get(movement) {
                     let (root, mut rots) = mot.sample(player_frame.min(mot.frames.saturating_sub(1) as f32));
                     // Moving: legs from the locomotion cycle, upper body keeps the gun hold
@@ -1485,7 +1099,7 @@ fn main() {
                         if blinking { blink.or(main) } else { main }
                     });
                     glPushMatrix();
-                    glTranslatef(player.pos[0], player.pos[1], player.pos[2]);
+                    glTranslatef(draw_feet[0], draw_feet[1], draw_feet[2]);
                     // The body faces where the player looks (model forward is +Z)
                     glRotatef(-camera.yaw, 0.0, 1.0, 0.0);
                     let scale = actors.first().map_or([1.0; 3], |a| a.scale);
@@ -1493,25 +1107,26 @@ fn main() {
                     draw_character(c, &verts, &part_textures, face, textured);
 
                     // The MP5K in the right hand, or a grenade until it is thrown
-                    let in_hand = if equipped_grenade { throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
+                    let in_hand = if sim.equipped_grenade { sim.throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
                     if let (Some(Some(wd)), Some((hand, off))) = (in_hand, &weapon_attach) {
                         glPushMatrix();
                         glMultMatrixf(pose[*hand].matrix().as_ptr());
                         glMultMatrixf(off.matrix().as_ptr());
-                        if equipped_grenade {
+                        if sim.equipped_grenade {
                             glTranslatef(-wd.center[0], -wd.center[1], -wd.center[2]);
                         }
-                        draw_weapon(wd, textured, !equipped_grenade && game_time < flash_until);
+                        draw_weapon(wd, textured, !sim.equipped_grenade && game_time < sim.flash_until);
                         glPopMatrix();
                     }
                     glPopMatrix();
                     glColor4f(1.0, 1.0, 1.0, 1.0);
                 }
+                }
             }
 
             // Grenades in the air
             if let Some(gd) = &grenade_draw {
-                for g in &thrown {
+                for g in &sim.thrown {
                     glPushMatrix();
                     glTranslatef(g.pos[0], g.pos[1], g.pos[2]);
                     glRotatef(g.spin, 1.0, 0.3, 0.0);
@@ -1624,10 +1239,10 @@ fn main() {
 
             // Glass: intact panes, then the pieces of broken ones falling away
             for f in fractures.iter_mut() {
-                f.update(step_dt, &|x, z, y| world.ground_at(x, z, y + 30.0));
+                f.update(step_dt, &|x, z, y| sim.world.ground_at(x, z, y + 30.0));
             }
             fractures.retain(|f| !f.done());
-            for (pane, _) in panes.iter().zip(&broken_at).filter(|(_, b)| b.is_none()) {
+            for (pane, _) in sim.panes.iter().zip(&sim.broken_at).filter(|(_, b)| b.is_none()) {
                 draw_glass(&level.materials, pane.material, &map_num, &mut textures, textured, pane.opacity, pane.tris.iter().map(|t| (t.p, t.uv)));
             }
             for f in &fractures {
@@ -1689,21 +1304,21 @@ fn main() {
 
         // The held weapon in front of the camera, over the scene. A grenade is small, so it is held
         // further out in proportion, drawn back by the wind-up, and gone once it has been thrown.
-        let held = if equipped_grenade { grenade_draw.as_ref().filter(|_| throw.is_none_or(|t| !t.thrown)) } else { weapon_draw.as_ref() };
+        let held = if sim.equipped_grenade { grenade_draw.as_ref().filter(|_| sim.throw.is_none_or(|t| !t.thrown)) } else { weapon_draw.as_ref() };
         if let (true, true, false, Some(wd)) = (args.viewmodel, first_person, third_person, held) {
             let l = wd.length;
-            let [ox, oy, oz] = if equipped_grenade {
-                let held_for = charge_from.map_or(0.0, |from| ((game_time - from) / grenade::CHARGE_SECONDS).clamp(0.0, 1.0));
-                let swing = throw.map_or(0.0, |t| t.charge.max(((game_time - t.start) / THROW_SECONDS / THROW_RELEASE).clamp(0.0, 1.0)));
+            let [ox, oy, oz] = if sim.equipped_grenade {
+                let held_for = sim.charge_from.map_or(0.0, |from| ((game_time - from) / grenade::CHARGE_SECONDS).clamp(0.0, 1.0));
+                let swing = sim.throw.map_or(0.0, |t| t.charge.max(((game_time - t.start) / sim::THROW_SECONDS / sim::THROW_RELEASE).clamp(0.0, 1.0)));
                 let wind = held_for.max(swing);
                 [1.7 + 0.9 * wind, -1.2 - 0.6 * wind, 8.0 - 1.8 * wind]
             } else {
                 args.viewmodel_offset.unwrap_or([0.45, -0.45, 1.5])
             };
             // Recoil pushes the gun back at the player; a reload dips it out of view
-            let kick = ((flash_until - game_time) / 0.05).clamp(0.0, 1.0) * 0.04 * l;
-            let dip = reload_until.map_or(0.0, |t| {
-                let p = (1.0 - (t - game_time) / RELOAD_SECONDS).clamp(0.0, 1.0);
+            let kick = ((sim.flash_until - game_time) / 0.05).clamp(0.0, 1.0) * 0.04 * l;
+            let dip = sim.reload_until.map_or(0.0, |t| {
+                let p = (1.0 - (t - game_time) / sim::RELOAD_SECONDS).clamp(0.0, 1.0);
                 (p * std::f32::consts::PI).sin() * 0.8 * l
             });
             unsafe {
@@ -1721,7 +1336,7 @@ fn main() {
                 glRotatef(180.0, 0.0, 1.0, 0.0);
                 glRotatef(-90.0, 1.0, 0.0, 0.0);
                 glTranslatef(-wd.center[0], -wd.center[1], -wd.center[2]);
-                draw_weapon(wd, textured, game_time < flash_until);
+                draw_weapon(wd, textured, game_time < sim.flash_until);
                 glColor4f(1.0, 1.0, 1.0, 1.0);
             }
         }
@@ -1738,21 +1353,21 @@ fn main() {
         let render_text = format!("RENDER: {:.2} MS", render_ms);
         if first_person {
             let mut status = vec![
-                format!("KILLS: {kills}"),
-                if equipped_grenade { format!("GRENADES: {grenades_left}") }
-                    else if reload_until.is_some() { "RELOADING".to_string() } else { format!("AMMO: {ammo}/{reserve}") },
+                format!("KILLS: {}", sim.kills),
+                if sim.equipped_grenade { format!("GRENADES: {}", sim.grenades_left) }
+                    else if sim.reload_until.is_some() { "RELOADING".to_string() } else { format!("AMMO: {}/{}", sim.ammo, sim.reserve) },
             ];
-            if let Some(from) = charge_from {
+            if let Some(from) = sim.charge_from {
                 status.insert(0, format!("POWER: {:.0}", ((game_time - from) / grenade::CHARGE_SECONDS).clamp(0.0, 1.0) * 100.0));
             }
-            if let Some(hp) = target_hp {
+            if let Some(hp) = sim.target_hp {
                 status.insert(0, format!("TARGET: {hp:.0}"));
             }
-            let msg = if game_time < message.1 { message.0.as_str() } else { "" };
+            let msg = if game_time < sim.message.1 { sim.message.0.as_str() } else { "" };
             let marker = tracer.is_some_and(|t| t.2 && game_time < t.3);
             draw_hud(w, h, &status, msg, marker, veil);
         }
-        let rooms_text = if culling {
+        let rooms_text = if sim.culling {
             format!("ROOM: {} DRAWN: {}", current_rooms.join(" "), drawn_rooms.join(" "))
         } else {
             format!("ROOM: {} (CULLING OFF)", current_rooms.join(" "))
@@ -1771,13 +1386,13 @@ fn main() {
             let eye = [camera.position[0], camera.position[1], -camera.position[2]];
             let f = camera.get_forward();
             let dir = [f[0], f[1], -f[2]];
-            let hit = world.raycast_hit(eye, dir, 20000.0).map(|hit| {
+            let hit = sim.world.raycast_hit(eye, dir, 20000.0).map(|hit| {
                 let point = [eye[0] + dir[0] * hit.dist, eye[1] + dir[1] * hit.dist, eye[2] + dir[2] * hit.dist];
                 let material = hit.material.and_then(|m| level.materials.materials.get(m)).map_or("?", |m| m.filename.as_str());
                 (hit, point, material)
             });
             let feet = [eye[0], eye[1] - if first_person { eye_height } else { 0.0 }, eye[2]];
-            let nearby_doors: Vec<String> = doors.iter().zip(&door_states)
+            let nearby_doors: Vec<String> = sim.doors.iter().zip(&sim.door_states)
                 .filter_map(|(d, s)| {
                     let c = d.center(s.open);
                     let dist = ((c[0] - eye[0]).powi(2) + (c[1] - eye[1]).powi(2) + (c[2] - eye[2]).powi(2)).sqrt();
@@ -1788,7 +1403,7 @@ fn main() {
             let report = DebugReport {
                 map_path, map_num: &map_num, level: &level, eye, feet, yaw: camera.yaw, pitch: camera.pitch, dir,
                 hit, first_person, third_person, textured, room_debug, show_portals, show_collisions,
-                fps, render_ms, culling, room: current_rooms.first().copied(), drawn: &drawn_rooms, collision: &collision_rooms, player_rooms: &player_rooms, render_rooms: &render_rooms, doors: &nearby_doors,
+                fps, render_ms, culling: sim.culling, room: current_rooms.first().copied(), drawn: &drawn_rooms, collision: &sim.collision_rooms, player_rooms: &sim.player_rooms, render_rooms: &sim.render_rooms, doors: &nearby_doors,
             };
             match write_debug_dump(&report, &rgb, fw as u32, fh as u32) {
                 Ok(stem) => println!("wrote {stem}.png and {stem}.txt"),
@@ -1851,5 +1466,3 @@ fn main() {
     }
 }
 
-/// How far away the door being opened or closed can be
-const DOOR_REACH: f32 = 220.0;
