@@ -115,6 +115,26 @@ pub struct CollisionWorld {
     rows: usize,
     cells: Vec<Vec<u32>>,
     params: Params,
+    /// The doors, each a leaf of triangles that moves as the door opens
+    doors: Vec<DoorBody>,
+}
+
+/// A door's leaf in the collision world
+struct DoorBody {
+    door: crate::door::Door,
+    /// The leaf's triangles in the door's own space
+    local: Vec<[V3; 3]>,
+    /// Where they are in `tris`
+    range: std::ops::Range<usize>,
+}
+
+/// One triangle of a door leaf, with the door `open` this far
+fn placed_tri(door: &crate::door::Door, p: [V3; 3], open: f32, material: usize) -> Tri {
+    let (a, b, c) = (door.place(p[0], open), door.place(p[1], open), door.place(p[2], open));
+    let g = cross(sub(b, a), sub(c, a));
+    let l = len(g);
+    let n = if l > 1e-6 { scale(g, 1.0 / l) } else { [0.0, 1.0, 0.0] };
+    Tri { a, b, c, n, off: false, hidden: false, material, room: NO_ROOM }
 }
 
 /// A room that is solid around the player, and how much of it
@@ -142,10 +162,13 @@ impl CollisionWorld {
         let mut tris = Vec::new();
         let glass = crate::glass::panes(level);
         let glass_names: Vec<&str> = glass.iter().map(|g| g.name.as_str()).collect();
+        let doors = crate::door::doors(level);
+        let door_models: Vec<usize> = doors.iter().map(|d| d.model_index).collect();
         let room_numbers: Vec<u32> = level.rooms.rooms.iter().filter_map(|r| r.section_name.parse().ok()).collect();
-        for object in &level.geometries.objects {
-            // Glass panes are stored in their own space; they are added placed, below
-            if glass_names.contains(&object.name.as_str()) {
+        for (object_index, object) in level.geometries.objects.iter().enumerate() {
+            // Glass panes and door leaves are stored in their own space; they are added
+            // placed, below
+            if glass_names.contains(&object.name.as_str()) || door_models.contains(&object_index) {
                 continue;
             }
             let room = map::object_room(&object.name).filter(|n| room_numbers.contains(n)).unwrap_or(NO_ROOM);
@@ -191,6 +214,18 @@ impl CollisionWorld {
             groups.push((pane.name.clone(), first..tris.len()));
         }
 
+        // Doors start closed, and are solid whichever rooms are around the player
+        let mut bodies = Vec::new();
+        for door in doors {
+            let first = tris.len();
+            let leaf = crate::door::leaf_triangles(level, &door);
+            for (p, material) in &leaf {
+                tris.push(placed_tri(&door, *p, 0.0, *material));
+            }
+            let local: Vec<[V3; 3]> = leaf.into_iter().map(|(p, _)| p).collect();
+            bodies.push(DoorBody { range: first..tris.len(), local, door });
+        }
+
         let (mut min_x, mut min_z) = (f32::INFINITY, f32::INFINITY);
         let (mut max_x, mut max_z) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
         for t in &tris {
@@ -218,6 +253,7 @@ impl CollisionWorld {
             rows,
             cells: vec![Vec::new(); cols * rows],
             params,
+            doors: bodies,
         };
 
         for ti in 0..world.tris.len() {
@@ -238,6 +274,46 @@ impl CollisionWorld {
     }
 
     pub fn params(&self) -> &Params { &self.params }
+
+    /// The doors, in the order `set_door_open` takes them
+    pub fn doors(&self) -> impl Iterator<Item = &crate::door::Door> {
+        self.doors.iter().map(|d| &d.door)
+    }
+
+    /// Put door `index` open this far (0 closed to 1 open), moving its triangles
+    pub fn set_door_open(&mut self, index: usize, open: f32) {
+        let Some(body) = self.doors.get(index) else { return };
+        let (range, door) = (body.range.clone(), body.door.clone());
+        let moved: Vec<Tri> = body.local.iter().zip(range.clone())
+            .map(|(p, i)| placed_tri(&door, *p, open, self.tris[i].material))
+            .collect();
+        for (ti, new) in range.zip(moved) {
+            let old_cells = self.cells_of(&self.tris[ti]);
+            for c in old_cells {
+                self.cells[c].retain(|&t| t as usize != ti);
+            }
+            let (off, hidden) = (self.tris[ti].off, self.tris[ti].hidden);
+            self.tris[ti] = Tri { off, hidden, ..new };
+            for c in self.cells_of(&self.tris[ti]) {
+                self.cells[c].push(ti as u32);
+            }
+        }
+    }
+
+    /// The grid cells a triangle covers
+    fn cells_of(&self, t: &Tri) -> Vec<usize> {
+        let xs = [t.a[0], t.b[0], t.c[0]];
+        let zs = [t.a[2], t.b[2], t.c[2]];
+        let (x0, x1) = (xs.iter().cloned().fold(f32::INFINITY, f32::min), xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+        let (z0, z1) = (zs.iter().cloned().fold(f32::INFINITY, f32::min), zs.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+        let mut out = Vec::new();
+        for r in self.row(z0)..=self.row(z1) {
+            for c in self.col(x0)..=self.col(x1) {
+                out.push(r * self.cols + c);
+            }
+        }
+        out
+    }
 
     /// Make only the faces of these rooms solid (everything else, such as the glass,
     /// stays solid), or all of them with None. The level overlaps itself: the outside
@@ -580,6 +656,37 @@ mod tests {
         }
         let level = map::read(path).expect("rm11 loads");
         Some(CollisionWorld::from_map(&level, Params::default()))
+    }
+
+    // On rm11 a door at (33562, 33167, 34767) hangs on its hinge with the leaf along +z. A
+    // ray across its middle hits it closed and passes it open.
+    #[test]
+    fn a_closed_door_stops_a_ray_and_an_open_one_does_not() {
+        let path = Path::new("data/map/rm11/rm11.map");
+        if !path.exists() {
+            eprintln!("skipping: {} not found", path.display());
+            return;
+        }
+        let level = map::read(path).expect("rm11 loads");
+        let mut w = CollisionWorld::from_map(&level, Params::default());
+        let index = w.doors().position(|d| d.name == "210_doorknobinterior01").expect("the door is there");
+        let door = w.doors().nth(index).unwrap().clone();
+        let middle = door.place([0.0, 130.0, 60.0], 0.0);
+        let from = [middle[0] - 60.0, middle[1], middle[2]];
+        let hit = w.raycast_hit(from, [1.0, 0.0, 0.0], 150.0).expect("the closed door is in the way");
+        assert!((hit.dist - 60.0).abs() < 10.0, "{}", hit.dist);
+
+        w.set_door_open(index, 1.0);
+        assert!(w.raycast_hit(from, [1.0, 0.0, 0.0], 150.0).is_none(), "an open door lets it through");
+        // And the leaf is now across where the ray started: along x, at the hinge's z
+        let end = door.place([0.0, 130.0, 120.0], 1.0);
+        assert!((end[2] - door.origin[2]).abs() < 0.01);
+        let along = [(end[0] - door.origin[0]).signum(), 0.0, 0.0];
+        let across = w.raycast_hit([door.origin[0] + along[0] * 60.0, middle[1], door.origin[2] - 40.0], [0.0, 0.0, 1.0], 80.0);
+        assert!(across.is_some_and(|h| (h.dist - 40.0).abs() < 10.0), "the open leaf is in the way along x");
+
+        w.set_door_open(index, 0.0);
+        assert!(w.raycast_hit(from, [1.0, 0.0, 0.0], 150.0).is_some(), "and shut again");
     }
 
     // From inside the plane on rm05, looking at the cabin wall: the plane's hull

@@ -20,7 +20,7 @@ cargo build -q --release --target "$TARGET" --example wireframe 2>&1 | grep -E "
 EXE="target/$TARGET/release/examples/wireframe"
 [ -f "$EXE.exe" ] && EXE="$EXE.exe"
 # Standing still for 40 frames at a fixed time step, so the characters pose the same each time
-C="--first-person --textured --walk 40 --hold X"
+C="--first-person --textured --walk 40 --hold X --doors-open 1"
 
 shot() {
   name="$1"; shift

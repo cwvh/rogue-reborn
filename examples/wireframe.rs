@@ -9,6 +9,7 @@ use rogue_reborn::ambience;
 use rogue_reborn::glass;
 use rogue_reborn::impact::{self, Surface};
 use rogue_reborn::visibility;
+use rogue_reborn::door;
 
 #[cfg_attr(windows, link(name = "opengl32"))]
 #[cfg_attr(target_os = "macos", link(name = "OpenGL", kind = "framework"))]
@@ -25,6 +26,7 @@ unsafe extern "C" {
     fn glDepthFunc(func: u32);
     fn glDepthRange(near: f64, far: f64);
     fn glGetFloatv(pname: u32, params: *mut f32);
+    fn glGetIntegerv(pname: u32, params: *mut i32);
     fn glPolygonMode(face: u32, mode: u32);
     fn glClear(mask: u32);
     fn glMatrixMode(mode: u32);
@@ -92,6 +94,8 @@ struct Args {
     dump: bool,
     /// Draw every room instead of only the ones visible through portals
     no_cull: bool,
+    /// Start with every door this far open (0 shut, 1 open)
+    doors_open: Option<f32>,
     /// Rooms to leave out of the drawing, to find which one a stray surface belongs to
     hide_rooms: Vec<u32>,
     collisions: bool,
@@ -163,6 +167,7 @@ fn parse_args() -> Args {
             "--rooms" => args.rooms = true,
             "--dump" => args.dump = true,
             "--no-cull" => args.no_cull = true,
+            "--doors-open" => args.doors_open = it.next().and_then(|v| v.parse().ok()),
             "--hide-rooms" => args.hide_rooms = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default(),
             "--info" => args.info = true,
             "--spawn-zone" => args.spawn_zone = it.next(),
@@ -480,12 +485,22 @@ fn main() {
     const WIDTH: i32 = 1024;
     const HEIGHT: i32 = 768;
 
-    // Initialize GLFW
+    // Initialize GLFW. The portal drawing masks the screen with the stencil buffer, so ask
+    // for one rather than hope the default has it.
     let mut glfw = glfw::init_no_callbacks().unwrap();
+    glfw.window_hint(glfw::WindowHint::StencilBits(Some(8)));
+    glfw.window_hint(glfw::WindowHint::DepthBits(Some(24)));
     let (mut window, events) = glfw
         .create_window(WIDTH as _, HEIGHT as _, "Wireframe Viewer", glfw::WindowMode::Windowed)
         .expect("Failed to create GLFW window");
     window.make_current();
+    {
+        let mut stencil_bits = 0;
+        unsafe { glGetIntegerv(0x0D57, &mut stencil_bits) }; // GL_STENCIL_BITS
+        if stencil_bits == 0 {
+            eprintln!("warning: no stencil buffer, so rooms seen through doorways will not be masked (use --no-cull)");
+        }
+    }
     // vsync gives steady pacing; --max-fps replaces it with an explicit cap
     glfw.set_swap_interval(if args.max_fps.is_some() { glfw::SwapInterval::None } else { glfw::SwapInterval::Sync(1) });
     window.set_key_polling(true);
@@ -799,6 +814,28 @@ fn main() {
     // Which objects are glass panes (drawn in place), and every object's index
     let pane_objects: Vec<bool> = level.geometries.objects.iter().map(|o| panes.iter().any(|g| g.name == o.name)).collect();
     let all_objects: Vec<usize> = (0..level.geometries.objects.len()).collect();
+    // Doors: each leaf is drawn and collided with where the door is. Space or Backspace
+    // opens and closes the one being looked at.
+    let doors: Vec<door::Door> = world.doors().cloned().collect();
+    let mut door_states = vec![door::DoorState::default(); doors.len()];
+    let door_leaf: Vec<bool> = (0..level.geometries.objects.len()).map(|i| doors.iter().any(|d| d.model_index == i)).collect();
+    let mut doors_by_room: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (i, d) in doors.iter().enumerate() {
+        for &r in &d.rooms {
+            doors_by_room.entry(r).or_default().push(i);
+        }
+    }
+    // Whether each portal is shut by a closed door
+    let mut blocked_portals = vec![false; level.portals.portals.len()];
+    let all_doors: Vec<usize> = (0..doors.len()).collect();
+    let mut use_pressed = false;
+    if let Some(open) = args.doors_open {
+        for (i, s) in door_states.iter_mut().enumerate() {
+            s.open = open.clamp(0.0, 1.0);
+            s.opening = open > 0.5;
+            world.set_door_open(i, s.open);
+        }
+    }
     let mut current_room: Option<usize> = None;
     let mut collision_rooms: Option<Vec<rogue_reborn::collision::SolidRoom>> = None;
     let mut last_render_rooms: Vec<u32> = Vec::new();
@@ -872,6 +909,9 @@ fn main() {
                         }
                         (Key::F2, Action::Press) => {
                             dump_requested = true;
+                        }
+                        (Key::Space, Action::Press) | (Key::Backspace, Action::Press) => {
+                            use_pressed = true;
                         }
                         (Key::V, Action::Press) => {
                             culling = !culling;
@@ -954,6 +994,10 @@ fn main() {
             // --hold picks the keys to press: W A S D, and R for walk (right mouse button)
             let held = args.hold.as_deref().unwrap_or("W").to_ascii_uppercase();
             trigger = frames_drawn < n && held.contains('F');
+            // U presses the use key (Space) on frame 5, to open or close the door in front
+            if held.contains('U') && frames_drawn == 5 {
+                use_pressed = true;
+            }
             // L starts a reload on the first frame (for testing the animation)
             if held.contains('L') && frames_drawn == 0 {
                 ammo = 10;
@@ -1002,6 +1046,56 @@ fn main() {
         last_step = Instant::now();
         let step_dt = if args.walk.is_some() { 1.0 / 60.0 } else { real_dt };
         game_time += step_dt;
+
+        // Space or Backspace opens or closes the door the player is looking at
+        if std::mem::take(&mut use_pressed) && first_person {
+            let eye = [camera.position[0], camera.position[1], -camera.position[2]];
+            let f = camera.get_forward();
+            let look = [f[0], f[1], -f[2]];
+            let mut best: Option<(usize, f32)> = None;
+            for (i, d) in doors.iter().enumerate() {
+                // Aim at the doorway, or at the leaf wherever it has gone (a door swung open
+                // to the side is still the one in front of you)
+                for c in [d.centre(0.0), d.centre(door_states[i].open)] {
+                    let to = [c[0] - eye[0], c[1] - eye[1], c[2] - eye[2]];
+                    let dist = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
+                    if dist > DOOR_REACH || dist < 1.0 {
+                        continue;
+                    }
+                    // Within 60 degrees of where they are looking
+                    let facing = (to[0] * look[0] + to[1] * look[1] + to[2] * look[2]) / dist;
+                    if facing < 0.5 {
+                        continue;
+                    }
+                    let score = dist * (2.0 - facing);
+                    if best.is_none_or(|(_, s)| score < s) {
+                        best = Some((i, score));
+                    }
+                }
+            }
+            match best {
+                Some((i, _)) => {
+                    door_states[i].opening = !door_states[i].opening;
+                    let sound_name = if door_states[i].opening { &doors[i].open_sound } else { &doors[i].close_sound };
+                    if let Some(snd) = sound.as_mut() {
+                        if !sound_name.eq_ignore_ascii_case("none") {
+                            snd.play_at(sound_name, doors[i].centre(door_states[i].open), listener_of(&camera), 1.0);
+                        }
+                    }
+                    message = (format!("DOOR {}", if door_states[i].opening { "OPENING" } else { "CLOSING" }), game_time + 1.2);
+                }
+                None => message = ("NO DOOR IN REACH".to_string(), game_time + 1.0),
+            }
+        }
+        // Doors move, and the collision and the portals follow
+        for (i, (d, s)) in doors.iter().zip(door_states.iter_mut()).enumerate() {
+            if s.advance(d, step_dt) {
+                world.set_door_open(i, s.open);
+            }
+            if let Some(p) = d.portal {
+                blocked_portals[p] = s.closed();
+            }
+        }
         // Finish a reload
         if reload_until.is_some_and(|t| game_time >= t) {
             let take = (mag_size - ammo).min(reserve);
@@ -1343,7 +1437,7 @@ fn main() {
                 glGetFloatv(0x0BA6, modelview.as_mut_ptr()); // GL_MODELVIEW_MATRIX
                 glGetFloatv(0x0BA7, projection.as_mut_ptr()); // GL_PROJECTION_MATRIX
                 let clip = |v: [f32; 3]| mul_mat4(&projection, mul_mat4(&modelview, [v[0], v[1], v[2], 1.0]));
-                plan = render_rooms.iter().map(|&r| visibility.plan(&level, r, &body, cam_eye, &clip)).collect();
+                plan = render_rooms.iter().map(|&r| visibility.plan(&level, r, &body, cam_eye, &blocked_portals, &clip)).collect();
             }
             drawn_rooms = {
                 let mut v: Vec<u32> = Vec::new();
@@ -1383,15 +1477,27 @@ fn main() {
                         Which::Room(n) => visibility.objects_of(n),
                         Which::Unowned => visibility.unowned_objects(),
                     };
-                    for &object_index in indices {
+                    // The doors of these rooms are drawn along with them, each leaf where
+                    // its door is
+                    let room_doors: &[usize] = match which {
+                        Which::All => &all_doors,
+                        Which::Room(n) => doors_by_room.get(&n).map(Vec::as_slice).unwrap_or_default(),
+                        Which::Unowned => &[],
+                    };
+                    let items = indices.iter().map(|&i| (i, None)).chain(room_doors.iter().map(|&d| (doors[d].model_index, Some(d))));
+                    for (object_index, door) in items {
                         let object = &level.geometries.objects[object_index];
-                        // Panes are drawn in place below
-                        if pane_objects[object_index] {
+                        // Panes are drawn in place below, and door leaves with their doors
+                        if pane_objects[object_index] || (door_leaf[object_index] && door.is_none()) {
                             continue;
                         }
                         let room = visibility.room_of_object(object_index);
                         if room.is_some_and(|n| args.hide_rooms.contains(&n)) {
                             continue;
+                        }
+                        if let Some(d) = door {
+                            glPushMatrix();
+                            glMultMatrixf(doors[d].matrix(door_states[d].open).as_ptr());
                         }
                         if room_debug {
                             let [r, g, b] = room_color(&object.name, current_rooms.iter().any(|n| *n == object.name));
@@ -1444,6 +1550,9 @@ fn main() {
                             }
                             glEnd();
                         }
+                    }
+                    if door.is_some() {
+                        glPopMatrix();
                     }
                     }
                 };
@@ -1751,10 +1860,18 @@ fn main() {
                 (hit, point, material)
             });
             let feet = [eye[0], eye[1] - if first_person { eye_height } else { 0.0 }, eye[2]];
+            let nearby_doors: Vec<String> = doors.iter().zip(&door_states)
+                .filter_map(|(d, s)| {
+                    let c = d.centre(s.open);
+                    let dist = ((c[0] - eye[0]).powi(2) + (c[1] - eye[1]).powi(2) + (c[2] - eye[2]).powi(2)).sqrt();
+                    (dist <= 500.0).then(|| format!("{} {:.0} units away, {:.0}% open{}", d.name, dist, s.open * 100.0,
+                        d.portal.map_or(String::new(), |p| format!(", portal {}", level.portals.portals[p].name))))
+                })
+                .collect();
             let report = DebugReport {
                 map_path, map_num: &map_num, level: &level, eye, feet, yaw: camera.yaw, pitch: camera.pitch, dir,
                 hit, first_person, third_person, textured, room_debug, show_portals, show_collisions,
-                fps, render_ms, culling, room: current_rooms.first().copied(), drawn: &drawn_rooms, collision: &collision_rooms, player_rooms: &player_rooms, render_rooms: &render_rooms,
+                fps, render_ms, culling, room: current_rooms.first().copied(), drawn: &drawn_rooms, collision: &collision_rooms, player_rooms: &player_rooms, render_rooms: &render_rooms, doors: &nearby_doors,
             };
             match write_debug_dump(&report, &rgb, fw as u32, fh as u32) {
                 Ok(stem) => println!("wrote {stem}.png and {stem}.txt"),
@@ -2212,6 +2329,9 @@ enum Which {
     Unowned,
 }
 
+/// How far away the door being opened or closed can be
+const DOOR_REACH: f32 = 220.0;
+
 /// Draw a room of the plan, then the rooms seen through its portals. `level` is the
 /// stencil value of the part of the screen this room owns. Each portal's opening is
 /// marked in the stencil buffer where it can be seen, the depth there is wiped, and the
@@ -2350,6 +2470,8 @@ struct DebugReport<'a> {
     player_rooms: &'a [u32],
     /// The room drawing starts from (the floor's room)
     render_rooms: &'a [u32],
+    /// Doors within reach, and how open they are
+    doors: &'a [String],
 }
 
 // Write debug/dump-<time>.png and .txt; returns the path without extension
@@ -2395,6 +2517,8 @@ fn write_debug_dump(r: &DebugReport, rgb: &[u8], width: u32, height: u32) -> any
         .map(|p| format!("{} ({} -> {})", p.name, p.room, p.opposite_room))
         .collect();
     writeln!(t, "portals of that room: {}", if portals.is_empty() { "none".to_string() } else { portals.join(", ") })?;
+
+    writeln!(t, "doors within 500 units: {}", if r.doors.is_empty() { "none".to_string() } else { format!("\n  {}", r.doors.join("\n  ")) })?;
 
     match &r.hit {
         Some((hit, point, material)) => {

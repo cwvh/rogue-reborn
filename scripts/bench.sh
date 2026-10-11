@@ -11,7 +11,7 @@ TARGET="${TARGET:-x86_64-pc-windows-gnu}"
 cargo build -q --release --target "$TARGET" --example wireframe 2>&1 | grep -E "^error" -A6
 EXE="target/$TARGET/release/examples/wireframe"
 [ -f "$EXE.exe" ] && EXE="$EXE.exe"
-COMMON="--first-person --textured --max-fps 10000 --walk 330 --hold X"
+COMMON="--first-person --textured --max-fps 10000 --walk 330 --hold X --doors-open 1"
 OUT="${TMPDIR:-${TEMP:-/tmp}}/bench.png"
 
 run() {

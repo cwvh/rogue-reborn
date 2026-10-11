@@ -201,8 +201,13 @@ impl Visibility {
                     continue;
                 }
                 let corners = &self.corners[i];
-                // Positive beyond the portal, where this room's middle is on the negative side
-                let beyond = portal_plane(corners, centre);
+                let touched = touch.iter().any(|&t| distance_to_polygon(corners, t) <= TOUCH);
+                // Positive beyond the portal. The player is on their room's side, which
+                // says which that is; only standing in the doorway are they on neither, and
+                // then the room's middle decides (it can sit on the wrong side in a big or
+                // L-shaped room, so it is the fallback).
+                let reference = if touched { centre } else { touch.first().copied().unwrap_or(centre) };
+                let beyond = portal_plane(corners, reference);
                 let entry = match neighbours.iter_mut().position(|n| n.room == other) {
                     Some(at) => at,
                     None => {
@@ -216,7 +221,7 @@ impl Visibility {
                     None => neighbours[entry] = SolidRoom::whole(other),
                 }
                 if let Some(p) = beyond {
-                    if touch.iter().any(|&t| distance_to_polygon(corners, t) <= TOUCH) {
+                    if touched {
                         if let Some(r) = rooms.iter_mut().find(|r| r.room == start) {
                             r.cut.push([-p[0], -p[1], -p[2], -p[3]]);
                         }
@@ -252,22 +257,25 @@ impl Visibility {
     /// A portal within `TOUCH` units of one of the `touch` points (the player's feet and
     /// eyes) is one the player is standing in: both rooms are drawn whole, each cut at the
     /// portal's plane.
-    pub fn plan<'a>(&'a self, map: &Map, start: u32, touch: &[[f32; 3]], eye: [f32; 3], clip: &dyn Fn([f32; 3]) -> [f32; 4]) -> PlanNode<'a> {
+    ///
+    /// `blocked` says, for each portal, whether it is shut (a closed door): nothing is seen
+    /// through it.
+    pub fn plan<'a>(&'a self, map: &Map, start: u32, touch: &[[f32; 3]], eye: [f32; 3], blocked: &[bool], clip: &dyn Fn([f32; 3]) -> [f32; 4]) -> PlanNode<'a> {
         let mut budget = MAX_NODES;
         let mut node = PlanNode { room: start, plane: None, polygon: &[], touched: false, children: Vec::new() };
-        self.grow(map, &mut node, FULL, touch, eye, clip, &mut vec![start], &mut budget);
+        self.grow(map, &mut node, FULL, touch, eye, blocked, clip, &mut vec![start], &mut budget);
         node
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn grow<'a>(&'a self, map: &Map, node: &mut PlanNode<'a>, rect: Rect, touch: &[[f32; 3]], eye: [f32; 3], clip: &dyn Fn([f32; 3]) -> [f32; 4], path: &mut Vec<u32>, budget: &mut usize) {
+    fn grow<'a>(&'a self, map: &Map, node: &mut PlanNode<'a>, rect: Rect, touch: &[[f32; 3]], eye: [f32; 3], blocked: &[bool], clip: &dyn Fn([f32; 3]) -> [f32; 4], path: &mut Vec<u32>, budget: &mut usize) {
         if path.len() > MAX_DEPTH {
             return;
         }
         for &i in self.by_room.get(&node.room).map(Vec::as_slice).unwrap_or_default() {
             let portal = &map.portals.portals[i];
             let other = if portal.room == node.room { portal.opposite_room } else { portal.room };
-            if path.contains(&other) || *budget == 0 {
+            if path.contains(&other) || *budget == 0 || blocked.get(i).copied().unwrap_or(false) {
                 continue;
             }
             let corners = &self.corners[i];
@@ -290,7 +298,7 @@ impl Visibility {
                 children: Vec::new(),
             };
             path.push(other);
-            self.grow(map, &mut child, rect, touch, eye, clip, path, budget);
+            self.grow(map, &mut child, rect, touch, eye, blocked, clip, path, budget);
             path.pop();
             node.children.push(child);
         }
@@ -502,6 +510,55 @@ mod tests {
             let (a, b) = (o[i], o[(i + 1) % 4]);
             assert!((a[0] == b[0]) != (a[1] == b[1]), "{o:?}");
         }
+    }
+
+    // On rm11, rooms 119 and 121 overlap and are joined by a doorway at x = 29477. Standing in
+    // 119, only the part of 121 past that doorway is really 121.
+    #[test]
+    fn a_neighbour_counts_only_beyond_the_portal() {
+        let path = std::path::Path::new("data/map/rm11/rm11.map");
+        if !path.exists() {
+            eprintln!("skipping: {} not found", path.display());
+            return;
+        }
+        let map = crate::map::read(path).expect("rm11 loads");
+        let vis = Visibility::new(&map);
+        let feet = [29737.0, 32777.0, 40042.5];
+        let eye = [feet[0], feet[1] + 155.0, feet[2]];
+        let rooms = vis.solid_rooms(&map, &[119], &[], &[feet, eye]);
+        let r121 = rooms.iter().find(|r| r.room == 121).expect("121 is next to 119");
+        assert!(!r121.keep.is_empty());
+        let counts = |p: [f32; 3]| r121.keep.iter().any(|k| k[0] * p[0] + k[1] * p[1] + k[2] * p[2] + k[3] >= 0.0);
+        assert!(counts([29000.0, 32900.0, 39557.0]), "inside 121, past the doorway");
+        assert!(!counts([29737.0, 32900.0, 40042.5]), "where the player stands, in 119");
+        // Room 119 itself is whole
+        assert!(rooms.iter().any(|r| r.room == 119 && r.keep.is_empty() && r.cut.is_empty()));
+    }
+
+    // On rm11 the door between rooms 119 and 121 is portal pd119_121. Shut, nothing is seen
+    // through it; open, room 121 is.
+    #[test]
+    fn a_shut_door_hides_the_room_behind_it() {
+        let path = std::path::Path::new("data/map/rm11/rm11.map");
+        if !path.exists() {
+            eprintln!("skipping: {} not found", path.display());
+            return;
+        }
+        let map = crate::map::read(path).expect("rm11 loads");
+        let vis = Visibility::new(&map);
+        let door = map.portals.portals.iter().position(|p| p.name == "pd119_121").expect("the door's portal");
+        // A view in which every portal is on screen
+        let everywhere = |_: [f32; 3]| [0.0, 0.0, 0.0, 1.0];
+        let eye = [29737.0, 32932.0, 40042.5];
+        let rooms_beside = |blocked: &[bool]| -> Vec<u32> {
+            vis.plan(&map, 119, &[], eye, blocked, &everywhere).children.iter().map(|c| c.room).collect()
+        };
+        let mut blocked = vec![false; map.portals.portals.len()];
+        assert!(rooms_beside(&blocked).contains(&121), "open, 121 is seen from 119");
+        blocked[door] = true;
+        let beside = rooms_beside(&blocked);
+        assert!(!beside.contains(&121), "shut, it is not: {beside:?}");
+        assert!(beside.contains(&120), "the other doorways are unaffected");
     }
 
     #[test]

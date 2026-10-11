@@ -14,3 +14,4 @@ pub mod ambience;
 pub mod glass;
 pub mod impact;
 pub mod visibility;
+pub mod door;

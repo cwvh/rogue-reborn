@@ -70,6 +70,7 @@ On other platforms, or without the aliases:
 | W A S D, mouse | move, look |
 | Left mouse | fire (hold for full auto) |
 | Right mouse (hold) | walk instead of run |
+| Space or Backspace | open or close the door you are looking at (within about 2 m) |
 | R | reload |
 | F | toggle third-person view |
 | F1 | toggle between first person and free-fly (collision off, Shift = faster, scroll = zoom) |
@@ -91,6 +92,7 @@ On other platforms, or without the aliases:
 | `--max-fps N` | cap the frame rate (turns vsync off); the default is vsync |
 | `--realistic-decals` | per-surface bullet holes with splinters, sparks and dust, instead of the game's sprites |
 | `--no-sound`, `--volume 0.0-1.0` | sound off, master volume |
+| `--doors-open 0..1` | start with every door that far open (they start shut) |
 | `--viewmodel` | draw the gun in front of the camera (the original didn't) |
 | `--screenshot FILE` | render a few frames, save a PNG and exit |
 
