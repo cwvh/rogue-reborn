@@ -37,7 +37,7 @@ Map parser
 * [map] are individual field contexts useful for parse errors, maybe replace?
 
 Network play
-* [net] Snapshots are the full state every time (about 1 kB for eight players and sixteen characters). Send only what changed since the snapshot the client last confirmed, with positions as small integers.
+* [net] Snapshots are already sent as what changed since the one the client last confirmed. Positions are still full floats; sending them as small integers relative to the baseline would shrink moving players further, and the client could stop acknowledging every snapshot.
 * [net] Interpolate thrown grenades and the characters too; only other players are shown between snapshots so far.
 * [net] Players cannot hurt each other: shots and blasts pass through other players. Needs a hit shape (or the posed character), health, death and respawn.
 * [net] A player's own shots, sounds and muzzle flash wait for the server's answer (a round trip). Predict the ones that cannot be wrong, and take them back if they were.

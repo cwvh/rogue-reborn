@@ -15,6 +15,10 @@ type V3 = [f32; 3];
 /// Snapshots are sent every this many ticks unless the server is told otherwise: 30 a second
 pub const SNAPSHOT_EVERY: u32 = 2;
 
+/// How many snapshots sent to each client are kept to be the difference from. A client whose
+/// latest news is older than this is sent a snapshot in full.
+const REMEMBERED: usize = 64;
+
 /// A client that has said nothing for this long (seconds) is gone
 const TIMEOUT: f64 = 5.0;
 
@@ -48,6 +52,10 @@ struct Remote {
     /// Snapshots sent and not confirmed yet: the tick, and the last event in each
     in_flight: VecDeque<(u32, u32)>,
     heard: f64,
+    /// The tick of the latest snapshot the client says it has
+    acked: u32,
+    /// The latest snapshots sent, without their events: what a later one can be the difference from
+    sent: VecDeque<Snapshot>,
 }
 
 impl Remote {
@@ -96,12 +104,15 @@ pub struct Server {
     events: VecDeque<(u32, u32, Event)>,
     next_event: u32,
     snapshot_every: u32,
+    /// How many snapshots have been sent, and how many bytes they came to
+    pub snapshots_sent: u64,
+    pub snapshot_bytes: u64,
 }
 
 impl Server {
     pub fn new(sim: Sim, setup: Setup, build: &str, spawns: Vec<V3>) -> Server {
         assert!(!spawns.is_empty(), "players need somewhere to start");
-        Server { sim, setup, build: build.to_string(), spawns, spawned: 0, remotes: Vec::new(), tick: 0, next_tick_at: None, events: VecDeque::new(), next_event: 1, snapshot_every: SNAPSHOT_EVERY }
+        Server { sim, setup, build: build.to_string(), spawns, spawned: 0, remotes: Vec::new(), tick: 0, next_tick_at: None, events: VecDeque::new(), next_event: 1, snapshot_every: SNAPSHOT_EVERY, snapshots_sent: 0, snapshot_bytes: 0 }
     }
 
     /// Send snapshots this many times a second (the nearest the 60 ticks a second allow)
@@ -160,13 +171,14 @@ impl Server {
                 self.spawned += 1;
                 self.remotes.push(Remote {
                     addr: from, token, slot, queue: BTreeMap::new(), next_seq: None, last_input: Input { run: true, ..Input::default() },
-                    applied_seq: 0, event_ack: self.next_event - 1, in_flight: VecDeque::new(), heard: now,
+                    applied_seq: 0, event_ack: self.next_event - 1, in_flight: VecDeque::new(), heard: now, acked: 0, sent: VecDeque::new(),
                 });
                 self.accept(link, from, token, slot);
             }
             ToServer::Input { token, ack_snapshot, first_seq, inputs } => {
                 let Some(r) = self.remotes.iter_mut().find(|r| r.addr == from && r.token == token) else { return };
                 r.heard = now;
+                r.acked = r.acked.max(ack_snapshot);
                 for (i, input) in inputs.into_iter().enumerate() {
                     let seq = first_seq.wrapping_add(i as u32);
                     let next = *r.next_seq.get_or_insert(seq);
@@ -228,11 +240,20 @@ impl Server {
     fn send_snapshot(&mut self, i: usize, link: &mut impl Link) {
         let r = &self.remotes[i];
         let mut snap = Snapshot::capture(&self.sim, self.tick, r.slot, r.applied_seq);
+        let stored = snap.clone();
         snap.events = self.events.iter().filter(|(_, id, _)| *id > r.event_ack).map(|(_, id, e)| (*id, e.clone())).collect();
         let ids: Vec<u32> = snap.events.iter().map(|(id, _)| *id).collect();
-        let (bytes, sent) = ToClient::Snapshot(snap).encode();
+        // What the client is known to have is what this one is told as the difference from
+        let base = r.sent.iter().find(|s| r.acked > 0 && s.tick == r.acked);
+        let (bytes, sent) = ToClient::Snapshot(snap).encode_against(base);
         link.send(r.addr, &bytes);
+        self.snapshots_sent += 1;
+        self.snapshot_bytes += bytes.len() as u64;
         let r = &mut self.remotes[i];
+        r.sent.push_back(stored);
+        while r.sent.len() > REMEMBERED {
+            r.sent.pop_front();
+        }
         if sent > 0 {
             r.in_flight.push_back((self.tick, ids[sent - 1]));
             while r.in_flight.len() > 64 {

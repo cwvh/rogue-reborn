@@ -195,6 +195,9 @@ fn main() {
 
     // How things stand, for whoever wants to check
     println!("server stopped at tick {}, checksum {:016x}", server.tick, server.sim.checksum());
+    if server.snapshots_sent > 0 {
+        println!("sent {} snapshots, {} bytes each on average", server.snapshots_sent, server.snapshot_bytes / server.snapshots_sent);
+    }
     for (i, p) in server.sim.players.iter().enumerate().filter(|(_, p)| p.active) {
         println!("player {i} pos=({:.1}, {:.1}, {:.1}) ammo={} grenades={} kills={}", p.player.pos[0], p.player.pos[1], p.player.pos[2], p.ammo, p.grenades_left, p.kills);
     }

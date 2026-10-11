@@ -22,6 +22,10 @@ pub type Seen = (usize, V3, (u16, u16));
 /// there is nearly always a later snapshot to be moving toward
 const VIEW_DELAY: f64 = 2.0;
 
+/// How many snapshots are kept to be the difference from. It is more than the server keeps, so
+/// that whichever it picks is here.
+const REMEMBERED: usize = 96;
+
 /// The most snapshots kept to look back through
 const HISTORY: usize = 24;
 
@@ -67,6 +71,9 @@ pub struct Client {
     pub snapshots: u32,
     /// The other players in the latest snapshots, by server tick
     history: VecDeque<(u32, Vec<Seen>)>,
+    /// The latest snapshots received, without their events: what the server may say a snapshot
+    /// is the difference from
+    received: VecDeque<Snapshot>,
     /// When (client time) the newest snapshot arrived
     arrived: f64,
     /// The server tick that other players are shown at, which runs at the pace of the clock
@@ -80,7 +87,7 @@ impl Client {
             server, token, build: build.to_string(), status: Status::Connecting, setup: None, slot: 0, seq: 1,
             recent: VecDeque::new(), pending: VecDeque::new(), last_snapshot: 0, event_seen: 0, heard: 0.0,
             asked: f64::NEG_INFINITY, correction: 0.0, snapshots: 0,
-            history: VecDeque::new(), arrived: 0.0, view_tick: None, view_at: 0.0,
+            history: VecDeque::new(), received: VecDeque::new(), arrived: 0.0, view_tick: None, view_at: 0.0,
         }
     }
 
@@ -118,7 +125,8 @@ impl Client {
             if from != self.server {
                 continue;
             }
-            let Ok(msg) = ToClient::decode(&bytes) else { continue };
+            let received = &self.received;
+            let Ok(msg) = ToClient::decode_with(&bytes, &|tick| received.iter().find(|s| s.tick == tick)) else { continue };
             match msg {
                 ToClient::Accept { token, slot, setup, .. } if token == self.token => {
                     self.heard = now;
@@ -134,8 +142,14 @@ impl Client {
                 ToClient::Goodbye { token } if token == self.token => {
                     self.status = Status::Lost;
                 }
-                ToClient::Snapshot(s) if self.status == Status::Connected => {
+                ToClient::Snapshot(mut s) if self.status == Status::Connected => {
                     self.heard = now;
+                    let announced = std::mem::take(&mut s.events);
+                    self.received.push_back(s.clone());
+                    while self.received.len() > REMEMBERED {
+                        self.received.pop_front();
+                    }
+                    s.events = announced;
                     events.extend(s.events.iter().cloned());
                     if s.tick > newest.as_ref().map_or(self.last_snapshot, |n| n.tick) {
                         newest = Some(s);

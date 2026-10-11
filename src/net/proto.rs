@@ -369,8 +369,40 @@ fn write_opt_f32(w: &mut Writer, v: Option<f32>) {
     w.opt_f32(v);
 }
 
+fn write_throw(w: &mut Writer, t: Option<Throw>) {
+    match t {
+        None => w.bool(false),
+        Some(t) => {
+            w.bool(true);
+            w.f32(t.start);
+            w.f32(t.charge);
+            w.bool(t.thrown);
+        }
+    }
+}
+
+fn read_throw(r: &mut Reader) -> Result<Option<Throw>> {
+    Ok(if r.bool()? { Some(Throw { start: r.f32()?, charge: r.f32()?, thrown: r.bool()? }) } else { None })
+}
+
+fn flag_byte(p: &PlayerSnap) -> u8 {
+    [p.on_ground, p.controlled, p.gun_trigger, p.equipped_grenade].iter().enumerate().fold(0, |acc, (n, &b)| acc | (b as u8) << n)
+}
+
+fn write_message(w: &mut Writer, m: &Option<(String, f32)>) {
+    w.bool(m.is_some());
+    if let Some((text, until)) = m {
+        w.string(text);
+        w.f32(*until);
+    }
+}
+
+fn read_message(r: &mut Reader) -> Result<Option<(String, f32)>> {
+    Ok(if r.bool()? { Some((r.string()?, r.f32()?)) } else { None })
+}
+
+/// A player in full, after their slot
 fn write_player(w: &mut Writer, p: &PlayerSnap) {
-    w.u8(p.slot);
     w.v3(p.pos);
     w.f32(p.vel_y);
     w.u16(p.look.0);
@@ -383,28 +415,13 @@ fn write_player(w: &mut Writer, p: &PlayerSnap) {
     w.u16(p.kills as u16);
     w.u8(p.grenades_left as u8);
     write_opt_f32(w, p.charge_from);
-    match p.throw {
-        None => w.bool(false),
-        Some(t) => {
-            w.bool(true);
-            w.f32(t.start);
-            w.f32(t.charge);
-            w.bool(t.thrown);
-        }
-    }
-    let flags = [p.on_ground, p.controlled, p.gun_trigger, p.equipped_grenade, p.message.is_some(), p.target_hp.is_some()];
-    w.u8(flags.iter().enumerate().fold(0, |acc, (n, &b)| acc | (b as u8) << n));
-    if let Some((text, until)) = &p.message {
-        w.string(text);
-        w.f32(*until);
-    }
-    if let Some(hp) = p.target_hp {
-        w.f32(hp);
-    }
+    write_throw(w, p.throw);
+    w.u8(flag_byte(p));
+    write_message(w, &p.message);
+    write_opt_f32(w, p.target_hp);
 }
 
-fn read_player(r: &mut Reader) -> Result<PlayerSnap> {
-    let slot = r.u8()?;
+fn read_player(r: &mut Reader, slot: u8) -> Result<PlayerSnap> {
     let pos = r.v3()?;
     let vel_y = r.f32()?;
     let look = (r.u16()?, r.u16()?);
@@ -416,15 +433,233 @@ fn read_player(r: &mut Reader) -> Result<PlayerSnap> {
     let kills = r.u16()? as u32;
     let grenades_left = r.u8()? as u32;
     let charge_from = r.opt_f32()?;
-    let throw = if r.bool()? { Some(Throw { start: r.f32()?, charge: r.f32()?, thrown: r.bool()? }) } else { None };
+    let throw = read_throw(r)?;
     let flags = r.u8()?;
     let on = |n: u8| flags >> n & 1 != 0;
-    let message = if on(4) { Some((r.string()?, r.f32()?)) } else { None };
-    let target_hp = if on(5) { Some(r.f32()?) } else { None };
+    let message = read_message(r)?;
+    let target_hp = r.opt_f32()?;
     Ok(PlayerSnap {
         slot, pos, vel_y, on_ground: on(0), look, controlled: on(1), moved_speed, ammo, reserve, reload_until,
         flash_until, gun_trigger: on(2), kills, equipped_grenade: on(3), grenades_left, charge_from, throw, message, target_hp,
     })
+}
+
+/// A float as the bits that make it up, so that two are the same only if nothing about them differs
+fn bits(v: f32) -> u32 {
+    v.to_bits()
+}
+
+fn opt_bits(v: Option<f32>) -> Option<u32> {
+    v.map(f32::to_bits)
+}
+
+/// A player's mask of what changed is this when they are sent in full instead
+const FULL: u16 = 0x8000;
+
+/// A player as it differs from `base`: a mask of the parts that changed, then those parts
+fn write_player_delta(w: &mut Writer, p: &PlayerSnap, base: &PlayerSnap) {
+    let changed = [
+        p.pos.map(bits) != base.pos.map(bits),
+        bits(p.vel_y) != bits(base.vel_y),
+        p.look != base.look,
+        bits(p.moved_speed) != bits(base.moved_speed),
+        p.ammo as u16 != base.ammo as u16,
+        p.reserve as u16 != base.reserve as u16,
+        opt_bits(p.reload_until) != opt_bits(base.reload_until),
+        bits(p.flash_until) != bits(base.flash_until),
+        p.kills as u16 != base.kills as u16,
+        p.grenades_left as u8 != base.grenades_left as u8,
+        opt_bits(p.charge_from) != opt_bits(base.charge_from),
+        p.throw != base.throw,
+        flag_byte(p) != flag_byte(base),
+        p.message != base.message,
+        opt_bits(p.target_hp) != opt_bits(base.target_hp),
+    ];
+    w.u16(changed.iter().enumerate().fold(0, |acc, (n, &c)| acc | (c as u16) << n));
+    if changed[0] { w.v3(p.pos); }
+    if changed[1] { w.f32(p.vel_y); }
+    if changed[2] { w.u16(p.look.0); w.u16(p.look.1); }
+    if changed[3] { w.f32(p.moved_speed); }
+    if changed[4] { w.u16(p.ammo as u16); }
+    if changed[5] { w.u16(p.reserve as u16); }
+    if changed[6] { write_opt_f32(w, p.reload_until); }
+    if changed[7] { w.f32(p.flash_until); }
+    if changed[8] { w.u16(p.kills as u16); }
+    if changed[9] { w.u8(p.grenades_left as u8); }
+    if changed[10] { write_opt_f32(w, p.charge_from); }
+    if changed[11] { write_throw(w, p.throw); }
+    if changed[12] { w.u8(flag_byte(p)); }
+    if changed[13] { write_message(w, &p.message); }
+    if changed[14] { write_opt_f32(w, p.target_hp); }
+}
+
+/// The player `base` was, changed as the mask in the message says
+fn read_player_delta(r: &mut Reader, mask: u16, base: &PlayerSnap) -> Result<PlayerSnap> {
+    ensure!(mask < 1 << 15, "no such parts of a player as {mask:#x}");
+    let on = |n: u16| mask >> n & 1 != 0;
+    let mut p = base.clone();
+    if on(0) { p.pos = r.v3()?; }
+    if on(1) { p.vel_y = r.f32()?; }
+    if on(2) { p.look = (r.u16()?, r.u16()?); }
+    if on(3) { p.moved_speed = r.f32()?; }
+    if on(4) { p.ammo = r.u16()? as u32; }
+    if on(5) { p.reserve = r.u16()? as u32; }
+    if on(6) { p.reload_until = r.opt_f32()?; }
+    if on(7) { p.flash_until = r.f32()?; }
+    if on(8) { p.kills = r.u16()? as u32; }
+    if on(9) { p.grenades_left = r.u8()? as u32; }
+    if on(10) { p.charge_from = r.opt_f32()?; }
+    if on(11) { p.throw = read_throw(r)?; }
+    if on(12) {
+        let flags = r.u8()?;
+        let f = |n: u8| flags >> n & 1 != 0;
+        (p.on_ground, p.controlled, p.gun_trigger, p.equipped_grenade) = (f(0), f(1), f(2), f(3));
+    }
+    if on(13) { p.message = read_message(r)?; }
+    if on(14) { p.target_hp = r.opt_f32()?; }
+    Ok(p)
+}
+
+/// One bit for each of `flags`, eight to a byte
+fn write_bits(w: &mut Writer, flags: &[bool]) {
+    for chunk in flags.chunks(8) {
+        w.u8(chunk.iter().enumerate().fold(0, |acc, (n, &b)| acc | (b as u8) << n));
+    }
+}
+
+fn read_bits(r: &mut Reader, n: usize) -> Result<Vec<bool>> {
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n.div_ceil(8) {
+        let byte = r.u8()?;
+        out.extend((0..8).map(|i| byte >> i & 1 != 0));
+    }
+    out.truncate(n);
+    Ok(out)
+}
+
+/// A list where the things that are the same as in `base` are only marked as such. The reader
+/// has to know how many there are, and has to have the same `base`.
+fn write_changed<T: PartialEq>(w: &mut Writer, now: &[T], base: Option<&[T]>, mut one: impl FnMut(&mut Writer, &T)) {
+    let base = base.filter(|b| b.len() == now.len());
+    let changed: Vec<bool> = now.iter().enumerate().map(|(i, t)| base.is_none_or(|b| b[i] != *t)).collect();
+    if base.is_some() {
+        write_bits(w, &changed);
+    }
+    for (t, _) in now.iter().zip(&changed).filter(|(_, c)| **c) {
+        one(w, t);
+    }
+}
+
+fn read_changed<T: Clone>(r: &mut Reader, n: usize, base: Option<&[T]>, mut one: impl FnMut(&mut Reader) -> Result<T>) -> Result<Vec<T>> {
+    let base = base.filter(|b| b.len() == n);
+    let changed = if base.is_some() { read_bits(r, n)? } else { vec![true; n] };
+    (0..n).map(|i| match base {
+        Some(b) if !changed[i] => Ok(b[i].clone()),
+        _ => one(r),
+    }).collect()
+}
+
+fn write_npc(w: &mut Writer, n: &NpcSnap) {
+    w.v3(n.pos);
+    w.f32(n.yaw);
+    w.f32(n.hp);
+    match n.state {
+        NpcState::Idle => w.u8(0),
+        NpcState::Reacting { motion, start } => { w.u8(1); w.u8(motion_byte(motion)); w.f32(start); }
+        NpcState::Dead { motion, start } => { w.u8(2); w.u8(motion_byte(motion)); w.f32(start); }
+    }
+}
+
+fn read_npc(r: &mut Reader) -> Result<NpcSnap> {
+    let (pos, yaw, hp) = (r.v3()?, r.f32()?, r.f32()?);
+    let state = match r.u8()? {
+        0 => NpcState::Idle,
+        1 => NpcState::Reacting { motion: motion_from(r.u8()?)?, start: r.f32()? },
+        2 => NpcState::Dead { motion: motion_from(r.u8()?)?, start: r.f32()? },
+        s => bail!("no such state as {s}"),
+    };
+    Ok(NpcSnap { pos, yaw, hp, state })
+}
+
+fn write_thrown(w: &mut Writer, t: &ThrownSnap) {
+    w.u8(t.owner);
+    w.v3(t.pos);
+    w.v3(t.vel);
+    w.f32(t.fuse);
+    w.f32(t.spin);
+    w.bool(t.at_rest);
+}
+
+fn read_thrown(r: &mut Reader) -> Result<ThrownSnap> {
+    Ok(ThrownSnap { owner: r.u8()?, pos: r.v3()?, vel: r.v3()?, fuse: r.f32()?, spin: r.f32()?, at_rest: r.bool()? })
+}
+
+/// Everything in a snapshot but its events, as it differs from `base` if there is one
+fn write_state(w: &mut Writer, s: &Snapshot, base: Option<&Snapshot>) {
+    w.u32(s.tick);
+    w.f32(s.time);
+    w.u32(s.ack_seq);
+    w.bool(s.culling);
+    w.u8(s.players.len() as u8);
+    for p in &s.players {
+        w.u8(p.slot);
+        match base.and_then(|b| b.players.iter().find(|q| q.slot == p.slot)) {
+            Some(q) => write_player_delta(w, p, q),
+            None => {
+                w.u16(FULL);
+                write_player(w, p);
+            }
+        }
+    }
+    w.u16(s.npcs.len() as u16);
+    write_changed(w, &s.npcs, base.map(|b| &b.npcs[..]), write_npc);
+    w.u8(s.thrown.len() as u8);
+    write_changed(w, &s.thrown, base.map(|b| &b.thrown[..]), write_thrown);
+    w.u16(s.doors.len() as u16);
+    write_changed(w, &s.doors, base.map(|b| &b.doors[..]), |w, &(open, opening)| {
+        w.f32(open);
+        w.bool(opening);
+    });
+    // Panes only ever break, so only the ones the base does not know of are sent
+    let new: Vec<&(u16, f32)> = s.broken.iter().filter(|b| base.is_none_or(|base| !base.broken.contains(b))).collect();
+    w.u16(new.len() as u16);
+    for &&(i, at) in &new {
+        w.u16(i);
+        w.f32(at);
+    }
+}
+
+fn read_state(r: &mut Reader, base: Option<&Snapshot>) -> Result<Snapshot> {
+    let (tick, time, ack_seq, culling) = (r.u32()?, r.f32()?, r.u32()?, r.bool()?);
+    let n = r.u8()? as usize;
+    ensure!(n <= MAX_PLAYERS, "too many players");
+    let mut players = Vec::with_capacity(n);
+    for _ in 0..n {
+        let slot = r.u8()?;
+        let mask = r.u16()?;
+        players.push(if mask == FULL {
+            read_player(r, slot)?
+        } else {
+            let Some(q) = base.and_then(|b| b.players.iter().find(|q| q.slot == slot)) else { bail!("a change to player {slot}, who was not there") };
+            read_player_delta(r, mask, q)?
+        });
+    }
+    let n = r.u16()? as usize;
+    let npcs = read_changed(r, n, base.map(|b| &b.npcs[..]), read_npc)?;
+    let n = r.u8()? as usize;
+    let thrown = read_changed(r, n, base.map(|b| &b.thrown[..]), read_thrown)?;
+    let n = r.u16()? as usize;
+    let doors = read_changed(r, n, base.map(|b| &b.doors[..]), |r| Ok((r.f32()?, r.bool()?)))?;
+    let mut broken = base.map_or(Vec::new(), |b| b.broken.clone());
+    for _ in 0..r.u16()? {
+        let (i, at) = (r.u16()?, r.f32()?);
+        match broken.iter_mut().find(|b| b.0 == i) {
+            Some(b) => b.1 = at,
+            None => broken.push((i, at)),
+        }
+    }
+    broken.sort_by_key(|b| b.0);
+    Ok(Snapshot { tick, time, ack_seq, culling, players, npcs, thrown, doors, broken, events: Vec::new() })
 }
 
 fn write_setup(w: &mut Writer, s: &Setup) {
@@ -536,6 +771,12 @@ impl ToClient {
     /// The message as bytes. A snapshot leaves out the events that do not fit in a datagram;
     /// `sent_events` says how many were put in.
     pub fn encode(&self) -> (Vec<u8>, usize) {
+        self.encode_against(None)
+    }
+
+    /// The same, but a snapshot is sent as what has changed since `base`, a snapshot that the
+    /// receiver is known to have. Only a receiver that has `base` can make sense of it.
+    pub fn encode_against(&self, base: Option<&Snapshot>) -> (Vec<u8>, usize) {
         let mut w = Writer::new();
         let mut sent = 0;
         match self {
@@ -553,42 +794,9 @@ impl ToClient {
             }
             ToClient::Snapshot(s) => {
                 header(&mut w, 2);
-                w.u32(s.tick);
-                w.f32(s.time);
-                w.u32(s.ack_seq);
-                w.bool(s.culling);
-                w.u8(s.players.len() as u8);
-                s.players.iter().for_each(|p| write_player(&mut w, p));
-                w.u16(s.npcs.len() as u16);
-                for n in &s.npcs {
-                    w.v3(n.pos);
-                    w.f32(n.yaw);
-                    w.f32(n.hp);
-                    match n.state {
-                        NpcState::Idle => w.u8(0),
-                        NpcState::Reacting { motion, start } => { w.u8(1); w.u8(motion_byte(motion)); w.f32(start); }
-                        NpcState::Dead { motion, start } => { w.u8(2); w.u8(motion_byte(motion)); w.f32(start); }
-                    }
-                }
-                w.u8(s.thrown.len() as u8);
-                for t in &s.thrown {
-                    w.u8(t.owner);
-                    w.v3(t.pos);
-                    w.v3(t.vel);
-                    w.f32(t.fuse);
-                    w.f32(t.spin);
-                    w.bool(t.at_rest);
-                }
-                w.u16(s.doors.len() as u16);
-                for &(open, opening) in &s.doors {
-                    w.f32(open);
-                    w.bool(opening);
-                }
-                w.u16(s.broken.len() as u16);
-                for &(i, at) in &s.broken {
-                    w.u16(i);
-                    w.f32(at);
-                }
+                // Which snapshot the rest is the difference from: one more than its tick, or 0 for none
+                w.u32(base.map_or(0, |b| b.tick + 1));
+                write_state(&mut w, s, base);
                 // Events go in as long as they fit
                 let mut body = Writer::new();
                 for (id, e) in &s.events {
@@ -618,39 +826,26 @@ impl ToClient {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<ToClient> {
+        Self::decode_with(bytes, &|_| None)
+    }
+
+    /// Decode, with `earlier` to find the snapshots that a snapshot may be the difference from
+    pub fn decode_with<'a>(bytes: &[u8], earlier: &dyn Fn(u32) -> Option<&'a Snapshot>) -> Result<ToClient> {
         let mut r = Reader::new(bytes);
         let kind = check_header(&mut r)?;
         let msg = match kind {
             0 => ToClient::Accept { token: r.u32()?, slot: r.u8()?, tick: r.u32()?, setup: read_setup(&mut r)? },
             1 => ToClient::Refuse { token: r.u32()?, reason: r.string()? },
             2 => {
-                let (tick, time, ack_seq, culling) = (r.u32()?, r.f32()?, r.u32()?, r.bool()?);
-                let n = r.u8()? as usize;
-                ensure!(n <= MAX_PLAYERS, "too many players");
-                let players = (0..n).map(|_| read_player(&mut r)).collect::<Result<Vec<_>>>()?;
-                let n = r.u16()? as usize;
-                let mut npcs = Vec::with_capacity(n.min(1024));
-                for _ in 0..n {
-                    let (pos, yaw, hp) = (r.v3()?, r.f32()?, r.f32()?);
-                    let state = match r.u8()? {
-                        0 => NpcState::Idle,
-                        1 => NpcState::Reacting { motion: motion_from(r.u8()?)?, start: r.f32()? },
-                        2 => NpcState::Dead { motion: motion_from(r.u8()?)?, start: r.f32()? },
-                        s => bail!("no such state as {s}"),
-                    };
-                    npcs.push(NpcSnap { pos, yaw, hp, state });
-                }
-                let n = r.u8()? as usize;
-                let thrown = (0..n).map(|_| Ok(ThrownSnap {
-                    owner: r.u8()?, pos: r.v3()?, vel: r.v3()?, fuse: r.f32()?, spin: r.f32()?, at_rest: r.bool()?,
-                })).collect::<Result<Vec<_>>>()?;
-                let n = r.u16()? as usize;
-                let doors = (0..n).map(|_| Ok((r.f32()?, r.bool()?))).collect::<Result<Vec<_>>>()?;
-                let n = r.u16()? as usize;
-                let broken = (0..n).map(|_| Ok((r.u16()?, r.f32()?))).collect::<Result<Vec<_>>>()?;
+                let base = match r.u32()? {
+                    0 => None,
+                    t => Some(earlier(t - 1).ok_or_else(|| anyhow::anyhow!("a difference from snapshot {}, which is not here", t - 1))?),
+                };
+                let mut snap = read_state(&mut r, base)?;
                 let n = r.u8()? as usize;
                 let events = (0..n).map(|_| Ok((r.u32()?, read_event(&mut r)?))).collect::<Result<Vec<_>>>()?;
-                ToClient::Snapshot(Snapshot { tick, time, ack_seq, culling, players, npcs, thrown, doors, broken, events })
+                snap.events = events;
+                ToClient::Snapshot(snap)
             }
             3 => ToClient::Goodbye { token: r.u32()? },
             k => bail!("no such message as {k}"),
@@ -785,6 +980,70 @@ mod tests {
         snap.npcs = (0..16).map(|_| NpcSnap { pos: [1.0; 3], yaw: 1.0, hp: 1.0, state: NpcState::Reacting { motion: "thiu_ab", start: 1.0 } }).collect();
         snap.events.clear();
         let (bytes, _) = ToClient::Snapshot(snap).encode();
-        assert!(bytes.len() < MAX_PACKET - 200, "{} bytes before any events", bytes.len());
+        assert!(bytes.len() < MAX_PACKET - 100, "{} bytes before any events", bytes.len());
+    }
+
+    fn delta_trip(base: &Snapshot, next: &Snapshot) -> (Snapshot, usize) {
+        let (bytes, _) = ToClient::Snapshot(next.clone()).encode_against(Some(base));
+        let ToClient::Snapshot(back) = ToClient::decode_with(&bytes, &|t| (t == base.tick).then_some(base)).unwrap() else { panic!() };
+        (back, bytes.len())
+    }
+
+    #[test]
+    fn a_snapshot_sent_as_a_difference_comes_out_the_same() {
+        let mut base = snapshot();
+        base.events.clear();
+        // Nothing happened, and it is almost nothing
+        let mut next = base.clone();
+        next.tick += 2;
+        next.time += 0.033;
+        let (back, small) = delta_trip(&base, &next);
+        assert_eq!(back, next);
+        let (full, _) = ToClient::Snapshot(next.clone()).encode();
+        assert!(small * 3 < full.len(), "{small} bytes against {} in full", full.len());
+
+        // Every kind of change at once
+        next.players[0].pos = [9.0, 8.0, 7.0];
+        next.players[0].look.0 = 7;
+        next.players[0].ammo = 11;
+        next.players[0].reload_until = None;
+        next.players[0].throw = None;
+        next.players[0].message = None;
+        next.players[0].on_ground = false;
+        next.players[1].target_hp = Some(5.0);
+        next.players[1].message = Some(("HELLO".to_string(), 3.0));
+        next.players[1].charge_from = Some(2.0);
+        next.npcs[1].state = NpcState::Dead { motion: "thdh_2", start: 15.0 };
+        next.npcs[1].hp = 0.0;
+        next.thrown.push(ThrownSnap { owner: 0, pos: [1.0; 3], vel: [0.0; 3], fuse: 2.0, spin: 0.0, at_rest: true });
+        next.doors[2] = (0.25, false);
+        next.broken.push((50, 16.0));
+        next.broken.sort_by_key(|b| b.0);
+        let (back, _) = delta_trip(&base, &next);
+        assert_eq!(back, next);
+
+        // Players come and go
+        next.players.remove(0);
+        next.players.push(player(5));
+        let (back, _) = delta_trip(&base, &next);
+        assert_eq!(back, next);
+        let (back, _) = delta_trip(&base, &base);
+        assert_eq!(back, base);
+    }
+
+    #[test]
+    fn a_difference_from_a_snapshot_the_receiver_lacks_is_refused() {
+        let base = snapshot();
+        let mut next = base.clone();
+        next.tick += 2;
+        let (bytes, _) = ToClient::Snapshot(next).encode_against(Some(&base));
+        assert!(ToClient::decode(&bytes).is_err());
+        let mut junk = bytes;
+        for i in 0..junk.len() {
+            let saved = junk[i];
+            junk[i] = junk[i].wrapping_add(0x55);
+            let _ = ToClient::decode_with(&junk, &|_| Some(&base));
+            junk[i] = saved;
+        }
     }
 }
