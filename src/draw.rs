@@ -265,6 +265,16 @@ pub enum Which {
     Unowned,
 }
 
+/// How far a room's cut at a portal's plane is moved toward the camera. Surfaces lying in the
+/// portal's own plane (the riser of a stair's first step, a wall's face) must stay, and a cut
+/// exactly through them keeps or loses them by rounding, one triangle or one pixel at a time.
+const PLANE_SLACK: f32 = 1.0;
+
+/// A cut that keeps the side of `plane` its normal points to, and `PLANE_SLACK` more
+fn slackened(plane: [f32; 4]) -> [f32; 4] {
+    [plane[0], plane[1], plane[2], plane[3] + PLANE_SLACK]
+}
+
 /// Draw a room of the plan, then the rooms seen through its portals. `level` is the
 /// stencil value of the part of the screen this room owns. Each portal's opening is
 /// marked in the stencil buffer where it can be seen, the depth there is wiped, and the
@@ -287,15 +297,15 @@ pub unsafe fn draw_plan(node: &visibility::PlanNode<'_>, level: i32, fill_mode: 
         match (node.plane, node.cut_in_self) {
             // Entered through a doorway the player stands in
             (Some(p), Some(b)) if node.touched => {
-                ways.push(vec![p]);
+                ways.push(vec![slackened(p)]);
                 ways.extend(outside(b).into_iter().map(|o| vec![o]));
             }
-            (Some(p), _) => fixed.push(p),
+            (Some(p), _) => fixed.push(slackened(p)),
             _ => {}
         }
         for child in node.children.iter().filter(|c| c.touched) {
             let Some(p) = child.plane else { continue };
-            let near = [-p[0], -p[1], -p[2], -p[3]];
+            let near = slackened([-p[0], -p[1], -p[2], -p[3]]);
             match child.cut_in_parent {
                 Some(b) if ways.is_empty() => {
                     ways.push(vec![near]);

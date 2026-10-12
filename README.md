@@ -80,6 +80,7 @@ On other platforms, or without the aliases:
 | V | toggle room culling (on by default; `--no-cull` starts with it off) |
 | G | color each room's geometry (the room you stand in is white) and list your rooms |
 | F2 | debug dump: writes `debug/dump-<time>.png` and `.txt` with your position, rooms, what you are looking at and a command to come back to the spot |
+| F4 | clip: a dump (screenshot and log) of every frame for 2 seconds, in `debug/clip-<time>/` as `0001.png`, `0001.txt`..., for finding a flicker you see only in motion |
 | F3 | reload: closes the window and starts again with the same options, so a level is back as new (a random spawn point is picked again unless you gave `--spawn` or `--seed`) |
 | Esc | quit |
 

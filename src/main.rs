@@ -40,6 +40,9 @@ const SCORCH_VARIANTS: usize = 4;
 /// Frames to skip before timing, while textures load
 const BENCH_WARMUP: u32 = 30;
 
+// How long F4 records, in seconds
+const CLIP_SECONDS: f32 = 2.0;
+
 fn main() {
     // Load the map
     // let map_path = Path::new("data/map/m00/demolitions_area.MAP");
@@ -500,6 +503,8 @@ fn main() {
     let mut room_debug = args.rooms;
     let mut last_rooms: Vec<String> = Vec::new();
     let mut dump_requested = args.dump;
+    // F4: a dump of every frame for CLIP_SECONDS, in debug/clip-<time>/: when it started, the folder, the frames so far
+    let mut clip: Option<(std::time::Instant, String, u32)> = None;
     // F3 closes the window and starts the viewer again with the same options
     let mut reload = false;
     // Which objects are glass panes (drawn in place), and every object's index
@@ -586,6 +591,11 @@ fn main() {
                         }
                         (Key::F2, Action::Press) => {
                             dump_requested = true;
+                        }
+                        (Key::F4, Action::Press) if clip.is_none() => {
+                            let dir = format!("debug/clip-{}", crate::debug::stamp());
+                            println!("recording {CLIP_SECONDS} seconds to {dir}");
+                            clip = Some((std::time::Instant::now(), dir, 0));
                         }
                         (Key::F3, Action::Press) => {
                             reload = true;
@@ -1654,8 +1664,12 @@ fn main() {
         draw_debug_text(w, h, &debug_lines);
 
         // F2: a screenshot and a text log of where the player is and what they see
-        if dump_requested && (!args.dump || frames_drawn >= 2) {
-            dump_requested = false;
+        if (dump_requested && (!args.dump || frames_drawn >= 2)) || clip.is_some() {
+            let one_dump = std::mem::take(&mut dump_requested);
+            let stem = clip.as_mut().map(|(_, dir, n)| {
+                *n += 1;
+                format!("{dir}/{:04}", *n)
+            });
             let (fw, fh) = window.get_framebuffer_size();
             let rgb = read_framebuffer(fw, fh);
             let eye = [camera.position[0], camera.position[1], -camera.position[2]];
@@ -1680,11 +1694,21 @@ fn main() {
                 hit, first_person, third_person, textured, room_debug, show_portals, show_collisions,
                 fps, render_ms, culling: sim.culling, room: current_rooms.first().copied(), drawn: &drawn_rooms, collision: &sim.players[me].collision_rooms, player_rooms: &sim.players[me].player_rooms, render_rooms: &sim.players[me].render_rooms, doors: &nearby_doors,
             };
-            match write_debug_dump(&report, &rgb, fw as u32, fh as u32) {
-                Ok(stem) => println!("wrote {stem}.png and {stem}.txt"),
+            let clipping = stem.is_some();
+            if let Err(e) = std::fs::create_dir_all(stem.as_deref().and_then(|s| Path::new(s).parent()).unwrap_or(Path::new("debug"))) {
+                eprintln!("debug dump failed: {e:#}");
+            }
+            match write_debug_dump(&report, &rgb, fw as u32, fh as u32, stem) {
+                Ok(stem) if !clipping => println!("wrote {stem}.png and {stem}.txt"),
+                Ok(_) => {}
                 Err(e) => eprintln!("debug dump failed: {e:#}"),
             }
-            if args.dump {
+            if clip.as_ref().is_some_and(|(start, ..)| start.elapsed().as_secs_f32() >= CLIP_SECONDS) {
+                if let Some((_, dir, n)) = clip.take() {
+                    println!("recorded {n} frames in {dir}");
+                }
+            }
+            if args.dump && one_dump {
                 break;
             }
         }

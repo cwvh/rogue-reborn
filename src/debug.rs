@@ -1,4 +1,4 @@
-//! The F2 debug dump: a screenshot and a text report of where you are.
+//! The F2 debug dump (and the F4 clip, which is one every frame): a screenshot and a text report of where you are.
 
 use std::path::Path;
 use rogue_reborn::map;
@@ -38,12 +38,16 @@ pub struct DebugReport<'a> {
     pub doors: &'a [String],
 }
 
-// Write debug/dump-<time>.png and .txt; returns the path without extension
-pub fn write_debug_dump(r: &DebugReport, rgb: &[u8], width: u32, height: u32) -> anyhow::Result<String> {
+// The seconds since the epoch, to name dumps and clips by
+pub fn stamp() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+// Write `<stem>.png` and `.txt` (by default debug/dump-<time>); returns the path without extension
+pub fn write_debug_dump(r: &DebugReport, rgb: &[u8], width: u32, height: u32, stem: Option<String>) -> anyhow::Result<String> {
     use std::fmt::Write as _;
     std::fs::create_dir_all("debug")?;
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-    let stem = format!("debug/dump-{secs}");
+    let stem = stem.unwrap_or_else(|| format!("debug/dump-{}", stamp()));
     rogue_reborn::png::write_png(Path::new(&format!("{stem}.png")), width, height, rgb)?;
 
     let rooms_at = |p: [f32; 3]| -> Vec<&str> {

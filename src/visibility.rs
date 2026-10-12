@@ -45,10 +45,11 @@ pub struct Visibility {
     /// Each portal's corners as listed, and in drawing order
     corners: Vec<Vec<[f32; 3]>>,
     polygons: Vec<Vec<[f32; 3]>>,
+    /// For each portal, a point on the side of each of its two rooms, when it can be told
+    /// which side is which: (room, point) for the room and the room opposite
+    sides: Vec<[(u32, Option<[f32; 3]>); 2]>,
     /// The floor plan of each room, by number
     footprints: HashMap<u32, Vec<[f32; 4]>>,
-    /// The main volume of each room, floor plan only, pulled in by a wall (min x, min z, max x, max z)
-    bounds: HashMap<u32, [f32; 4]>,
     /// The objects of each room (indices into `map.geometries.objects`), by number
     objects: HashMap<u32, Vec<usize>>,
     /// The objects that belong to no room, and the room of each object
@@ -110,20 +111,10 @@ impl Visibility {
             .map(|p| p.coordinates.iter().map(|v| [v.x, v.y, v.z]).collect())
             .collect();
         let polygons = corners.iter().map(|c| ordered(c)).collect();
+        let sides = map.portals.portals.iter().zip(&corners).map(|(p, c)| owned_sides(map, &index, c, p.room, p.opposite_room)).collect();
         let footprints: HashMap<u32, Vec<[f32; 4]>> = map.rooms.rooms.iter().zip(&numbers)
             .filter_map(|(r, n)| n.map(|n| (n, r.footprints())))
             .collect();
-        // The main volume of each room, pulled in by a wall's thickness: an overlapping room's
-        // stray surfaces lie well inside it, while the walls of the room around it that meet
-        // its outside do not
-        let bounds = footprints.iter().filter_map(|(&n, f): (&u32, &Vec<[f32; 4]>)| {
-            let area = |r: &[f32; 4]| (r[2] - r[0]) * (r[3] - r[1]);
-            let main = f.iter().max_by(|a, b| area(a).total_cmp(&area(b)))?;
-            let inset = |lo: f32, hi: f32| if hi - lo > 2.0 * WALL { (lo + WALL, hi - WALL) } else { (lo, hi) };
-            let (x0, x1) = inset(main[0], main[2]);
-            let (z0, z1) = inset(main[1], main[3]);
-            Some((n, [x0, z0, x1, z1]))
-        }).collect();
         let mut objects: HashMap<u32, Vec<usize>> = HashMap::new();
         let mut unowned = Vec::new();
         let mut object_rooms = Vec::with_capacity(map.geometries.objects.len());
@@ -135,7 +126,34 @@ impl Visibility {
             }
             object_rooms.push(room);
         }
-        Self { by_room, outdoors, centers, numbers, index, corners, polygons, footprints, bounds, objects, unowned, object_rooms }
+        Self { by_room, outdoors, centers, numbers, index, corners, polygons, sides, footprints, objects, unowned, object_rooms }
+    }
+
+    /// The volume of a room that meets a portal, floor plan only, pulled in by a wall's
+    /// thickness (min x, min z, max x, max z). A room can hold volumes that overlap others
+    /// elsewhere (an upper floor over the whole hall below), so the one at the doorway is the
+    /// only one that says where the two rooms overlap there. The stray surfaces of an
+    /// overlapping room lie well inside the volume, while the walls of the room around it
+    /// meet its outside.
+    fn bounds_at(&self, room: u32, portal: usize) -> Option<[f32; 4]> {
+        let corners = &self.corners[portal];
+        let span = |axis: usize| corners.iter().map(|c| c[axis]).fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
+        let (x, z) = (span(0), span(2));
+        let gap = |lo: f32, hi: f32, (a, b): (f32, f32)| (a - hi).max(lo - b).max(0.0);
+        let distance = |f: &[f32; 4]| gap(f[0], f[2], x).hypot(gap(f[1], f[3], z));
+        let main = self.footprints.get(&room)?.iter().min_by(|a, b| distance(a).total_cmp(&distance(b)))?;
+        let inset = |lo: f32, hi: f32| if hi - lo > 2.0 * WALL { (lo + WALL, hi - WALL) } else { (lo, hi) };
+        let (x0, x1) = inset(main[0], main[2]);
+        let (z0, z1) = inset(main[1], main[3]);
+        Some([x0, z0, x1, z1])
+    }
+
+    /// A point just inside `room`'s side of a portal, if the portal's sides are known. It says
+    /// which way the room lies from the portal wherever the camera or the player is: they can
+    /// stand on one side while the floor under them, and so the room drawing starts from,
+    /// already belongs to the other.
+    fn side_point(&self, portal: usize, room: u32) -> Option<[f32; 3]> {
+        self.sides.get(portal)?.iter().find(|(r, _)| *r == room).and_then(|(_, p)| *p)
     }
 
     /// Whether the map has a room with this number
@@ -210,7 +228,7 @@ impl Visibility {
                 // which that is, even in the doorway (exactly in the plane there is no side,
                 // and portal_plane gives none). The room's middle is only a fallback: in a big
                 // or L-shaped room it can sit on the far side of a portal.
-                let reference = touch.first().copied().unwrap_or(center);
+                let reference = self.side_point(i, start).or(touch.first().copied()).unwrap_or(center);
                 let beyond = portal_plane(corners, reference);
                 let entry = match neighbors.iter_mut().position(|n| n.room == other) {
                     Some(at) => at,
@@ -228,7 +246,7 @@ impl Visibility {
                     if touched {
                         if let Some(r) = rooms.iter_mut().find(|r| r.room == start) {
                             // Only where it overlaps the room beyond
-                            r.cut.push(Cut { plane: [-p[0], -p[1], -p[2], -p[3]], within: self.bounds.get(&other).copied() });
+                            r.cut.push(Cut { plane: [-p[0], -p[1], -p[2], -p[3]], within: self.bounds_at(other, i) });
                         }
                     }
                 }
@@ -294,15 +312,15 @@ impl Visibility {
             *budget -= 1;
             // The camera is on this room's side of the portal, in the doorway too (exactly in
             // its plane there is no side, and portal_plane gives none)
-            let near_side = eye;
+            let near_side = self.side_point(i, node.room).unwrap_or(eye);
             let mut child = PlanNode {
                 room: other,
                 plane: portal_plane(corners, near_side),
                 polygon: &self.polygons[i],
                 touched,
                 // Each room's cut is limited to where it overlaps the other
-                cut_in_self: if touched { self.bounds.get(&node.room).copied() } else { None },
-                cut_in_parent: if touched { self.bounds.get(&other).copied() } else { None },
+                cut_in_self: if touched { self.bounds_at(node.room, i) } else { None },
+                cut_in_parent: if touched { self.bounds_at(other, i) } else { None },
                 children: Vec::new(),
             };
             path.push(other);
@@ -342,6 +360,64 @@ impl PlanNode<'_> {
             c.rooms(out);
         }
     }
+}
+
+/// The unit normal of a portal's plane, from the first three corners that are not in a line
+fn plane_normal(corners: &[[f32; 3]]) -> Option<[f32; 3]> {
+    let origin = *corners.first()?;
+    for w in corners.windows(2).skip(1) {
+        let (u, v) = ([w[0][0] - origin[0], w[0][1] - origin[1], w[0][2] - origin[2]], [w[1][0] - origin[0], w[1][1] - origin[1], w[1][2] - origin[2]]);
+        let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        if len > 1e-3 {
+            return Some([n[0] / len, n[1] / len, n[2] / len]);
+        }
+    }
+    None
+}
+
+/// How far from a portal's plane to look for what room is on each side
+const PROBES: [f32; 3] = [20.0, 40.0, 80.0];
+/// How far from the plane the point standing for a room's side is
+const SIDE_DISTANCE: f32 = 20.0;
+
+/// Which side of a portal belongs to each of its rooms: a point on that side. Rooms overlap,
+/// so a point near the portal is often in both; but a stairwell's volume ends at the portal's
+/// plane and the hall's floor goes on past it, so a point on one side is in the hall alone.
+/// Each point in one room only is a vote for that room's side. None when the votes do not say.
+fn owned_sides(map: &Map, index: &HashMap<u32, usize>, corners: &[[f32; 3]], a: u32, b: u32) -> [(u32, Option<[f32; 3]>); 2] {
+    let unknown = [(a, None), (b, None)];
+    let (Some(n), Some(&ia), Some(&ib)) = (plane_normal(corners), index.get(&a), index.get(&b)) else { return unknown };
+    let lo = |axis: usize| corners.iter().map(|c| c[axis]).fold(f32::MAX, f32::min);
+    let hi = |axis: usize| corners.iter().map(|c| c[axis]).fold(f32::MIN, f32::max);
+    let center = [(lo(0) + hi(0)) / 2.0, (lo(1) + hi(1)) / 2.0, (lo(2) + hi(2)) / 2.0];
+    // A doorway's volumes are thin floors and boxes: look low in it, where the floor is
+    let at = |s: f32, d: f32| {
+        let mut p = [center[0] + s * d * n[0], center[1] + s * d * n[1], center[2] + s * d * n[2]];
+        if n[1].abs() < 0.5 {
+            p[1] = lo(1) + 20.0;
+        }
+        p
+    };
+    let (mut score_a, mut score_b) = (0.0f32, 0.0f32);
+    for s in [1.0, -1.0] {
+        for d in PROBES {
+            let p = at(s, d);
+            match (map.rooms.rooms[ia].contains(p, 50.0), map.rooms.rooms[ib].contains(p, 50.0)) {
+                (true, false) => score_a += s,
+                (false, true) => score_b += s,
+                _ => {}
+            }
+        }
+    }
+    // The two rooms are on opposite sides: one that is sure gives the other's side too
+    let side = match (score_a.partial_cmp(&0.0), score_b.partial_cmp(&0.0)) {
+        (Some(x), Some(y)) if x == y && x != std::cmp::Ordering::Equal => return unknown,
+        (Some(std::cmp::Ordering::Greater), _) | (_, Some(std::cmp::Ordering::Less)) => 1.0,
+        (Some(std::cmp::Ordering::Less), _) | (_, Some(std::cmp::Ordering::Greater)) => -1.0,
+        _ => return unknown,
+    };
+    [(a, Some(at(side, SIDE_DISTANCE))), (b, Some(at(-side, SIDE_DISTANCE)))]
 }
 
 /// A portal's corners in an order that goes around the outline, whatever order the file
@@ -618,6 +694,39 @@ mod tests {
         assert!(counts([33113.0, 32667.0, 34238.0]), "the floor just past the opening");
         assert!(counts([33113.0, 32667.0, 35000.0]), "and further in");
         assert!(!counts([33113.0, 32667.0, 34000.0]), "but not the courtyard side");
+    }
+
+    // On citystreet_large the stair up from room 3's hall is room 2, joined by the portal p03_02
+    // in the plane x = 33317, room 2 on the low side. Walking off the bottom step the floor under
+    // the player is room 3's before the player has crossed the plane, so drawing starts from room 3
+    // with the camera on room 2's side; room 2 must still be the side the camera is on.
+    #[test]
+    fn a_portal_knows_which_side_is_which_room_wherever_the_camera_is() {
+        let path = std::path::Path::new("data/map/m00/citystreet_large.map");
+        if !path.exists() {
+            eprintln!("skipping: {} not found", path.display());
+            return;
+        }
+        let map = crate::map::read(path).expect("citystreet_large loads");
+        let vis = Visibility::new(&map);
+        let side = |plane: [f32; 4], x: f32| plane[0] * x + plane[3] + plane[1] * 33000.0 + plane[2] * 35350.0;
+        for x in [33300.0, 33313.4, 33330.0] {
+            let feet = [x, 32905.8, 35326.3];
+            let eye = [x, feet[1] + 165.0, feet[2]];
+            // Only what is within a few hundred units is in view, so the rest cannot use up the plan
+            let near = |p: [f32; 3]| if (p[0] - x).hypot(p[2] - feet[2]) < 400.0 { [0.0, 0.0, 0.0, 1.0] } else { [0.0, 0.0, 0.0, -1.0] };
+            let plan = vis.plan(&map, 3, &[feet, eye], eye, &[], &near);
+            let stair = plan.children.iter().find(|c| c.room == 2).unwrap_or_else(|| panic!("room 2 is beside 3: {:?}", plan.children.iter().map(|c| c.room).collect::<Vec<_>>()));
+            let plane = stair.plane.expect("the portal has a plane");
+            assert!(side(plane, 33200.0) > 0.0, "the stair is on the low side, camera at {x}");
+            assert!(side(plane, 33400.0) < 0.0, "and the hall is not, camera at {x}");
+            // The collision cut agrees
+            let rooms = vis.solid_rooms(&map, &[3], &[], &[feet, eye]);
+            let r2 = rooms.iter().find(|r| r.room == 2).expect("room 2 is next to 3");
+            let counts = |p: [f32; 3]| r2.keep.iter().any(|k| k[0] * p[0] + k[1] * p[1] + k[2] * p[2] + k[3] >= 0.0);
+            assert!(counts([33200.0, 33000.0, 35350.0]), "the stair is solid, camera at {x}");
+            assert!(!counts([33400.0, 33000.0, 35350.0]), "the hall is not room 2's, camera at {x}");
+        }
     }
 
     #[test]
