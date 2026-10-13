@@ -116,6 +116,31 @@ impl Crp {
         Some(Skin { bone, local })
     }
 
+    /// The edges that only one triangle uses, as pairs of bind-pose positions, once vertices
+    /// at the same position are merged. Where the mesh is closed there are none; a missing
+    /// triangle leaves a loop of three.
+    pub fn open_edges(&self) -> Vec<([f32; 3], [f32; 3])> {
+        let key = |v: [f32; 3]| v.map(|x| (x * 100.0).round() as i64);
+        let mut ids: HashMap<[i64; 3], usize> = HashMap::new();
+        let welded: Vec<usize> = self.vertices.iter().map(|&v| {
+            let n = ids.len();
+            *ids.entry(key(v)).or_insert(n)
+        }).collect();
+        let mut uses: HashMap<(usize, usize), (u32, [u32; 2])> = HashMap::new();
+        for t in self.parts.iter().flat_map(|p| &p.triangles) {
+            for i in 0..3 {
+                let (a, b) = (t[i], t[(i + 1) % 3]);
+                let (x, y) = (welded[a as usize], welded[b as usize]);
+                uses.entry((x.min(y), x.max(y))).or_insert((0, [a, b])).0 += 1;
+            }
+        }
+        let mut open: Vec<_> = uses.into_values().filter(|(n, _)| *n == 1)
+            .map(|(_, [a, b])| (self.vertices[a as usize], self.vertices[b as usize]))
+            .collect();
+        open.sort_by(|p, q| p.partial_cmp(q).unwrap_or(std::cmp::Ordering::Equal));
+        open
+    }
+
     /// (min, max) corners of the bind-pose vertices
     pub fn bounds(&self) -> ([f32; 3], [f32; 3]) {
         let mut min = [f32::INFINITY; 3];
@@ -210,11 +235,16 @@ pub fn parse(d: &[u8]) -> Result<Crp> {
         let body_end = marks.get(i + 1).map_or(d.len(), |&n| n - 4);
         let Some(body) = d.get(body_start..body_end) else { continue };
         let Some((global, local)) = find_triangle_lists(body) else { continue };
-        // A single triangle is a false match on a chunk with no lists
-        if global.len() < 2 {
-            continue;
-        }
         let uvs = part_uvs(body, &local);
+        // A single triangle could be a false match on a chunk with no lists, so it must have
+        // three distinct vertices of the mesh and the chunk its three UVs. Parts of one
+        // triangle are real: the back of a helmet, the top of a vest.
+        if let [t] = global[..] {
+            let real = t[0] != t[1] && t[1] != t[2] && t[0] != t[2] && t.iter().all(|&i| (i as usize) < vertices.len());
+            if !real || uvs.is_none() {
+                continue;
+            }
+        }
 
         let mut triangles = Vec::with_capacity(global.len());
         let mut corner_uvs = uvs.as_ref().map(|_| Vec::with_capacity(global.len()));
@@ -377,6 +407,20 @@ mod tests {
                 assert!((-5.0..5.0).contains(uv), "{} uv {uv}", part.material);
             }
         }
+    }
+
+    // The player's mesh has parts of a single triangle: the back of the helmet (two) and the
+    // top of the vest below the neck. Dropped, they left holes to see into the model through.
+    #[test]
+    fn the_players_mesh_has_no_holes() {
+        let p = Path::new("data/character/team_hrt/blue_M_a.CRP");
+        if !p.exists() {
+            eprintln!("skipping: {} not found", p.display());
+            return;
+        }
+        let c = read(p).expect("CRP parses");
+        let open = c.open_edges();
+        assert!(open.is_empty(), "{} open edges: {open:?}", open.len());
     }
 
     #[test]
