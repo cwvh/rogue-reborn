@@ -45,6 +45,12 @@ run i "$D" --level rm11 --pos 29863,33152,-40320 --yaw 180 --pitch -10 --walk 26
 run j "$D" --level rm11 --pos 29863,33332,-39860 --yaw 0 --pitch -30 --walk 14 --hold W
 run k "$D" --level rm11 --pos 29863,33152,-40320 --yaw 180 --walk 100 --hold W
 run l "$D" --level rm11 --pos 29863,33332,-39860 --yaw 0 --walk 110 --hold W
+# Standing still a little over 40 units before rm05's doorways, the room beyond must show
+# whole: through the doorway into 317, and from outside the plane's door into the cabin. In
+# the plane's door, the galley must hide the far doorway into 201
+run m "$D" --level rm05 --pos 37789.8,32932,-35897.7 --yaw 370.5 --pitch -5.1 --walk 3 --hold ""
+run n "$D" --level rm05 --pos 37358.7,32932,-36550 --yaw 262.9 --pitch -10.1 --walk 3 --hold ""
+run o "$D" --level rm05 --pos 37400.8,32932,-36566.2 --yaw 189.7 --pitch -13.3 --walk 3 --hold ""
 # Strafe and walk slowly in the demo room
 run f "$D" --demo --walk 120 --hold DRF
 # Record a run and play it back: it must do the same, and every checksum must match

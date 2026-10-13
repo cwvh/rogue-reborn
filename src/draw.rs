@@ -323,12 +323,13 @@ pub unsafe fn draw_plan(node: &visibility::PlanNode<'_>, level: i32, fill_mode: 
             draw(node.room, &planes);
         }
 
-        for child in &node.children {
-            // Standing in the doorway: both rooms are drawn, each cut at the portal's plane
-            if child.touched {
-                draw_plan(child, level, fill_mode, textured, draw);
-                continue;
-            }
+        // Standing in the doorway: both rooms are drawn, each cut at the portal's plane. They
+        // go first, as one room: the openings of the other portals must be hidden behind
+        // their walls too, and nothing can draw into an opening once it is done.
+        for child in node.children.iter().filter(|c| c.touched) {
+            draw_plan(child, level, fill_mode, textured, draw);
+        }
+        for child in node.children.iter().filter(|c| !c.touched) {
             let opening = || {
                 glBegin(0x0006); // GL_TRIANGLE_FAN
                 for p in child.polygon {

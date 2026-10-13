@@ -1055,7 +1055,11 @@ fn main() {
         // Compute dynamic aspect and clip planes
         let (w, h) = window.get_size();
         let aspect = (w as f32 / h.max(1) as f32).max(0.1);
-        let z_near = (mesh.radius / 1000.0).max(0.05);
+        // The near plane stays well inside the player's 30 units from a wall, and inside the
+        // distance at which a doorway counts as one the player stands in: past it, the wall
+        // is cut open, or the doorway's opening is cut and the room beyond goes missing
+        const MAX_Z_NEAR: f32 = 4.0;
+        let z_near = (mesh.radius / 1000.0).clamp(0.05, MAX_Z_NEAR);
         let z_far = (mesh.radius * 10.0 + 100.0).max(z_near + 1.0);
 
         // Frame timing for FPS
