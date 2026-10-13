@@ -149,7 +149,16 @@ pub struct SolidRoom {
     /// What to leave out of the player's own room where it runs past a portal they are
     /// standing in, into the room beyond. Every cut applies.
     pub cut: Vec<Cut>,
+    /// Boxes (min x, y, z, max x, y, z) the room does not count inside: a volume of the
+    /// player's room that reaches through this one, like rm11's stairs climbing through the
+    /// wall and ceiling of the room below. This room's surfaces there are not really there.
+    /// What is within `HOLE_MARGIN` of a portal between the two still counts.
+    pub holes: Vec<[f32; 6]>,
 }
+
+/// How far beyond the portal to a neighbor a hole starts. A volume reaching through a
+/// doorway by a wall's thickness must not take the neighbor's jambs with it.
+pub const HOLE_MARGIN: f32 = 50.0;
 
 /// Part of a room that does not count: what is on the far side of `plane` (a, b, c, d with
 /// a*x + b*y + c*z + d >= 0 where it does count) and inside `within`. Without `within` it
@@ -164,7 +173,7 @@ pub struct Cut {
 
 impl SolidRoom {
     pub fn whole(room: u32) -> Self {
-        Self { room, keep: Vec::new(), cut: Vec::new() }
+        Self { room, keep: Vec::new(), cut: Vec::new(), holes: Vec::new() }
     }
 }
 
@@ -353,6 +362,7 @@ impl CollisionWorld {
     /// Like `set_active_rooms`, but a room can be solid in part only (see `SolidRoom`)
     pub fn set_solid_rooms(&mut self, rooms: Option<&[SolidRoom]>) {
         let side = |planes: &[[f32; 4]], c: V3| planes.iter().map(|p| p[0] * c[0] + p[1] * c[1] + p[2] * c[2] + p[3] >= 0.0).collect::<Vec<bool>>();
+        let beyond = |p: &[f32; 4], c: V3| p[0] * c[0] + p[1] * c[1] + p[2] * c[2] + p[3];
         for t in &mut self.tris {
             t.hidden = match rooms {
                 None => false,
@@ -366,15 +376,20 @@ impl CollisionWorld {
                             let inside = c.within.is_none_or(|w| middle[0] >= w[0] && middle[0] <= w[2] && middle[2] >= w[1] && middle[2] <= w[3]);
                             !(past && inside)
                         };
-                        (r.keep.is_empty() || side(&r.keep, middle).iter().any(|&ok| ok)) && r.cut.iter().all(counts)
+                        // A wall's few big triangles reach well outside a hole, so any part in it
+                        // takes the triangle out
+                        let in_hole = r.holes.iter().any(|h| reaches_into(t, h)) && r.keep.iter().all(|p| beyond(p, middle) > HOLE_MARGIN);
+                        (r.keep.is_empty() || side(&r.keep, middle).iter().any(|&ok| ok)) && r.cut.iter().all(counts) && !in_hole
                     })
                 }
             };
         }
     }
 
-    /// The room whose floor is under `feet`: the first face below, whatever rooms are
-    /// active, so it can be asked where the player stands before deciding what is solid.
+    /// The room whose floor is under `feet`: the first face below that faces up, whatever
+    /// rooms are active, so it can be asked where the player stands before deciding what is
+    /// solid. A ceiling is no floor: on rm11 the stairs of one room climb through the ceiling
+    /// of another, which would otherwise be the nearest face under the feet.
     pub fn floor_room(&self, feet: [f32; 3]) -> Option<u32> {
         // A ray straight down meets only triangles over that point so only the
         // grid cells around it need inspection. Ties go to the first triangle
@@ -386,7 +401,7 @@ impl CollisionWorld {
                 for &ti in &self.cells[r * self.cols + c] {
                     let ti = ti as usize;
                     let t = &self.tris[ti];
-                    if t.off {
+                    if t.off || t.n[1] <= 0.0 {
                         continue;
                     }
                     if let Some(d) = crate::combat::ray_triangle(origin, [0.0, -1.0, 0.0], t.a, t.b, t.c) {
@@ -629,6 +644,29 @@ impl CollisionWorld {
     }
 }
 
+/// Whether a triangle reaches into a box (min x, y, z, max x, y, z), by the separating axis
+/// test: they are apart if some axis (the box's three, the triangle's normal, or an edge of
+/// one crossed with an edge of the other) has them on either side of a gap
+fn reaches_into(t: &Tri, b: &[f32; 6]) -> bool {
+    let center = [(b[0] + b[3]) * 0.5, (b[1] + b[4]) * 0.5, (b[2] + b[5]) * 0.5];
+    let half = [(b[3] - b[0]) * 0.5, (b[4] - b[1]) * 0.5, (b[5] - b[2]) * 0.5];
+    let v = [sub(t.a, center), sub(t.b, center), sub(t.c, center)];
+    let apart = |axis: V3| {
+        if dot(axis, axis) < 1e-12 {
+            return false;
+        }
+        let p = v.map(|c| dot(c, axis));
+        let reach = (0..3).map(|i| half[i] * axis[i].abs()).sum::<f32>();
+        p[0].min(p[1]).min(p[2]) >= reach || p[0].max(p[1]).max(p[2]) <= -reach
+    };
+    let units = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let edges = [sub(v[1], v[0]), sub(v[2], v[1]), sub(v[0], v[2])];
+    if units.iter().any(|&u| apart(u)) || apart(cross(edges[0], edges[1])) {
+        return false;
+    }
+    !units.iter().any(|&u| edges.iter().any(|&e| apart(cross(u, e))))
+}
+
 /// Y of triangle `t` at (x, z) if that point lies inside the triangle's XZ
 /// projection.
 fn height_on_triangle(t: &Tri, x: f32, z: f32) -> Option<f32> {
@@ -705,6 +743,27 @@ mod tests {
         }
         let level = map::read(path).expect("rm11 loads");
         Some(CollisionWorld::from_map(&level, Params::default()))
+    }
+
+    // On rm11 the stairs of room 121 climb through the ceiling of room 119 (y 33127, facing
+    // down). Standing on a tread just under it, or on one level with it, the floor is 121's.
+    #[test]
+    fn a_ceiling_is_not_a_floor() {
+        let Some(w) = load() else { return };
+        assert_eq!(w.floor_room([29901.1, 33087.0, 40031.7]), Some(121), "a tread under 119's ceiling");
+        assert_eq!(w.floor_room([29840.9, 33127.0, 39965.3]), Some(121), "a tread level with 119's ceiling");
+        assert_eq!(w.floor_room([29700.0, 32767.0, 39700.0]), Some(119), "119's own floor");
+    }
+
+    #[test]
+    fn a_triangle_reaches_into_a_box_only_where_it_crosses_it() {
+        let (a, b, c) = ([0.0, 0.0, 10.0], [100.0, 0.0, 10.0], [0.0, 100.0, 10.0]);
+        let wall = Tri { a, b, c, n: [0.0, 0.0, 1.0], off: false, hidden: false, material: usize::MAX, room: NO_ROOM };
+        // The triangle's middle is outside, but its corner is in the box
+        assert!(reaches_into(&wall, &[-5.0, -5.0, 5.0, 5.0, 5.0, 15.0]));
+        // Beside the plane, and past the slanted edge
+        assert!(!reaches_into(&wall, &[-5.0, -5.0, 11.0, 5.0, 5.0, 15.0]));
+        assert!(!reaches_into(&wall, &[60.0, 60.0, 5.0, 90.0, 90.0, 15.0]));
     }
 
     // On rm11 a door at (33562, 33167, 34767) hangs on its hinge with the leaf along +z. A

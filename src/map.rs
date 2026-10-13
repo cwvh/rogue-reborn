@@ -1671,6 +1671,35 @@ impl TransformationWithAABB {
     }
 
     /// How far a map-space point is outside the box (0 when inside) and the box's volume.
+    /// How far outside the box a map-space point is (0 inside)
+    pub fn outside(&self, p: [f32; 3]) -> f32 {
+        self.measure(p).0
+    }
+
+    /// The box in map space, as (min x, y, z, max x, y, z) around its corners
+    pub fn bounds(&self) -> [f32; 6] {
+        let (o, a) = (&self.tm.position, &self.aabb);
+        let (x, y, z) = (&self.tm.x_axis, &self.tm.y_axis, &self.tm.z_axis);
+        let mut b = [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN];
+        for corner in 0..8 {
+            let l = [
+                if corner & 1 == 0 { a[0] } else { a[3] },
+                if corner & 2 == 0 { a[1] } else { a[4] },
+                if corner & 4 == 0 { a[2] } else { a[5] },
+            ];
+            let w = [
+                o.x + x.x * l[0] + y.x * l[1] + z.x * l[2],
+                o.y + x.y * l[0] + y.y * l[1] + z.y * l[2],
+                o.z + x.z * l[0] + y.z * l[1] + z.z * l[2],
+            ];
+            for i in 0..3 {
+                b[i] = b[i].min(w[i]);
+                b[i + 3] = b[i + 3].max(w[i]);
+            }
+        }
+        b
+    }
+
     fn measure(&self, p: [f32; 3]) -> (f32, f32) {
         // Into the box's local space: the transform axes are orthonormal
         let o = &self.tm.position;

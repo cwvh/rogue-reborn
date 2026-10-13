@@ -71,9 +71,13 @@ pub fn write_debug_dump(r: &DebugReport, rgb: &[u8], width: u32, height: u32, st
     if r.culling {
         writeln!(t, "rooms drawn (visible through portals): {}", r.drawn.join(" "))?;
         let collide: Vec<String> = r.collision.as_deref().unwrap_or_default().iter()
-            .map(|c| if c.keep.is_empty() && c.cut.is_empty() { c.room.to_string() } else { format!("{} (part)", c.room) })
+            .map(|c| {
+                let part = if c.keep.is_empty() && c.cut.is_empty() { "" } else { " (part)" };
+                let holes = if c.holes.is_empty() { "" } else { " (holed)" };
+                format!("{}{part}{holes}", c.room)
+            })
             .collect();
-        writeln!(t, "rooms that collide (\"part\" is cut at a portal): {}", collide.join(" "))?;
+        writeln!(t, "rooms that collide (\"part\" is cut at a portal, \"holed\" where the player's room reaches through it): {}", collide.join(" "))?;
     } else {
         writeln!(t, "room culling is off: every room is drawn")?;
     }

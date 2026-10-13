@@ -2,10 +2,11 @@
 
     python scripts/pngdiff.py OLD_DIR NEW_DIR
 
-Prints how many pixels differ in each of a.png to h.png, leaving out the block of debug
+Prints how many pixels differ in each scenario's screenshot (a.png, b.png...), leaving out the block of debug
 text in the top right corner (it shows the live frame rate, so it always differs).
 Needs only the standard library.
 """
+import os
 import struct
 import sys
 import zlib
@@ -54,7 +55,12 @@ def main():
     if len(sys.argv) != 3:
         sys.exit(__doc__)
     old_dir, new_dir = sys.argv[1:]
-    for name in "abcdefgh":
+    # Every scenario's screenshot (a.png, b.png...), not the replay's (h-play.png)
+    names = sorted(f[:-4] for f in os.listdir(old_dir) if f.endswith(".png") and "-" not in f)
+    for name in names:
+        if not os.path.exists(f"{new_dir}/{name}.png"):
+            print(f"{name}: missing from {new_dir}")
+            continue
         w, h, ch, a = read_png(f"{old_dir}/{name}.png")
         w2, h2, ch2, b = read_png(f"{new_dir}/{name}.png")
         assert (w, h, ch) == (w2, h2, ch2), f"{name}.png differs in size"

@@ -160,6 +160,30 @@ impl Visibility {
         Some(if fits(x0, x1) && fits(z0, z1) { [x0, z0, x1, z1] } else { *main })
     }
 
+    /// The volumes of `room` the player is in (a `touch` point is inside) that reach through
+    /// `other`, pulled in by a wall's thickness (min x, y, z, max x, y, z). On rm11 the stairs
+    /// of room 121 climb through the back wall and the ceiling of room 119, and there 119's
+    /// surfaces are not really there. A volume that holds most of `other` where they meet is
+    /// only a rough box around both, as a hall's is around the room in its corner: `other`'s
+    /// walls inside it are real.
+    fn reaching_through(&self, map: &Map, room: u32, other: u32, touch: &[[f32; 3]]) -> Vec<[f32; 6]> {
+        let (Some(&mine), Some(&theirs)) = (self.index.get(&room), self.index.get(&other)) else { return Vec::new() };
+        let volumes = |i: usize| map.rooms.rooms[i].sherman_levels.iter().flat_map(|l| &l.tm_with_aabb);
+        let overlap = |a: &[f32; 6], b: &[f32; 6]| (0..3).all(|i| a[i] < b[i + 3] && b[i] < a[i + 3]);
+        let plan = |b: &[f32; 6]| [b[0], b[2], b[3], b[5]];
+        let mut holes = Vec::new();
+        for v in volumes(mine).filter(|v| touch.iter().any(|&t| v.outside(t) == 0.0)) {
+            let b = v.bounds();
+            let met: Vec<[f32; 6]> = volumes(theirs).map(|o| o.bounds()).filter(|o| overlap(o, &b)).collect();
+            let encloses = met.iter().any(|o| crate::map::nested_fraction(&[plan(o)], &[plan(&b)]) >= 0.5);
+            if met.is_empty() || encloses {
+                continue;
+            }
+            holes.push([b[0] + WALL, b[1] + WALL, b[2] + WALL, b[3] - WALL, b[4] - WALL, b[5] - WALL]);
+        }
+        holes
+    }
+
     /// A point just inside `room`'s side of a portal, if the portal's sides are known. It says
     /// which way the room lies from the portal wherever the camera or the player is: they can
     /// stand on one side while the floor under them, and so the room drawing starts from,
@@ -245,7 +269,7 @@ impl Visibility {
                 let entry = match neighbors.iter_mut().position(|n| n.room == other) {
                     Some(at) => at,
                     None => {
-                        neighbors.push(SolidRoom { room: other, keep: Vec::new(), cut: Vec::new() });
+                        neighbors.push(SolidRoom { room: other, keep: Vec::new(), cut: Vec::new(), holes: Vec::new() });
                         neighbors.len() - 1
                     }
                 };
@@ -262,6 +286,11 @@ impl Visibility {
                         }
                     }
                 }
+            }
+        }
+        for &start in starts {
+            for n in &mut neighbors {
+                n.holes.extend(self.reaching_through(map, start, n.room, touch));
             }
         }
         rooms.extend(neighbors);
@@ -658,6 +687,31 @@ mod tests {
         let b = node.cut_in_self.expect("121 is cut within 119");
         // 119 spans x 29477..29957 and z 39317..40117; 121's own walls are not at its far edges
         assert_eq!(b, [29477.0, 39317.0, 29957.0, 40117.0], "portal {door}");
+    }
+
+    // On rm11 the stairs volume of room 121 reaches through the back wall and the ceiling of
+    // room 119: on the stairs, 119 does not count there. 121's ground floor volume is a
+    // rough box around all of 119, and in the hall 119's walls are real.
+    #[test]
+    fn a_neighbor_does_not_count_where_the_players_room_reaches_through_it() {
+        let path = std::path::Path::new("data/map/rm11/rm11.map");
+        if !path.exists() {
+            eprintln!("skipping: {} not found", path.display());
+            return;
+        }
+        let map = crate::map::read(path).expect("rm11 loads");
+        let vis = Visibility::new(&map);
+        let holes = |feet: [f32; 3]| {
+            let rooms = vis.solid_rooms(&map, &[121], &[], &[feet, [feet[0], feet[1] + 155.0, feet[2]]]);
+            rooms.iter().find(|r| r.room == 119).expect("119 is next to 121").holes.clone()
+        };
+        let on_stairs = holes([29863.0, 33057.0, 40087.0]);
+        assert_eq!(on_stairs.len(), 1, "{on_stairs:?}");
+        let h = on_stairs[0];
+        let inside = |p: [f32; 3]| (0..3).all(|i| p[i] > h[i] && p[i] < h[i + 3]);
+        assert!(inside([29863.0, 33080.0, 40117.0]), "119's back wall across the stairs");
+        assert!(inside([29901.0, 33127.0, 40031.0]), "119's ceiling over the stairs");
+        assert!(holes([29300.0, 32777.0, 39557.0]).is_empty(), "in the hall");
     }
 
     // On rm11 the door between rooms 119 and 121 is portal pd119_121. Shut, nothing is seen

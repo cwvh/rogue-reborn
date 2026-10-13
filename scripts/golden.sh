@@ -38,6 +38,13 @@ run d "$D" --demo --walk 120 --hold AF --yaw 90
 run e "$D" --level rm11 --spawn 1 --walk 200 --hold WUF --doors-open 0
 # Stand before a door of rm11, open it, and push forward while firing
 run g "$D" --level rm11 --pos 33562,33330,-34647 --yaw 0 --walk 240 --hold WUF
+# rm11's stairs climb through the wall and ceiling of the room below (119): half way up, the
+# stairs must be drawn, and walking all the way up and all the way down must not stop at an
+# invisible wall (the logs hold where the feet are)
+run i "$D" --level rm11 --pos 29863,33152,-40320 --yaw 180 --pitch -10 --walk 26 --hold W
+run j "$D" --level rm11 --pos 29863,33332,-39860 --yaw 0 --pitch -30 --walk 14 --hold W
+run k "$D" --level rm11 --pos 29863,33152,-40320 --yaw 180 --walk 100 --hold W
+run l "$D" --level rm11 --pos 29863,33332,-39860 --yaw 0 --walk 110 --hold W
 # Strafe and walk slowly in the demo room
 run f "$D" --demo --walk 120 --hold DRF
 # Record a run and play it back: it must do the same, and every checksum must match

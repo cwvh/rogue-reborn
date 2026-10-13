@@ -1302,6 +1302,49 @@ mod tests {
         assert!(sim.thrown.is_empty());
     }
 
+    /// A sim of rm11 with the player at `feet`, or None without the game data
+    fn rm11(feet: V3) -> Option<Sim> {
+        let path = std::path::Path::new("data/map/rm11/rm11.map");
+        if !path.exists() {
+            eprintln!("skipping: {} not found", path.display());
+            return None;
+        }
+        let level = Arc::new(crate::map::read(path).expect("rm11 loads"));
+        let world = CollisionWorld::from_map(&level, Params::default());
+        let config = Config { magazine: 30, ammo: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };
+        let mut sim = Sim::new(level, world, config, None, Vec::new());
+        sim.add_player(feet);
+        Some(sim)
+    }
+
+    // On rm11 the stairs of room 121 climb from its landing (y 32987, z past 40167) toward -z,
+    // through the back wall (z 40117) and the ceiling (y 33127) of room 119, to the floor
+    // above. 119's wall and ceiling used to stop the player on the way down, and its ceiling
+    // to be taken for the floor on the way up, so the stairs were not drawn.
+    #[test]
+    fn the_player_climbs_the_stairs_through_another_room_and_comes_back_down() {
+        let Some(mut sim) = rm11([29863.0, 32990.0, 40320.0]) else { return };
+        let on_stairs = |p: V3| p[0] > 29757.0 && p[0] < 30027.0 && p[2] > 39907.0 && p[2] < 40167.0 && p[1] > 32990.0 && p[1] < 33150.0;
+        let walk = |sim: &mut Sim, yaw: f32, seconds: f32| {
+            let mut input = Input { forward: true, ..Input::default() };
+            input.set_look(yaw, 0.0);
+            for _ in 0..(seconds / TICK).round() as usize {
+                sim.tick(&[input], TICK);
+                let p = &sim.players[0];
+                if on_stairs(p.player.pos) {
+                    assert_eq!(p.render_rooms, vec![121], "on the stairs at {:?}, drawing starts from 121", p.player.pos);
+                }
+            }
+            sim.players[0].player.pos
+        };
+        // Up, toward -z, and on across the floor above
+        let top = walk(&mut sim, 180.0, 3.0);
+        assert!(top[1] > 33140.0 && top[2] < 39950.0, "reached the top: {top:?}");
+        // And back down to the landing
+        let bottom = walk(&mut sim, 0.0, 3.0);
+        assert!(bottom[1] < 33000.0 && bottom[2] > 40200.0, "back on the landing: {bottom:?}");
+    }
+
     #[test]
     fn the_player_walks_and_stops_at_a_wall() {
         let mut sim = demo();
