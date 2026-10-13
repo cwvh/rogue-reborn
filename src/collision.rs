@@ -376,16 +376,28 @@ impl CollisionWorld {
     /// The room whose floor is under `feet`: the first face below, whatever rooms are
     /// active, so it can be asked where the player stands before deciding what is solid.
     pub fn floor_room(&self, feet: [f32; 3]) -> Option<u32> {
+        // A ray straight down meets only triangles over that point so only the
+        // grid cells around it need inspection. Ties go to the first triangle
+        // in the level (surface, not map level).
         let origin = [feet[0], feet[1] + 60.0, feet[2]];
-        let mut best: Option<(f32, u32)> = None;
-        for t in self.tris.iter().filter(|t| !t.off) {
-            if let Some(d) = crate::combat::ray_triangle(origin, [0.0, -1.0, 0.0], t.a, t.b, t.c) {
-                if d <= 220.0 && best.is_none_or(|(b, _)| d < b) {
-                    best = Some((d, t.room));
+        let mut best = None;
+        for r in self.row(feet[2] - 1.0)..=self.row(feet[2] + 1.0) {
+            for c in self.col(feet[0] - 1.0)..=self.col(feet[0] + 1.0) {
+                for &ti in &self.cells[r * self.cols + c] {
+                    let ti = ti as usize;
+                    let t = &self.tris[ti];
+                    if t.off {
+                        continue;
+                    }
+                    if let Some(d) = crate::combat::ray_triangle(origin, [0.0, -1.0, 0.0], t.a, t.b, t.c) {
+                        if d <= 220.0 && best.is_none_or(|(b, bi, _)| d < b || (d == b && ti < bi)) {
+                            best = Some((d, ti, t.room));
+                        }
+                    }
                 }
             }
         }
-        best.and_then(|(_, room)| (room != NO_ROOM).then_some(room))
+        best.and_then(|(_, _, room)| (room != NO_ROOM).then_some(room))
     }
 
     /// Whether a face can currently stop anything
