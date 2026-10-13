@@ -1,0 +1,43 @@
+Known bugs
+==========
+
+Spire cut in half near a courtyard portal (rm11)
+------------------------------------------------
+Status: open. The original Rogue Spear engine has the same bug, so fixing it is optional
+(it would be an improvement over the original, not a regression fix).
+
+What you see: in rm11's courtyard, facing south (-z) toward the roof spire, the spire is
+whole when standing well inside room 5. Within 40 units of portal pt05_06, or anywhere in
+room 6, the half of the spire on room 6's side of x = 32637 disappears.
+
+Reproduce (spire cut, standing in room 6):
+  cargo rr --map data/map/rm11/rm11.map --pos 32639.9,32832.0,-38155.6 --yaw -170.8 --pitch 13.2 --first-person --textured --portals
+Spire whole (room 5, 80 units from the portal):
+  cargo rr --map data/map/rm11/rm11.map --pos 32557.1,32832.0,-38143.8 --yaw -179.1 --pitch 21.6 --first-person --textured --portals
+(--pos takes z negated; map-space z is positive. Add --no-cull to see what should draw.)
+
+Geometry (map space):
+  - Portal pt05_06 (room 5 -> 6): plane x = 32637, z 35887..41079, y 32667..34627.
+    It is a wall-less opening in the open courtyard, so its on-screen mask covers the sky.
+  - Spire: material shingles_snow_01.bmp, x 32307..32957, y 33677..34827, z 33797..34467.
+    It belongs to room 5, and a copy belongs to room 1 (the exterior, not drawn here).
+    It straddles the portal's plane about 1400 units south of the portal's end.
+  - Room 5's ground volume: x 29937..34137, z 35837..40267. Room 6's volume:
+    x 32095..37417, z 29317..43953. They overlap in x 32095..34137, z 35837..40267.
+    The spire is outside that overlap, and outside room 5's own volume.
+  Tools: examples/face-probe.rs (triangles near a point, with room and material),
+  examples/room-boxes.rs (room volumes), examples/portal-list.rs.
+
+Cause: a room drawn through a portal is clipped at the portal's plane, and the plane is
+infinite (src/draw.rs, draw_plan: `fixed.push(slackened(p))`). The clip exists to remove
+a neighbor's geometry that overlaps the room in front, but it also cuts the spire, which
+is far to the side of the portal. In the doorway mode (within TOUCH = 40 units,
+src/visibility.rs), room 5 itself is cut at the same plane wherever it is inside room 6's
+floor plan box (cut_in_parent / bounds_at), and room 6's box covers the spire.
+
+Possible fix: clip at the portal's plane only inside the box where the two rooms' volumes
+overlap, and keep the room whole outside it. draw_plan already expresses "this side of the
+plane OR outside the box" for touched portals by drawing the room once per way (up to 5
+draws). Risks: more draws per room (measure the frame time on the big courtyard rooms), and
+overlap junk lying outside its own room's volume would show. Check portals across maps
+against --no-cull, and run the golden harness (scripts/golden.sh, scripts/pngdiff.py).
