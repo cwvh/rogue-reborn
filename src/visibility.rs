@@ -129,23 +129,35 @@ impl Visibility {
         Self { by_room, outdoors, centers, numbers, index, corners, polygons, sides, footprints, objects, unowned, object_rooms }
     }
 
-    /// The volume of a room that meets a portal, floor plan only, pulled in by a wall's
-    /// thickness (min x, min z, max x, max z). A room can hold volumes that overlap others
-    /// elsewhere (an upper floor over the whole hall below), so the one at the doorway is the
-    /// only one that says where the two rooms overlap there. The stray surfaces of an
-    /// overlapping room lie well inside the volume, while the walls of the room around it
-    /// meet its outside.
-    fn bounds_at(&self, room: u32, portal: usize) -> Option<[f32; 4]> {
+    /// The volume of a room that meets a portal, floor plan only (min x, min z, max x,
+    /// max z), for cutting `cut`, the room it overlaps there. A room can hold volumes that
+    /// overlap others elsewhere (an upper floor over the whole hall below), so the one at the
+    /// doorway is the only one that says where the two rooms overlap there.
+    ///
+    /// An edge is pulled in by a wall's thickness where `cut`'s own walls meet it, so they
+    /// stay. Elsewhere the stray surfaces of `cut` reach the edge, and stopping short of it
+    /// would leave a slice of them standing inside the room, in front of its wall.
+    fn bounds_at(&self, room: u32, cut: u32, portal: usize) -> Option<[f32; 4]> {
         let corners = &self.corners[portal];
         let span = |axis: usize| corners.iter().map(|c| c[axis]).fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
         let (x, z) = (span(0), span(2));
         let gap = |lo: f32, hi: f32, (a, b): (f32, f32)| (a - hi).max(lo - b).max(0.0);
         let distance = |f: &[f32; 4]| gap(f[0], f[2], x).hypot(gap(f[1], f[3], z));
         let main = self.footprints.get(&room)?.iter().min_by(|a, b| distance(a).total_cmp(&distance(b)))?;
-        let inset = |lo: f32, hi: f32| if hi - lo > 2.0 * WALL { (lo + WALL, hi - WALL) } else { (lo, hi) };
-        let (x0, x1) = inset(main[0], main[2]);
-        let (z0, z1) = inset(main[1], main[3]);
-        Some([x0, z0, x1, z1])
+        let walls = self.footprints.get(&cut).map(Vec::as_slice).unwrap_or_default();
+        // The coordinate of an edge, moved in unless a wall of `cut` stands there
+        let edge = |at: f32, axes: [usize; 2], inward: f32| {
+            if walls.iter().any(|f| axes.iter().any(|&a| (f[a] - at).abs() <= WALL)) {
+                at + inward * WALL
+            } else {
+                at
+            }
+        };
+        let (x0, x1) = (edge(main[0], [0, 2], 1.0), edge(main[2], [0, 2], -1.0));
+        let (z0, z1) = (edge(main[1], [1, 3], 1.0), edge(main[3], [1, 3], -1.0));
+        // A volume too small to pull in is used as it is
+        let fits = |lo: f32, hi: f32| hi - lo > 0.0;
+        Some(if fits(x0, x1) && fits(z0, z1) { [x0, z0, x1, z1] } else { *main })
     }
 
     /// A point just inside `room`'s side of a portal, if the portal's sides are known. It says
@@ -246,7 +258,7 @@ impl Visibility {
                     if touched {
                         if let Some(r) = rooms.iter_mut().find(|r| r.room == start) {
                             // Only where it overlaps the room beyond
-                            r.cut.push(Cut { plane: [-p[0], -p[1], -p[2], -p[3]], within: self.bounds_at(other, i) });
+                            r.cut.push(Cut { plane: [-p[0], -p[1], -p[2], -p[3]], within: self.bounds_at(other, start, i) });
                         }
                     }
                 }
@@ -319,8 +331,8 @@ impl Visibility {
                 polygon: &self.polygons[i],
                 touched,
                 // Each room's cut is limited to where it overlaps the other
-                cut_in_self: if touched { self.bounds_at(node.room, i) } else { None },
-                cut_in_parent: if touched { self.bounds_at(other, i) } else { None },
+                cut_in_self: if touched { self.bounds_at(node.room, other, i) } else { None },
+                cut_in_parent: if touched { self.bounds_at(other, node.room, i) } else { None },
                 children: Vec::new(),
             };
             path.push(other);
@@ -622,6 +634,30 @@ mod tests {
         assert!(!counts([29737.0, 32900.0, 40042.5]), "where the player stands, in 119");
         // Room 119 itself is whole
         assert!(rooms.iter().any(|r| r.room == 119 && r.keep.is_empty() && r.cut.is_empty()));
+    }
+
+    // On rm11 the stairs of room 121 stand inside room 119. Standing in the doorway, 121 is
+    // cut where it overlaps 119, out to 119's walls: stopping a few units short left a slice
+    // of the stairs standing in front of the wall.
+    #[test]
+    fn the_overlapping_room_is_cut_out_to_the_walls() {
+        let path = std::path::Path::new("data/map/rm11/rm11.map");
+        if !path.exists() {
+            eprintln!("skipping: {} not found", path.display());
+            return;
+        }
+        let map = crate::map::read(path).expect("rm11 loads");
+        let vis = Visibility::new(&map);
+        let door = map.portals.portals.iter().position(|p| p.name == "pd119_121").expect("the door's portal");
+        let feet = [29491.9, 32767.0, 39544.6];
+        let eye = [feet[0], feet[1] + 165.0, feet[2]];
+        let everywhere = |_: [f32; 3]| [0.0, 0.0, 0.0, 1.0];
+        let blocked = vec![false; map.portals.portals.len()];
+        let plan = vis.plan(&map, 119, &[feet, eye], eye, &blocked, &everywhere);
+        let node = plan.children.iter().find(|c| c.room == 121).expect("121 is seen from the doorway");
+        let b = node.cut_in_self.expect("121 is cut within 119");
+        // 119 spans x 29477..29957 and z 39317..40117; 121's own walls are not at its far edges
+        assert_eq!(b, [29477.0, 39317.0, 29957.0, 40117.0], "portal {door}");
     }
 
     // On rm11 the door between rooms 119 and 121 is portal pd119_121. Shut, nothing is seen
