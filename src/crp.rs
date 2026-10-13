@@ -1,9 +1,9 @@
 //! Reader for Rogue Spear character meshes (`.CRP`), bind pose only.
 //!
 //! The format is undocumented; this was worked out from the files, so it only
-//! extracts what has been verified: model-space vertex positions and the
-//! triangles of each material part. UVs, normals, bone weights and animation
-//! are not read.
+//! extracts what has been verified: model-space vertex positions, and the
+//! triangles, UVs and normals of each material part. Animation is in the
+//! motion files.
 //!
 //! Layout as understood:
 //! - `f32` version (1.8), then one group per bone (the count is not stored;
@@ -15,13 +15,17 @@
 //!   after the count and can be at an unaligned offset.
 //! - One chunk per material part, each introduced by the tag `0c 00 00 00`
 //!   and a length-prefixed texture path (the root of the path varies between
-//!   characters). A chunk ends with two lists of `u16` triangle indices:
-//!   first the global vertex indices, then the same triangles in part-local
-//!   indices (which start `0,1,2`).
-//! - Inside a chunk, at offset `0x72` from the end of the path: `u32 V` (the
-//!   part's vertex count), `V` 16-byte color entries (not read), `u32 1`,
-//!   then `V` UV pairs of `f32`, indexed by the part-local vertex index.
-//!   Values run roughly -1.1 to 1.7, so textures wrap.
+//!   characters). Chunks are 47 or 79 bytes apart, in a header not worked out,
+//!   so they are found by the tag and the path.
+//! - A chunk, from the end of its path: a 0x72-byte material header (its
+//!   first `u32` is 3, or 4 for the blended `.tga` materials), then `u32 V`
+//!   (the part's vertex count), `V` RGBA colors of four `f32`, `u32 1`, `V`
+//!   UV pairs of `f32`; the same three again (the same UVs in every file);
+//!   `V` unit normals of three `f32`; `u32 T`, `T` face planes (normal and
+//!   distance, four `f32`); and two lists of `3T` `u16` triangle indices:
+//!   first into the model's vertices, then the same triangles in part-local
+//!   indices, which index the UVs and normals. UVs run roughly -1.1 to 1.7,
+//!   so textures wrap. The corners go counterclockwise seen from the front.
 //!
 //! Units are centimeter-like and a soldier is about 200 tall with the origin
 //! near the hips. Coordinates are the same handedness as the MAP files.
@@ -43,8 +47,12 @@ pub struct Part {
     pub triangles: Vec<[u32; 3]>,
     /// Texture coordinates of each triangle's three corners, parallel to
     /// `triangles`. A vertex shared between parts can have different UVs in
-    /// each, so these are per corner. `None` if the chunk's UVs were not found.
-    pub corner_uvs: Option<Vec<[[f32; 2]; 3]>>,
+    /// each, so these are per corner.
+    pub corner_uvs: Vec<[[f32; 2]; 3]>,
+    /// Unit normals of each triangle's three corners in the bind pose, parallel
+    /// to `triangles`. Per corner like the UVs: where a part meets another at a
+    /// crease, each side has its own.
+    pub corner_normals: Vec<[[f32; 3]; 3]>,
 }
 
 #[derive(Clone, Debug)]
@@ -226,57 +234,63 @@ pub fn parse(d: &[u8]) -> Result<Crp> {
         bail!("no material chunks");
     }
     let mut parts = Vec::new();
-    for (i, &p) in marks.iter().enumerate() {
+    for &p in &marks {
         let len = u32_at(d, p)? as usize;
         let path = string_at(d, p).context("material path")?;
         let material = path.rsplit('\\').next().unwrap_or("").to_string();
-
-        let body_start = p + 4 + len;
-        let body_end = marks.get(i + 1).map_or(d.len(), |&n| n - 4);
-        let Some(body) = d.get(body_start..body_end) else { continue };
-        let Some((global, local)) = find_triangle_lists(body) else { continue };
-        let uvs = part_uvs(body, &local);
-        // A single triangle could be a false match on a chunk with no lists, so it must have
-        // three distinct vertices of the mesh and the chunk its three UVs. Parts of one
-        // triangle are real: the back of a helmet, the top of a vest.
-        if let [t] = global[..] {
-            let real = t[0] != t[1] && t[1] != t[2] && t[0] != t[2] && t.iter().all(|&i| (i as usize) < vertices.len());
-            if !real || uvs.is_none() {
-                continue;
-            }
-        }
-
-        let mut triangles = Vec::with_capacity(global.len());
-        let mut corner_uvs = uvs.as_ref().map(|_| Vec::with_capacity(global.len()));
-        for (k, t) in global.iter().enumerate() {
-            if !t.iter().all(|&i| (i as usize) < vertices.len()) {
-                continue;
-            }
-            triangles.push([t[0] as u32, t[1] as u32, t[2] as u32]);
-            if let (Some(out), Some(uvs)) = (corner_uvs.as_mut(), uvs.as_ref()) {
-                out.push(local[k].map(|l| uvs[l as usize]));
-            }
-        }
-        parts.push(Part { material, triangles, corner_uvs });
+        let part = read_chunk(d, p + 4 + len, material, vertices.len())
+            .with_context(|| format!("material chunk {path}"))?;
+        parts.push(part);
     }
 
     Ok(Crp { name, vertices, parts, groups })
 }
 
-/// The part's UV pairs, indexed by part-local vertex. Located by the vertex
-/// count, which appears near the start of the chunk, followed `16 * V` bytes
-/// later by a `1`.
-fn part_uvs(body: &[u8], local: &[[u16; 3]]) -> Option<Vec<[f32; 2]>> {
-    let v = local.iter().flatten().map(|&l| l as usize).max()? + 1;
-    let at = (0..0x200).find(|&o| {
-        u32_at(body, o).is_ok_and(|n| n as usize == v)
-            && u32_at(body, o + 4 + 16 * v).is_ok_and(|t| t == 1)
-            && o + 8 + 24 * v <= body.len()
-    })?;
-    let base = at + 4 + 16 * v + 4;
-    (0..v)
-        .map(|i| Some([f32_at(body, base + 8 * i).ok()?, f32_at(body, base + 8 * i + 4).ok()?]))
-        .collect()
+/// The bytes between a chunk's texture path and its vertex count
+const CHUNK_HEADER: usize = 0x72;
+
+/// Read a material chunk from `at`, just past its texture path (see the layout above).
+/// `vertex_count` is the model's, which the triangles index.
+fn read_chunk(d: &[u8], at: usize, material: String, vertex_count: usize) -> Result<Part> {
+    let mut o = at + CHUNK_HEADER;
+    let v = u32_at(d, o)? as usize;
+    ensure!((1..20000).contains(&v), "implausible part vertex count {v}");
+    // Colors, then UVs, twice over; the second UVs repeat the first
+    let colors_and_uvs = 4 + 16 * v + 4 + 8 * v;
+    ensure!(u32_at(d, o + 4 + 16 * v)? == 1, "no UVs after the colors");
+    ensure!(u32_at(d, o + colors_and_uvs)? as usize == v, "the second colors are not for {v} vertices");
+    let uvs: Vec<[f32; 2]> = (0..v).map(|i| {
+        let u = o + 4 + 16 * v + 4 + 8 * i;
+        Ok([f32_at(d, u)?, f32_at(d, u + 4)?])
+    }).collect::<Result<_>>()?;
+    o += 2 * colors_and_uvs;
+    let normals: Vec<[f32; 3]> = (0..v).map(|i| {
+        let n = o + 12 * i;
+        Ok([f32_at(d, n)?, f32_at(d, n + 4)?, f32_at(d, n + 8)?])
+    }).collect::<Result<_>>()?;
+    o += 12 * v;
+    let t = u32_at(d, o)? as usize;
+    ensure!((1..20000).contains(&t), "implausible triangle count {t}");
+    // Past the face planes, the triangles: into the model's vertices, then into the part's
+    let global = o + 4 + 16 * t;
+    let local = global + 6 * t;
+    let u16_at = |at: usize| -> Result<usize> {
+        let b = d.get(at..at + 2).context("unexpected end of CRP")?;
+        Ok(u16::from_le_bytes([b[0], b[1]]) as usize)
+    };
+    let mut triangles = Vec::with_capacity(t);
+    let mut corner_uvs = Vec::with_capacity(t);
+    let mut corner_normals = Vec::with_capacity(t);
+    for k in 0..t {
+        let g: [usize; 3] = [u16_at(global + 6 * k)?, u16_at(global + 6 * k + 2)?, u16_at(global + 6 * k + 4)?];
+        let l: [usize; 3] = [u16_at(local + 6 * k)?, u16_at(local + 6 * k + 2)?, u16_at(local + 6 * k + 4)?];
+        ensure!(g.iter().all(|&i| i < vertex_count), "triangle {k} {g:?} is past the model's {vertex_count} vertices");
+        ensure!(l.iter().all(|&i| i < v), "triangle {k} {l:?} is past the part's {v} vertices");
+        triangles.push(g.map(|i| i as u32));
+        corner_uvs.push(l.map(|i| uvs[i]));
+        corner_normals.push(l.map(|i| normals[i]));
+    }
+    Ok(Part { material, triangles, corner_uvs, corner_normals })
 }
 
 /// A length-prefixed, NUL-terminated printable ASCII string at `o`
@@ -289,64 +303,6 @@ fn string_at(d: &[u8], o: usize) -> Option<String> {
     let (last, text) = b.split_last()?;
     (*last == 0 && text.iter().all(|c| (0x20..0x7f).contains(c)))
         .then(|| String::from_utf8_lossy(text).into_owned())
-}
-
-/// Find the pair of triangle index lists in a chunk and return the global and
-/// local lists. The local list starts `0,1,2` and the global list immediately
-/// precedes it; they must describe the same triangles, so the
-/// global-to-local mapping has to be one-to-one and cover every local index.
-/// The longest consistent pair wins.
-fn find_triangle_lists(body: &[u8]) -> Option<(Vec<[u16; 3]>, Vec<[u16; 3]>)> {
-    let mut best: Option<(usize, usize, Vec<u16>)> = None; // (T, q, u16 data)
-
-    for parity in 0..2 {
-        if body.len() < parity {
-            continue;
-        }
-        let n = (body.len() - parity) / 2;
-        let u: Vec<u16> = (0..n)
-            .map(|i| u16::from_le_bytes([body[parity + 2 * i], body[parity + 2 * i + 1]]))
-            .collect();
-
-        for q in 3..n.saturating_sub(3) {
-            if u[q..q + 3] != [0, 1, 2] {
-                continue;
-            }
-            let max_t = (q / 3).min((n - q) / 3).min(2500);
-            for t in (1..=max_t).rev() {
-                if best.as_ref().is_some_and(|b| t <= b.0) {
-                    break;
-                }
-                if consistent(&u, q, t) {
-                    best = Some((t, q, u.clone()));
-                    break;
-                }
-            }
-        }
-    }
-
-    let (t, q, u) = best?;
-    let tri = |o: usize| [u[o], u[o + 1], u[o + 2]];
-    Some((
-        (0..t).map(|k| tri(q - 3 * t + 3 * k)).collect(),
-        (0..t).map(|k| tri(q + 3 * k)).collect(),
-    ))
-}
-
-fn consistent(u: &[u16], q: usize, t: usize) -> bool {
-    let mut to_global: HashMap<u16, u16> = HashMap::new();
-    let mut to_local: HashMap<u16, u16> = HashMap::new();
-    for i in 0..3 * t {
-        let local = u[q + i];
-        let global = u[q - 3 * t + i];
-        if *to_global.entry(local).or_insert(global) != global
-            || *to_local.entry(global).or_insert(local) != local
-        {
-            return false;
-        }
-    }
-    // Local indices must be exactly 0..V
-    (0..to_global.len() as u16).all(|l| to_global.contains_key(&l))
 }
 
 #[cfg(test)]
@@ -400,8 +356,7 @@ mod tests {
     fn every_part_has_uvs_in_a_sane_range() {
         let Some(c) = load() else { return };
         for part in &c.parts {
-            let uvs = part.corner_uvs.as_ref()
-                .unwrap_or_else(|| panic!("{} has no UVs", part.material));
+            let uvs = &part.corner_uvs;
             assert_eq!(uvs.len(), part.triangles.len());
             for uv in uvs.iter().flatten().flatten() {
                 assert!((-5.0..5.0).contains(uv), "{} uv {uv}", part.material);
@@ -421,6 +376,32 @@ mod tests {
         let c = read(p).expect("CRP parses");
         let open = c.open_edges();
         assert!(open.is_empty(), "{} open edges: {open:?}", open.len());
+    }
+
+    // Each corner's normal is a unit vector, and faces the way the triangle does (its corners
+    // go counterclockwise seen from the front) but where a vertex sits on a crease and its
+    // normal is the average of the faces around it
+    #[test]
+    fn normals_are_unit_length_and_face_out() {
+        let Some(c) = load() else { return };
+        let (mut corners, mut out) = (0, 0);
+        for part in &c.parts {
+            assert_eq!(part.corner_normals.len(), part.triangles.len());
+            for (t, normals) in part.triangles.iter().zip(&part.corner_normals) {
+                let [a, b, p] = t.map(|i| c.vertices[i as usize]);
+                let (e, f) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [p[0] - a[0], p[1] - a[1], p[2] - a[2]]);
+                let face = [e[1] * f[2] - e[2] * f[1], e[2] * f[0] - e[0] * f[2], e[0] * f[1] - e[1] * f[0]];
+                for n in normals {
+                    let length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                    assert!((length - 1.0).abs() < 0.01, "{} normal {n:?}", part.material);
+                    corners += 1;
+                    if n[0] * face[0] + n[1] * face[1] + n[2] * face[2] > 0.0 {
+                        out += 1;
+                    }
+                }
+            }
+        }
+        assert!(out as f32 > 0.9 * corners as f32, "{out} of {corners} corners face out");
     }
 
     #[test]
@@ -489,9 +470,8 @@ mod tests {
                 let p = f.path();
                 if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("crp")) {
                     match read(&p) {
-                        Ok(c) if c.parts.iter().any(|p| !p.triangles.is_empty())
-                            && c.parts.iter().all(|p| p.corner_uvs.is_some()) => ok += 1,
-                        Ok(_) => bad.push(format!("{}: no triangles or UVs", p.display())),
+                        Ok(c) if c.parts.iter().any(|p| !p.triangles.is_empty()) => ok += 1,
+                        Ok(_) => bad.push(format!("{}: no triangles", p.display())),
                         Err(e) => bad.push(format!("{}: {e:#}", p.display())),
                     }
                 }

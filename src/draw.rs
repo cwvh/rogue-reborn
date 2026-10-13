@@ -68,10 +68,10 @@ pub fn draw_character(c: &crp::Crp, verts: &[[f32; 3]], part_textures: &[Option<
         let is_face = part.material.eq_ignore_ascii_case("hrt_face.bmp");
         let tex = if is_face { face } else { None }
             .or(part_textures.get(pi).copied().flatten());
-        let uvs = part.corner_uvs.as_ref();
+        let uvs = &part.corner_uvs;
         if is_glass && textured { glEnable(0x0BE2); glBlendFunc(0x0302, 0x0303); } // GL_BLEND, SRC_ALPHA, ONE_MINUS_SRC_ALPHA
         // Solid mode shows the texture; wireframe shows flat color lines
-        if let (true, Some(id), Some(_)) = (textured, tex, uvs) {
+        if let (true, Some(id)) = (textured, tex) {
             glEnable(0x0DE1); // GL_TEXTURE_2D
             glBindTexture(0x0DE1, id);
             glColor4f(1.0, 1.0, 1.0, 1.0);
@@ -90,9 +90,7 @@ pub fn draw_character(c: &crp::Crp, verts: &[[f32; 3]], part_textures: &[Option<
         glBegin(0x0004); // GL_TRIANGLES
         for (k, t) in part.triangles.iter().enumerate() {
             for (j, &i) in t.iter().enumerate() {
-                if let Some(uvs) = uvs {
-                    glTexCoord2f(uvs[k][j][0], uvs[k][j][1]);
-                }
+                glTexCoord2f(uvs[k][j][0], uvs[k][j][1]);
                 let v = &verts[i as usize];
                 glVertex3f(v[0], v[1], v[2]);
             }
