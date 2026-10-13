@@ -508,6 +508,8 @@ fn main() {
     // F3 closes the window and starts the viewer again with the same options
     let mut reload = false;
     // Which objects are glass panes (drawn in place), and every object's index
+    // Faces lying over others in the same plane (a door frame on its wall) get drawn on top
+    let coplanar_layers: Vec<rogue_reborn::coplanar::Layers> = level.geometries.objects.iter().map(rogue_reborn::coplanar::layers).collect();
     let pane_objects: Vec<bool> = level.geometries.objects.iter().map(|o| sim.panes.iter().any(|g| g.name == o.name)).collect();
     let all_objects: Vec<usize> = (0..level.geometries.objects.len()).collect();
     // Doors: each leaf is drawn where its door is. Space or Backspace opens and closes the
@@ -1168,7 +1170,7 @@ fn main() {
                             let [r, g, b] = room_color(&object.name, current_rooms.iter().any(|n| *n == object.name));
                             glColor3f(r, g, b);
                         }
-                    for od in &object.object_datas {
+                    for (od_index, od) in object.object_datas.iter().enumerate() {
                         if use_filter {
                             let rooms = &level.planning_levels.levels[planning_level_index].room_names;
                             if !rooms.iter().any(|r| r == &object.name) {
@@ -1190,8 +1192,18 @@ fn main() {
                                 continue;
                             }
 
+                            // Faces over others in their plane come after, each layer nearer
+                            let layers = &coplanar_layers[object_index];
+                            for layer in 0..=layers.max {
+                            if layer > 0 {
+                                glEnable(0x8037); // GL_POLYGON_OFFSET_FILL
+                                glPolygonOffset(-f32::from(layer), -f32::from(layer));
+                            }
                             glBegin(0x0004); // GL_TRIANGLES
                             for i in 0..face_count {
+                                if layers.per_face[od_index][i] != layer {
+                                    continue;
+                                }
                                 let (i0, i1, i2) = od.faces.face_indices[i];
                                 let (t0, t1, t2) = od.faces.texture_indices[i];
 
@@ -1214,6 +1226,10 @@ fn main() {
                                 }
                             }
                             glEnd();
+                            }
+                            if layers.max > 0 {
+                                glDisable(0x8037);
+                            }
                         }
                     }
                     if door.is_some() {
