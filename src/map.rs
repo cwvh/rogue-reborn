@@ -106,7 +106,9 @@ pub fn nested_fraction(inner: &[[f32; 4]], outer: &[[f32; 4]]) -> f32 {
 /// "20_doormetal" give 204 and 20, while "glass" gives none.
 pub fn object_room(name: &str) -> Option<u32> {
     let digits: String = name.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() || !(digits.len() == name.len() || name[digits.len()..].starts_with('_')) {
+    // A few names have a stray space before the underscore ("219 _glassext01" on rm11)
+    let rest = name[digits.len()..].trim_start_matches(' ');
+    if digits.is_empty() || !(rest.is_empty() || rest.starts_with('_')) {
         return None;
     }
     digits.parse().ok()
@@ -1952,6 +1954,16 @@ fn latin1_to_utf8(s: &[u8]) -> String {
 #[cfg(test)]
 mod model_tests {
     use super::*;
+
+    #[test]
+    fn an_objects_room_is_the_number_its_name_starts_with() {
+        assert_eq!(object_room("204"), Some(204));
+        assert_eq!(object_room("20_doormetal"), Some(20));
+        // rm11 has "219 _glassext01", with a stray space
+        assert_eq!(object_room("219 _glassext01"), Some(219));
+        assert_eq!(object_room("glass"), None);
+        assert_eq!(object_room("12a_thing"), None);
+    }
 
     #[test]
     fn reads_the_mp5k_model() {

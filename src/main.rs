@@ -1106,15 +1106,13 @@ fn main() {
                 let clip = |v: [f32; 3]| mul_mat4(&projection, mul_mat4(&modelview, [v[0], v[1], v[2], 1.0]));
                 plan = sim.players[me].render_rooms.iter().map(|&r| sim.visibility.plan(&level, r, &sim.players[me].body, cam_eye, &sim.blocked_portals, &clip)).collect();
             }
-            drawn_rooms = {
-                let mut v: Vec<u32> = Vec::new();
-                for node in &plan {
-                    node.rooms(&mut v);
-                }
-                v.sort();
-                v.dedup();
-                v.iter().map(|n| n.to_string()).collect()
-            };
+            let mut visible_rooms: Vec<u32> = Vec::new();
+            for node in &plan {
+                node.rooms(&mut visible_rooms);
+            }
+            visible_rooms.sort();
+            visible_rooms.dedup();
+            drawn_rooms = visible_rooms.iter().map(|n| n.to_string()).collect();
 
             // Combined
             {
@@ -1521,7 +1519,11 @@ fn main() {
                 f.update(step_dt, &|x, z, y| sim.world.ground_at(x, z, y + 30.0));
             }
             fractures.retain(|f| !f.done());
-            for (pane, _) in sim.panes.iter().zip(&sim.broken_at).filter(|(_, b)| b.is_none()) {
+            // A pane shows only with its room. Some maps glaze a window on the inside alone and
+            // give the outside a solid one: from outside, the room and its glass are not drawn.
+            let pane_shows = |pane: &glass::Pane| plan.is_empty()
+                || map::object_room(&pane.name).is_none_or(|n| visible_rooms.contains(&n));
+            for (pane, _) in sim.panes.iter().zip(&sim.broken_at).filter(|(p, b)| b.is_none() && pane_shows(p)) {
                 draw_glass(&level.materials, pane.material, &map_num, &mut textures, textured, pane.opacity, pane.tris.iter().map(|t| (t.p, t.uv)));
             }
             for f in &fractures {

@@ -456,9 +456,34 @@ fn owned_sides(map: &Map, index: &HashMap<u32, usize>, corners: &[[f32; 3]], a: 
         (Some(x), Some(y)) if x == y && x != std::cmp::Ordering::Equal => return unknown,
         (Some(std::cmp::Ordering::Greater), _) | (_, Some(std::cmp::Ordering::Less)) => 1.0,
         (Some(std::cmp::Ordering::Less), _) | (_, Some(std::cmp::Ordering::Greater)) => -1.0,
-        _ => return unknown,
+        _ => match sides_by_volumes(map, ia, ib, center, n) {
+            Some(side) => side,
+            None => return unknown,
+        },
     };
     [(a, Some(at(side, SIDE_DISTANCE))), (b, Some(at(-side, SIDE_DISTANCE)))]
+}
+
+/// Where every point near a portal is in both rooms, as in rm11's courtyard, where room 5's
+/// ground reaches 1500 units past its portal into room 6: the side of each room's volume at
+/// the portal (the nearest, and the smallest of those it is inside), by where its middle is.
+/// 1.0 when room `ia` is on the side `n` points to, -1.0 when it is on the other side, and
+/// None unless the two middles are on opposite sides.
+fn sides_by_volumes(map: &Map, ia: usize, ib: usize, center: [f32; 3], n: [f32; 3]) -> Option<f32> {
+    let middle_side = |i: usize| {
+        let at = map.rooms.rooms[i].sherman_levels.iter().flat_map(|l| &l.tm_with_aabb)
+            .map(|v| (v.outside(center), v.bounds()))
+            .min_by(|(d, b), (e, c)| d.total_cmp(e).then(size(b).total_cmp(&size(c))))?.1;
+        let middle = [(at[0] + at[3]) / 2.0, (at[1] + at[4]) / 2.0, (at[2] + at[5]) / 2.0];
+        Some((0..3).map(|k| (middle[k] - center[k]) * n[k]).sum::<f32>())
+    };
+    let (sa, sb) = (middle_side(ia)?, middle_side(ib)?);
+    (sa * sb < 0.0).then(|| sa.signum())
+}
+
+/// The volume of a box (min x, y, z, max x, y, z)
+fn size(b: &[f32; 6]) -> f32 {
+    (b[3] - b[0]) * (b[4] - b[1]) * (b[5] - b[2])
 }
 
 /// A portal's corners in an order that goes around the outline, whatever order the file
@@ -790,6 +815,25 @@ mod tests {
     // in the plane x = 33317, room 2 on the low side. Walking off the bottom step the floor under
     // the player is room 3's before the player has crossed the plane, so drawing starts from room 3
     // with the camera on room 2's side; room 2 must still be the side the camera is on.
+    // On rm11 the courtyard is rooms 5 and 6, joined by portal pt05_06 at x = 32637. Room 5's
+    // ground reaches 1500 units past it into 6, so every point near it is in both rooms; the
+    // middles of their volumes still say which side is which. Taken from the camera instead,
+    // standing in 6 with the camera on 5's side (third person) cut 6's own walls away.
+    #[test]
+    fn a_courtyard_portal_knows_its_sides_where_both_rooms_reach_past_it() {
+        let path = std::path::Path::new("data/map/rm11/rm11.map");
+        if !path.exists() {
+            eprintln!("skipping: {} not found", path.display());
+            return;
+        }
+        let map = crate::map::read(path).expect("rm11 loads");
+        let vis = Visibility::new(&map);
+        let i = map.portals.portals.iter().position(|p| p.name == "pt05_06").expect("the courtyard portal");
+        let five = vis.side_point(i, 5).expect("room 5's side is known");
+        let six = vis.side_point(i, 6).expect("room 6's side is known");
+        assert!(five[0] < 32637.0 && six[0] > 32637.0, "5 at {five:?}, 6 at {six:?}");
+    }
+
     #[test]
     fn a_portal_knows_which_side_is_which_room_wherever_the_camera_is() {
         let path = std::path::Path::new("data/map/m00/citystreet_large.map");
