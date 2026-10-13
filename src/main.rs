@@ -13,7 +13,7 @@ use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 use std::sync::Arc;
 use std::net::ToSocketAddrs;
-use rogue_reborn::{map, rsb, actor, combat, demo, grenade, motion, recording, skeleton, sim, sound, weapon, ambience, glass};
+use rogue_reborn::{map, rsb, actor, combat, demo, grenade, recording, skeleton, sim, sound, weapon, ambience, glass};
 use rogue_reborn::net::client::{Client, Status};
 use rogue_reborn::net::animation::Doing;
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
@@ -351,21 +351,17 @@ fn main() {
     let mut effects = impact::Effects::default();
     const MAX_DECALS: usize = 300;
 
-    // Where the weapon sits relative to the right hand. Calibrated so that in the
-    // weapon-ready idle pose the gun points the way the body faces (the model's
-    // forward is -Y and up is +Z, so it turns -90 degrees about X to face +Z with
-    // +Y up); from then on it just follows the hand. `--weapon-offset` shifts the
-    // grip, in body space at that pose.
+    // Where the weapon sits relative to the right hand. The weapon models are made in the
+    // hand bone's own space: the origin is the wrist, forward (-Y) runs along the hand as
+    // it hangs in the bind pose, and up (+Z) is the way the body faces. So the gun goes on
+    // the hand as it is, and the motions aim it: low and ahead at the ready, level when
+    // firing. `--weapon-offset` shifts the gun, in the model's own axes.
     let weapon_attach: Option<(usize, skeleton::Transform)> = (|| {
         let skel = &characters.as_ref()?.rig.as_ref()?.skeleton;
         let hand = skel.bones.iter().position(|b| b.name == "RightHand")?;
-        let (root, rots) = player_motions.get(Movement::Idle)?.sample(0.0);
-        let q = skel.pose([0.0, root[1], 0.0], &rots)[hand].rot;
-        let conj = [-q[0], -q[1], -q[2], q[3]];
-        let h = std::f32::consts::FRAC_1_SQRT_2;
         Some((hand, skeleton::Transform {
-            rot: motion::quat_mul(conj, [-h, 0.0, 0.0, h]),
-            pos: motion::quat_rotate(conj, args.weapon_offset.unwrap_or([0.0, 0.0, 0.0])),
+            rot: [0.0, 0.0, 0.0, 1.0],
+            pos: args.weapon_offset.unwrap_or([0.0, 0.0, 0.0]),
         }))
     })();
 

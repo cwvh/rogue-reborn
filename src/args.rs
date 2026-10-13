@@ -68,6 +68,7 @@ pub struct Args {
     // Overrides for the player's movement set: slot=motion (walk, run, back, left, right, idle, fire, reload)
     pub player_anims: Vec<(String, String)>,
     pub third_person: bool,
+    // Moves the weapon in the hand, in the weapon model's axes (x right, -y forward, z up)
     pub weapon_offset: Option<[f32; 3]>,
     /// Draw the weapon in front of the camera in first person (the original game had no such view)
     pub viewmodel: bool,
