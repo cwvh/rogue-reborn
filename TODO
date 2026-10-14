@@ -1,6 +1,8 @@
 2026-10-10
 
 Rooms, portals and collision (the "impossible geometry" work)
+* [perf] The plan reaches a room by every path of portals to it, and draws it whole each time (the stencil and the portal's plane throw most of it away on the GPU). From rm08 room 203 it is 83 nodes, rooms 520 and 501 drawn 12 times each, 28200 triangles where the whole level is 9677; rm17 room 24 is 16335 against 5884. Both are faster with --no-cull (1.5 against 3.5 ms a whole frame on rm08, 1.2 against 2.2 on rm17).
+* [perf] The world is drawn in immediate mode, a glBegin for each material group and layer: about 0.5 us each on this machine, whatever is in it. Display lists or vertex buffers per room would leave the per-room clip planes as they are.
 * [perf] About 0.7 ms a frame outside rendering is still unaccounted for. Suspects: floor_room and the ray queries scan every triangle instead of using the spatial grid; also the per-frame room logic, NPC updates, HUD. Profile first.
 * [collision] No hysteresis on the floor-owner room. Where two rooms' floors meet it can flip every frame, changing what is drawn and rebuilding the collision set (O(triangles x listed rooms)).
 * [test] nested_in, level_at, player_rooms and the clipped collision of a touched doorway still have no tests (solid_rooms has one, for a neighbor beyond a portal). Copy the data-conditional tests in visibility.rs (skip when the map is missing), with rm11 for the hall/stairwell cases.
