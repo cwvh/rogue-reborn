@@ -107,7 +107,7 @@ pub fn draw_glass(
     materials: &map::Materials,
     material: usize,
     map_num: &str,
-    textures: &mut HashMap<String, u32>,
+    textures: &mut HashMap<String, Option<u32>>,
     textured: bool,
     alpha: f32,
     tris: impl Iterator<Item = ([[f32; 3]; 3], [[f32; 2]; 3])>,
@@ -140,7 +140,7 @@ pub fn draw_glass(
 }
 
 // Draw a broken pane: its pieces with a glint along their edges, and the flying flecks
-pub fn draw_fracture(materials: &map::Materials, map_num: &str, textures: &mut HashMap<String, u32>, textured: bool, f: &glass::Fracture) {
+pub fn draw_fracture(materials: &map::Materials, map_num: &str, textures: &mut HashMap<String, Option<u32>>, textured: bool, f: &glass::Fracture) {
     unsafe {
         glEnable(0x0BE2); // GL_BLEND
         glBlendFunc(0x0302, 0x0303); // SRC_ALPHA, ONE_MINUS_SRC_ALPHA

@@ -1193,6 +1193,10 @@ fn main() {
                             // Faces over others in their plane come after, each layer nearer
                             let layers = &coplanar_layers[object_index];
                             for layer in 0..=layers.max {
+                            // Most groups have faces in only one of their object's layers
+                            if !layers.per_face[od_index][..face_count].contains(&layer) {
+                                continue;
+                            }
                             if layer > 0 {
                                 glEnable(0x8037); // GL_POLYGON_OFFSET_FILL
                                 glPolygonOffset(-f32::from(layer), -f32::from(layer));
