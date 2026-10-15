@@ -331,6 +331,111 @@ impl Visibility {
         node
     }
 
+    /// EXPERIMENT (--portal-rects): every room seen from the `starts`, each once, nearest
+    /// first (by portals), with the part of the screen it may draw in: the bounding rectangle
+    /// of all the portals it is seen through, each cut to the rectangle of the room in front.
+    /// A room is drawn whole within it, not cut at its portals' planes or masked to their
+    /// exact openings. The original engine draws this way, it seems.
+    pub fn rect_plan(&self, map: &Map, starts: &[u32], touch: &[[f32; 3]], eye: [f32; 3], blocked: &[bool], clip: &dyn Fn([f32; 3]) -> [f32; 4]) -> Vec<RectRoom> {
+        // Each room's rectangle only grows, but it can grow by small steps many times
+        const MAX_STEPS: usize = 10_000;
+        let mut out: Vec<RectRoom> = starts.iter().map(|&room| RectRoom { room, rect: FULL, portals: Vec::new(), doorways: Vec::new() }).collect();
+        // What each room can see through: its portals' rectangles cut to the rooms' in front.
+        // The rectangle a room is drawn in is its portals' whole rectangles: on rm08 the shed's
+        // room (201) has no portal into the sky (501), and the crane's tower, seen over the
+        // shed, rose past the sky portals' cut rectangles.
+        let mut reach: Vec<Rect> = vec![FULL; starts.len()];
+        let mut at: HashMap<u32, usize> = starts.iter().enumerate().map(|(i, &s)| (s, i)).collect();
+        let mut queue: std::collections::VecDeque<u32> = starts.iter().copied().collect();
+        let mut steps = 0;
+        while let Some(room) = queue.pop_front() {
+            steps += 1;
+            if steps > MAX_STEPS {
+                break;
+            }
+            let rect = reach[at[&room]];
+            for &i in self.by_room.get(&room).map(Vec::as_slice).unwrap_or_default() {
+                if blocked.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
+                let portal = &map.portals.portals[i];
+                let other = if portal.room == room { portal.opposite_room } else { portal.room };
+                let corners = &self.corners[i];
+                let touched = touch.iter().any(|&p| distance_to_polygon(corners, p) <= TOUCH);
+                let projected = if touched { Some(rect) } else { project(corners, clip) };
+                let Some((whole, seen)) = projected.and_then(|r| Some((intersect(r, FULL)?, intersect(r, rect)?))) else { continue };
+                let entry = *at.entry(other).or_insert_with(|| {
+                    out.push(RectRoom { room: other, rect: whole, portals: Vec::new(), doorways: Vec::new() });
+                    reach.push(seen);
+                    queue.push_back(other);
+                    out.len() - 1
+                });
+                let r = &mut out[entry];
+                if !contains(r.rect, whole) {
+                    r.rect = [r.rect[0].min(whole[0]), r.rect[1].min(whole[1]), r.rect[2].max(whole[2]), r.rect[3].max(whole[3])];
+                }
+                if !contains(reach[entry], seen) {
+                    let s = reach[entry];
+                    reach[entry] = [s[0].min(seen[0]), s[1].min(seen[1]), s[2].max(seen[2]), s[3].max(seen[3])];
+                    queue.push_back(other);
+                }
+                // Only an opening the camera looks into the room through: from the wrong side
+                // (rm08's 203 is L-shaped, and its landing is on 521's side of pt203_521), the
+                // room's things past the portal are behind the camera's own room
+                let into = self.side_point(i, other).zip(portal_plane(corners, eye))
+                    .is_some_and(|(p, plane)| plane[0] * p[0] + plane[1] * p[1] + plane[2] * p[2] + plane[3] > 0.0);
+                if into && !touched && !starts.contains(&other) {
+                    if !starts.contains(&room) {
+                        if !r.portals.contains(&i) {
+                            r.portals.push(i);
+                        }
+                    } else if let Some(b) = self.bounds_at(other, room, i).filter(|_| !r.doorways.iter().any(|d| d.0 == i)) {
+                        r.doorways.push((i, b));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// A portal's corners in drawing order
+    pub fn polygon(&self, portal: usize) -> &[[f32; 3]] {
+        &self.polygons[portal]
+    }
+
+    /// EXPERIMENT (--portal-rects): the room `start` and the rooms of the doorways the player
+    /// stands in, as `plan` gives them, without the rooms seen through other portals
+    pub fn touched_plan<'a>(&'a self, map: &Map, start: u32, touch: &[[f32; 3]], eye: [f32; 3], blocked: &[bool]) -> PlanNode<'a> {
+        let mut node = PlanNode { room: start, plane: None, polygon: &[], touched: false, cut_in_self: None, cut_in_parent: None, children: Vec::new() };
+        self.grow_touched(map, &mut node, touch, eye, blocked, &mut vec![start]);
+        node
+    }
+
+    fn grow_touched<'a>(&'a self, map: &Map, node: &mut PlanNode<'a>, touch: &[[f32; 3]], eye: [f32; 3], blocked: &[bool], path: &mut Vec<u32>) {
+        for &i in self.by_room.get(&node.room).map(Vec::as_slice).unwrap_or_default() {
+            let portal = &map.portals.portals[i];
+            let other = if portal.room == node.room { portal.opposite_room } else { portal.room };
+            let corners = &self.corners[i];
+            if path.contains(&other) || blocked.get(i).copied().unwrap_or(false) || !touch.iter().any(|&p| distance_to_polygon(corners, p) <= TOUCH) {
+                continue;
+            }
+            let near_side = self.side_point(i, node.room).unwrap_or(eye);
+            let mut child = PlanNode {
+                room: other,
+                plane: portal_plane(corners, near_side),
+                polygon: &self.polygons[i],
+                touched: true,
+                cut_in_self: self.bounds_at(node.room, other, i),
+                cut_in_parent: self.bounds_at(other, node.room, i),
+                children: Vec::new(),
+            };
+            path.push(other);
+            self.grow_touched(map, &mut child, touch, eye, blocked, path);
+            path.pop();
+            node.children.push(child);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn grow<'a>(&'a self, map: &Map, node: &mut PlanNode<'a>, rect: Rect, touch: &[[f32; 3]], eye: [f32; 3], blocked: &[bool], clip: &dyn Fn([f32; 3]) -> [f32; 4], path: &mut Vec<u32>, budget: &mut usize) {
         if path.len() > MAX_DEPTH {
@@ -370,6 +475,21 @@ impl Visibility {
             node.children.push(child);
         }
     }
+}
+
+/// EXPERIMENT (--portal-rects): a room to draw whole, within `rect`
+#[derive(Clone, Debug)]
+pub struct RectRoom {
+    pub room: u32,
+    pub rect: Rect,
+    /// The portals it is seen through (indices into `map.portals.portals`), from its known far
+    /// side, except those the player stands in and those of the player's rooms
+    pub portals: Vec<usize>,
+    /// The portals of the player's rooms it is seen through, from its known far side, except
+    /// those the player stands in, each with this room's floor plan there (min x, min z, max x,
+    /// max z; see bounds_at). The original engine hides the player's room inside it, seen
+    /// through the portal: on rm11, 121's stairs inside 119, seen from the hall.
+    pub doorways: Vec<(usize, [f32; 4])>,
 }
 
 /// A room to draw, and the rooms seen through its portals
@@ -590,7 +710,6 @@ fn intersect(a: Rect, b: Rect) -> Option<Rect> {
     (r[0] < r[2] && r[1] < r[3]).then_some(r)
 }
 
-#[cfg(test)]
 fn contains(outer: Rect, inner: Rect) -> bool {
     outer[0] <= inner[0] && outer[1] <= inner[1] && outer[2] >= inner[2] && outer[3] >= inner[3]
 }
@@ -763,6 +882,119 @@ mod tests {
         let beside = rooms_beside(&blocked);
         assert!(!beside.contains(&121), "shut, it is not: {beside:?}");
         assert!(beside.contains(&120), "the other doorways are unaffected");
+    }
+
+    // On rm11 the hall (room 121) has a wall at x = 30017 that stands inside room 120, 60 units
+    // past the doorway from 119 (p120_119, at x = 29957). From the hall's doorway into 119 it
+    // covers part of that far doorway, and the original engine shows it there (BUGS.txt).
+    #[test]
+    fn the_halls_wall_stands_inside_the_room_past_119() {
+        let path = std::path::Path::new("data/map/rm11/rm11.map");
+        if !path.exists() {
+            eprintln!("skipping: {} not found", path.display());
+            return;
+        }
+        let map = crate::map::read(path).expect("rm11 loads");
+        let vis = Visibility::new(&map);
+        let p = [30017.0, 32866.5, 40051.4];
+        // Whether a point (z, y) is inside a triangle in the plane x = 30017
+        let inside = |q: [f32; 2], t: [[f32; 2]; 3]| {
+            let side = |a: [f32; 2], b: [f32; 2]| (b[0] - a[0]) * (q[1] - a[1]) - (b[1] - a[1]) * (q[0] - a[0]);
+            let s = [side(t[0], t[1]), side(t[1], t[2]), side(t[2], t[0])];
+            s.iter().all(|&v| v >= 0.0) || s.iter().all(|&v| v <= 0.0)
+        };
+        let wall = vis.objects_of(121).iter().map(|&i| &map.geometries.objects[i]).any(|o| {
+            o.object_datas.iter().flat_map(|od| &od.faces.face_indices).any(|&(a, b, c)| {
+                let v = [a, b, c].map(|k| &o.vertices[k as usize]);
+                v.iter().all(|v| (v.x - p[0]).abs() < 0.5) && inside([p[2], p[1]], v.map(|v| [v.z, v.y]))
+            })
+        });
+        assert!(wall, "121 has a wall face there");
+        let rooms: Vec<u32> = map.rooms.containing(p).into_iter().filter_map(|i| vis.number_of(i)).collect();
+        assert!(rooms.contains(&120) && !rooms.contains(&119), "inside 120: {rooms:?}");
+    }
+
+    // EXPERIMENT (--portal-rects). Standing in the hall's doorway into 119 on rm11, room 120
+    // past 119 is drawn in front of whatever is already drawn inside the opening of p120_119,
+    // the hall's wall included
+    #[test]
+    fn the_room_past_a_doorway_is_drawn_in_front_inside_its_opening() {
+        let path = std::path::Path::new("data/map/rm11/rm11.map");
+        if !path.exists() {
+            eprintln!("skipping: {} not found", path.display());
+            return;
+        }
+        let map = crate::map::read(path).expect("rm11 loads");
+        let vis = Visibility::new(&map);
+        let far_door = map.portals.portals.iter().position(|p| p.name == "p120_119").expect("the far doorway");
+        let eye = [29467.9, 32932.0, 39542.9];
+        let feet = [eye[0], eye[1] - 165.0, eye[2]];
+        let everywhere = |_: [f32; 3]| [0.0, 0.0, 0.0, 1.0];
+        let blocked = vec![false; map.portals.portals.len()];
+        let plan = vis.rect_plan(&map, &[121], &[feet, eye], eye, &blocked, &everywhere);
+        let room120: Vec<&RectRoom> = plan.iter().filter(|r| r.room == 120).collect();
+        assert_eq!(room120.len(), 1, "each room once");
+        assert!(room120[0].portals.contains(&far_door), "{:?}", room120[0].portals);
+    }
+
+    // EXPERIMENT (--portal-rects). From rm11's hall, 77 units from the doorway into 119 (too
+    // far for the doorway cut), the original engine hides the hall's stairs that stand inside
+    // 119, seen through that doorway, but not the hall's wall inside 120, one room further:
+    // 119 is drawn in front inside the doorway's opening, within its floor plan there
+    #[test]
+    fn the_room_past_the_players_doorway_is_drawn_in_front_within_its_floor_plan() {
+        let path = std::path::Path::new("data/map/rm11/rm11.map");
+        if !path.exists() {
+            eprintln!("skipping: {} not found", path.display());
+            return;
+        }
+        let map = crate::map::read(path).expect("rm11 loads");
+        let vis = Visibility::new(&map);
+        let door = map.portals.portals.iter().position(|p| p.name == "pd119_121").expect("the doorway");
+        let eye = [29400.5, 32932.0, 39432.1];
+        let feet = [eye[0], eye[1] - 165.0, eye[2]];
+        let everywhere = |_: [f32; 3]| [0.0, 0.0, 0.0, 1.0];
+        let blocked = vec![false; map.portals.portals.len()];
+        let plan = vis.rect_plan(&map, &[121], &[feet, eye], eye, &blocked, &everywhere);
+        let room119 = plan.iter().find(|r| r.room == 119).expect("119 is seen from the hall");
+        let &(_, b) = room119.doorways.iter().find(|d| d.0 == door).expect("through the hall's doorway");
+        let inside = |x: f32, z: f32| b[0] <= x && x <= b[2] && b[1] <= z && z <= b[3];
+        assert!(inside(29863.0, 40087.0), "the hall's stairs: {b:?}");
+        assert!(!inside(30017.0, 40051.4), "the hall's wall inside 120: {b:?}");
+        assert!(!room119.portals.contains(&door), "not wiped by depth too");
+    }
+
+    // EXPERIMENT (--portal-rects). rm08's alleys are open cells, nearly every boundary a portal,
+    // and the old plan ran out of its budget before it reached the alley (203) beside the player
+    // in room 201. And standing on 203's landing, on room 521's side of pt203_521, that portal is
+    // seen from behind: 521 must not be drawn in front inside it.
+    #[test]
+    fn every_room_in_view_is_planned_once() {
+        let path = std::path::Path::new("data/map/rm08/rm08.map");
+        if !path.exists() {
+            eprintln!("skipping: {} not found", path.display());
+            return;
+        }
+        let map = crate::map::read(path).expect("rm08 loads");
+        let vis = Visibility::new(&map);
+        let everywhere = |_: [f32; 3]| [0.0, 0.0, 0.0, 1.0];
+        let blocked = vec![false; map.portals.portals.len()];
+        let body = |eye: [f32; 3]| [[eye[0], eye[1] - 165.0, eye[2]], eye];
+
+        let eye = [34202.9, 32567.0, 29624.9];
+        let plan = vis.rect_plan(&map, &[201], &body(eye), eye, &blocked, &everywhere);
+        let mut rooms: Vec<u32> = plan.iter().map(|r| r.room).collect();
+        assert!(rooms.contains(&203), "the alley beside the player: {rooms:?}");
+        rooms.sort();
+        let all = rooms.len();
+        rooms.dedup();
+        assert_eq!(rooms.len(), all, "each room once");
+
+        let behind = map.portals.portals.iter().position(|p| p.name == "pt203_521" && p.coordinates.iter().all(|v| v.z == 30117.0)).expect("the canal side's portal");
+        let eye = [34352.5, 32567.0, 29911.0];
+        let plan = vis.rect_plan(&map, &[203], &body(eye), eye, &blocked, &everywhere);
+        let room521 = plan.iter().find(|r| r.room == 521).expect("521 is in view");
+        assert!(!room521.portals.contains(&behind), "{:?}", room521.portals);
     }
 
     // The cut a room gets where the player stands in a doorway is limited to where it overlaps

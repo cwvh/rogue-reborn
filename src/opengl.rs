@@ -11,6 +11,7 @@ unsafe extern "C" {
     pub fn glClearColor(r: f32, g: f32, b: f32, a: f32);
     pub fn glEnable(cap: u32);
     pub fn glClipPlane(plane: u32, equation: *const f64);
+    pub fn glScissor(x: i32, y: i32, width: i32, height: i32);
     pub fn glStencilFunc(func: u32, reference: i32, mask: u32);
     pub fn glStencilOp(fail: u32, zfail: u32, zpass: u32);
     pub fn glClearStencil(s: i32);

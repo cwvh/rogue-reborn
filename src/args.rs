@@ -37,6 +37,12 @@ pub struct Args {
     pub dump: bool,
     /// Draw every room instead of only the ones visible through portals
     pub no_cull: bool,
+    /// EXPERIMENT: draw each visible room once, whole, within the screen rectangle of the
+    /// portals it is seen through, instead of cut at each portal and masked to its opening
+    pub portal_rects: bool,
+    /// EXPERIMENT: --portal-rects as the original engine draws, overlaps showing through
+    /// openings included (see BUGS.txt)
+    pub original_rooms: bool,
     /// Start with every door this far open (0 shut, 1 open)
     pub doors_open: Option<f32>,
     /// Rooms to leave out of the drawing, to find which one a stray surface belongs to
@@ -123,6 +129,11 @@ pub fn parse_args() -> Args {
             "--rooms" => args.rooms = true,
             "--dump" => args.dump = true,
             "--no-cull" => args.no_cull = true,
+            "--portal-rects" => args.portal_rects = true,
+            "--original-rooms" => {
+                args.portal_rects = true;
+                args.original_rooms = true;
+            }
             "--doors-open" => args.doors_open = it.next().and_then(|v| v.parse().ok()),
             "--hide-rooms" => args.hide_rooms = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default(),
             "--info" => args.info = true,

@@ -41,3 +41,60 @@ plane OR outside the box" for touched portals by drawing the room once per way (
 draws). Risks: more draws per room (measure the frame time on the big courtyard rooms), and
 overlap junk lying outside its own room's volume would show. Check portals across maps
 against --no-cull, and run the golden harness (scripts/golden.sh, scripts/pngdiff.py).
+
+In the original engine (checked 2026-10-13): deeper in room 6, the spire is hidden too, but
+turning left brings it back. Not replicated, on purpose. It is probably how the original works
+out the screen rectangle of a portal that runs behind the camera: pt05_06 is 5200 units long,
+and from here part of it is behind the player. Cut at the near plane, as visibility::project
+does, the rectangle runs from the portal's far end to the edge of the screen, and the spire
+is just outside it whatever the view's angle; an engine that clamps, drops or projects the
+corners behind the camera gets a rectangle that changes with the angle. With --portal-rects
+the spire's tip shows here, likely through room 1's copy of it.
+  cargo rr --map data/map/rm11/rm11.map --pos 32900,32832.0,-38155.6 --yaw -170.8 --pitch 13.2 --first-person --textured
+
+
+A room's wall covering the doorway beyond the room in front (rm11)
+------------------------------------------------------------------
+Status: the original Rogue Spear engine has this bug. We fix it because it is very visually
+distracting; --original-rooms keeps the original's behavior. The fix belongs to the
+--portal-rects experiment (the default drawing never showed the wall).
+
+What you see: in the doorway between rm11's hall (room 121) and room 119, looking through 119
+at its far doorway into room 120 (green curtains, a star in the floor). In the original, a
+wood-paneled wall stands in that doorway and covers most of the view into 120.
+
+Reproduce (the wall, as in the original):
+  cargo rr --map data/map/rm11/rm11.map --doors-open 1 --pos 29467.9,32932.0,-39542.9 --yaw 312.8 --pitch -5.0 --first-person --textured --original-rooms
+Fixed (add --portal-rects instead; the default drawing shows it the same):
+  cargo rr --map data/map/rm11/rm11.map --doors-open 1 --pos 29467.9,32932.0,-39542.9 --yaw 312.8 --pitch -5.0 --first-person --textured --portal-rects
+Tests: visibility::tests::the_halls_wall_stands_inside_the_room_past_119 and
+the_room_past_a_doorway_is_drawn_in_front_inside_its_opening; golden.sh scenarios p, q, r.
+
+Geometry (map space):
+  - The wall: room 121's (material wood_panel_ornate.bmp), in the plane x = 30017, around
+    y 32866, z 40051. That point is inside room 120's volume (and room 1's), not 119's.
+  - 119's far doorway, p120_119: plane x = 29957, z 39717..40117. The wall stands 60 units past
+    it, inside room 120: the hall and 120 overlap there.
+
+Cause: rooms overlap ("impossible geometry"), and the original draws each room in view whole
+within the screen rectangle of the portals it is seen through, sorted out by depth alone. The
+hall, the room the player is in, is drawn whole, and its wall is nearer than 120's far side.
+The default drawing (src/draw.rs, draw_plan) wipes the depth inside each portal's opening
+before drawing the room beyond, so the room beyond wins there.
+
+Fix (--portal-rects): a wipe like it, before each room is drawn in its rectangle, inside the
+openings of the portals it is seen through (src/draw.rs, wipe_opening; the portals are
+RectRoom::portals from visibility::rect_plan), limited two ways:
+  - Only where what is already drawn lies within OVERLAP_DEPTH (200 units) past the opening:
+    the box the opening sweeps out to that depth is drawn into the stencil, and a pixel whose
+    surface is beyond its far end or a side keeps its depth. Each room is drawn once, nearest
+    first, and a line of sight can leave a room and come back into it: by rm08's canal, the
+    alley's (203) far facade is seen through room 521 and back, 1000+ units past the opening,
+    and an unlimited wipe let 521 cover it with a farther building. The hall's wall is 60 past.
+  - Only an opening the camera sees from the side away from the room beyond: rm08's alley is
+    L-shaped, and its landing is on room 521's side of pt203_521.
+Limiting the wipe to rooms that overlap does not work: most portals have some other room's
+triangles inside the room beyond (77 of rm11's 111, 82 of rm08's 104).
+  cargo rr --map data/map/rm08/rm08.map --pos 34368.0,32567.0,-29610.3 --yaw 329.4 --pitch -0.8 --first-person --textured --portal-rects
+(golden.sh scenario s; with the unlimited wipe, a building with green shutters covered the
+facade)

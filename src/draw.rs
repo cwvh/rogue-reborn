@@ -268,6 +268,10 @@ pub enum Which {
 /// exactly through them keeps or loses them by rounding, one triangle or one pixel at a time.
 const PLANE_SLACK: f32 = 1.0;
 
+/// How far the box a doorway cut is limited to (see draw_plan) is moved out, for surfaces lying
+/// on its edge
+const BOX_SLACK: f32 = 0.25;
+
 /// A cut that keeps the side of `plane` its normal points to, and `PLANE_SLACK` more
 fn slackened(plane: [f32; 4]) -> [f32; 4] {
     [plane[0], plane[1], plane[2], plane[3] + PLANE_SLACK]
@@ -289,7 +293,11 @@ pub unsafe fn draw_plan(node: &visibility::PlanNode<'_>, level: i32, fill_mode: 
         // are drawn whole and each is cut only where it overlaps the other: what is on the
         // near side of the plane, or outside the other room's floor plan, stays. That is a
         // union, which clip planes cannot say, so the room is drawn once for each way to stay.
-        let outside = |b: [f32; 4]| [[-1.0, 0.0, 0.0, b[0]], [1.0, 0.0, 0.0, -b[2]], [0.0, 0.0, -1.0, b[1]], [0.0, 0.0, 1.0, -b[3]]];
+        // Slackened a little too: rm08's railing over room 521's stairwell lies exactly on the
+        // edge of 521's volume, and rounding cut it. A whole PLANE_SLACK brings back a hairline
+        // of 121's stairs in the ceiling of rm11's 119.
+        let outside = |b: [f32; 4]| [[-1.0, 0.0, 0.0, b[0]], [1.0, 0.0, 0.0, -b[2]], [0.0, 0.0, -1.0, b[1]], [0.0, 0.0, 1.0, -b[3]]]
+            .map(|p| [p[0], p[1], p[2], p[3] + BOX_SLACK]);
         let mut fixed: Vec<[f32; 4]> = Vec::new();
         let mut ways: Vec<Vec<[f32; 4]>> = Vec::new();
         match (node.plane, node.cut_in_self) {
@@ -385,6 +393,123 @@ pub unsafe fn draw_plan(node: &visibility::PlanNode<'_>, level: i32, fill_mode: 
                 glEnable(0x0DE1);
             }
             glStencilOp(KEEP, KEEP, KEEP);
+        }
+    }
+}
+
+/// How far past a portal's opening the surfaces of the rooms already drawn give way to the room
+/// beyond. Overlapping rooms put stray walls just past each other's doorways (rm11's hall has
+/// one 60 units into room 120); anything farther is a real surface, seen through the room
+/// beyond and back (rm08's canal side), and is left to the depth test.
+const OVERLAP_DEPTH: f32 = 200.0;
+
+/// Where in a portal's opening the room beyond is drawn in front of what is already there
+#[derive(Clone, Copy)]
+pub enum WipeWithin {
+    /// What lies within `OVERLAP_DEPTH` past the opening; `beyond` is the unit normal of the
+    /// portal's plane, pointing away from the camera
+    Past { beyond: [f32; 3] },
+    /// What lies inside the room's floor plan there (min x, min z, max x, max z), at any
+    /// height, seen from `eye` (map space)
+    Inside { plan: [f32; 4], eye: [f32; 3] },
+}
+
+/// EXPERIMENT (--portal-rects): wipe the depth in the part of a portal's opening that is not
+/// behind something nearer, where what is drawn there lies `within` a box behind the opening,
+/// so the room beyond, drawn next, shows there in front of it (rooms overlap). The stencil is
+/// expected to be 1 everywhere, and is left so.
+pub unsafe fn wipe_opening(polygon: &[[f32; 3]], within: WipeWithin, fill_mode: u32, textured: bool) {
+    const ALWAYS: u32 = 0x0207;
+    const EQUAL: u32 = 0x0202;
+    const KEEP: u32 = 0x1E00;
+    const REPLACE: u32 = 0x1E01;
+    unsafe {
+        let opening = || {
+            glBegin(0x0006); // GL_TRIANGLE_FAN
+            for p in polygon {
+                glVertex3f(p[0], p[1], p[2]);
+            }
+            glEnd();
+        };
+        let quad = |c: [[f32; 3]; 4]| {
+            for p in c {
+                glVertex3f(p[0], p[1], p[2]);
+            }
+        };
+        // Where a line of sight through the opening leaves the box: its faces turned away from
+        // the camera
+        let past = || match within {
+            WipeWithin::Past { beyond } => {
+                let back = |p: [f32; 3]| [p[0] + beyond[0] * OVERLAP_DEPTH, p[1] + beyond[1] * OVERLAP_DEPTH, p[2] + beyond[2] * OVERLAP_DEPTH];
+                // The far end and the sides of the box the opening sweeps out
+                glBegin(0x0006); // GL_TRIANGLE_FAN
+                for &p in polygon {
+                    let b = back(p);
+                    glVertex3f(b[0], b[1], b[2]);
+                }
+                glEnd();
+                glBegin(0x0007); // GL_QUADS
+                for (i, &p) in polygon.iter().enumerate() {
+                    let q = polygon[(i + 1) % polygon.len()];
+                    quad([p, q, back(q), back(p)]);
+                }
+                glEnd();
+            }
+            WipeWithin::Inside { plan: [x0, z0, x1, z1], eye } => {
+                // Tall enough for anything seen through the opening
+                let y0 = polygon.iter().map(|p| p[1]).fold(f32::MAX, f32::min) - 2000.0;
+                let y1 = polygon.iter().map(|p| p[1]).fold(f32::MIN, f32::max) + 2000.0;
+                glBegin(0x0007); // GL_QUADS
+                if eye[0] > x0 { quad([[x0, y0, z0], [x0, y1, z0], [x0, y1, z1], [x0, y0, z1]]); }
+                if eye[0] < x1 { quad([[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]]); }
+                if eye[2] > z0 { quad([[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0]]); }
+                if eye[2] < z1 { quad([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]]); }
+                if eye[1] > y0 { quad([[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]]); }
+                if eye[1] < y1 { quad([[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]]); }
+                glEnd();
+            }
+        };
+        glEnable(0x0B90); // GL_STENCIL_TEST
+        glDisable(0x0DE1); // GL_TEXTURE_2D
+        glPolygonMode(0x0408, 0x1B02);
+        glColorMask(0, 0, 0, 0);
+        glDepthMask(0);
+        // Mark the visible part. The polygon is nudged deeper, so walls lying in the portal's
+        // own plane are not wiped.
+        glStencilFunc(ALWAYS, 3, !0);
+        glStencilOp(KEEP, KEEP, REPLACE);
+        glEnable(0x8037); // GL_POLYGON_OFFSET_FILL
+        glPolygonOffset(2.0, 2.0);
+        opening();
+        glDisable(0x8037);
+        // Unmark where what is drawn lies beyond the box: a line of sight through the opening
+        // leaves the box once, through its far end or a side, and the box is nearer there
+        glStencilFunc(EQUAL, 3, !0);
+        glStencilOp(KEEP, KEEP, 0x1E03); // GL_DECR
+        past();
+        // Wipe the depth where the mark is left
+        glStencilFunc(EQUAL, 3, !0);
+        glStencilOp(KEEP, KEEP, KEEP);
+        glDepthFunc(ALWAYS);
+        glDepthMask(1);
+        glDepthRange(1.0, 1.0);
+        opening();
+        glDepthRange(0.0, 1.0);
+        glDepthFunc(0x0201); // GL_LESS
+        // And put the stencil back
+        glDisable(0x0B71); // GL_DEPTH_TEST
+        glDepthMask(0);
+        glStencilFunc(ALWAYS, 1, !0);
+        glStencilOp(REPLACE, REPLACE, REPLACE);
+        opening();
+        glEnable(0x0B71);
+        glDepthMask(1);
+        glStencilOp(KEEP, KEEP, KEEP);
+        glDisable(0x0B90);
+        glColorMask(1, 1, 1, 1);
+        glPolygonMode(0x0408, fill_mode);
+        if textured {
+            glEnable(0x0DE1);
         }
     }
 }

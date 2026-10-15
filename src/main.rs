@@ -27,7 +27,7 @@ use crate::args::parse_args;
 use crate::camera::{Camera, listener_of, apply_camera};
 use rogue_reborn::util::unit3;
 use crate::player::{PlayerMotions, is_upper_body};
-use crate::draw::{WeaponDraw, draw_weapon, draw_character, draw_glass, draw_fracture, build_mesh, Which, draw_plan, room_color};
+use crate::draw::{WeaponDraw, draw_weapon, draw_character, draw_glass, draw_fracture, build_mesh, Which, draw_plan, wipe_opening, WipeWithin, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
 use rogue_reborn::levels::{find_zone_spawn, find_mission_spawns, pick_index, list_levels, find_level, extract_map_num};
@@ -1099,14 +1099,23 @@ fn main() {
             // seen through the previous one's portals (see visibility::plan)
             let cam_eye = [view.position[0], view.position[1], -view.position[2]];
             let mut plan: Vec<rogue_reborn::visibility::PlanNode> = Vec::new();
+            // EXPERIMENT (--portal-rects): each visible room once, with its screen rectangle
+            let mut rect_plan: Vec<rogue_reborn::visibility::RectRoom> = Vec::new();
             if sim.culling && !sim.players[me].render_rooms.is_empty() {
                 let (mut modelview, mut projection) = ([0f32; 16], [0f32; 16]);
                 glGetFloatv(0x0BA6, modelview.as_mut_ptr()); // GL_MODELVIEW_MATRIX
                 glGetFloatv(0x0BA7, projection.as_mut_ptr()); // GL_PROJECTION_MATRIX
                 let clip = |v: [f32; 3]| mul_mat4(&projection, mul_mat4(&modelview, [v[0], v[1], v[2], 1.0]));
-                plan = sim.players[me].render_rooms.iter().map(|&r| sim.visibility.plan(&level, r, &sim.players[me].body, cam_eye, &sim.blocked_portals, &clip)).collect();
+                if args.portal_rects {
+                    rect_plan = sim.visibility.rect_plan(&level, &sim.players[me].render_rooms, &sim.players[me].body, cam_eye, &sim.blocked_portals, &clip);
+                    // The player's rooms and the doorways they stand in are still cut where
+                    // they overlap
+                    plan = sim.players[me].render_rooms.iter().map(|&r| sim.visibility.touched_plan(&level, r, &sim.players[me].body, cam_eye, &sim.blocked_portals)).collect();
+                } else {
+                    plan = sim.players[me].render_rooms.iter().map(|&r| sim.visibility.plan(&level, r, &sim.players[me].body, cam_eye, &sim.blocked_portals, &clip)).collect();
+                }
             }
-            let mut visible_rooms: Vec<u32> = Vec::new();
+            let mut visible_rooms: Vec<u32> = rect_plan.iter().map(|rr| rr.room).collect();
             for node in &plan {
                 node.rooms(&mut visible_rooms);
             }
@@ -1240,7 +1249,47 @@ fn main() {
                     }
                 };
 
-                if plan.is_empty() {
+                if !rect_plan.is_empty() {
+                    // EXPERIMENT: the player's rooms and the doorways they stand in as before,
+                    // then every other room whole, within its rectangle, nearest first. Inside
+                    // the openings it is seen through it shows in front of the rooms already
+                    // drawn, which can overlap it; the original engine sorts it out by depth
+                    // alone, and shows them (--original-rooms, see BUGS.txt)
+                    draw_objects(Which::Unowned, &[]);
+                    let mut cut_rooms: Vec<u32> = Vec::new();
+                    glEnable(0x0B90); // GL_STENCIL_TEST
+                    for node in &plan {
+                        node.rooms(&mut cut_rooms);
+                        draw_plan(node, 1, level_mode, textured && !room_debug, &mut |room, planes| draw_objects(Which::Room(room), planes));
+                    }
+                    glDisable(0x0B90);
+                    set_clip_planes(&[]);
+                    let mut viewport = [0i32; 4];
+                    glGetIntegerv(0x0BA2, viewport.as_mut_ptr()); // GL_VIEWPORT
+                    glEnable(0x0C11); // GL_SCISSOR_TEST
+                    for rr in rect_plan.iter().filter(|rr| !cut_rooms.contains(&rr.room)) {
+                        let r = rr.rect;
+                        let x0 = viewport[0] + ((r[0].max(-1.0) + 1.0) / 2.0 * viewport[2] as f32).floor() as i32;
+                        let y0 = viewport[1] + ((r[1].max(-1.0) + 1.0) / 2.0 * viewport[3] as f32).floor() as i32;
+                        let x1 = viewport[0] + ((r[2].min(1.0) + 1.0) / 2.0 * viewport[2] as f32).ceil() as i32;
+                        let y1 = viewport[1] + ((r[3].min(1.0) + 1.0) / 2.0 * viewport[3] as f32).ceil() as i32;
+                        glScissor(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0));
+                        // Through the player's room's own doorways, as the original engine does
+                        for &(p, plan) in &rr.doorways {
+                            wipe_opening(sim.visibility.polygon(p), WipeWithin::Inside { plan, eye: cam_eye }, level_mode, textured && !room_debug);
+                        }
+                        if !args.original_rooms {
+                            for &p in &rr.portals {
+                                let polygon = sim.visibility.polygon(p);
+                                if let Some(plane) = rogue_reborn::visibility::portal_plane(polygon, cam_eye) {
+                                    wipe_opening(polygon, WipeWithin::Past { beyond: [plane[0], plane[1], plane[2]] }, level_mode, textured && !room_debug);
+                                }
+                            }
+                        }
+                        draw_objects(Which::Room(rr.room), &[]);
+                    }
+                    glDisable(0x0C11);
+                } else if plan.is_empty() {
                     draw_objects(Which::All, &[]);
                 } else {
                     // Things that belong to no room first, then each room through its portals
@@ -1259,6 +1308,12 @@ fn main() {
             // it moves smoothly
             let view = net.as_mut().map(|(client, _)| client.view(net_clock.elapsed().as_secs_f64()));
 
+            // A character shows only when a room it is in is drawn: the level overlaps itself,
+            // and on rm05 a character on the plane's upper deck pokes out of the top of the hull.
+            // `feet` in map space; with no rooms drawn (culling off) everyone shows.
+            let shown = |feet: [f32; 3]| visible_rooms.is_empty()
+                || sim.visibility.player_rooms(&level, [feet[0], feet[1] + 10.0, feet[2]], None).iter().any(|r| visible_rooms.contains(r));
+
             // Characters at the spawn points, posed for what they are doing
             if let Some(chars) = &sim.characters {
                 let c = &chars.model;
@@ -1274,6 +1329,9 @@ fn main() {
                         }
                         None => spot,
                     };
+                    if !shown([spot.pos[0], spot.floor, spot.pos[2]]) {
+                        continue;
+                    }
                     let idle = args.anim_frame.unwrap_or_else(|| game_time * args.anim_fps.unwrap_or(30.0) + spot.stagger * 9.0);
                     let posed = chars.pose(spot, game_time, idle);
                     let verts: &[[f32; 3]] = if posed.is_empty() { &c.vertices } else { &posed };
@@ -1341,6 +1399,7 @@ fn main() {
                 glDisable(0x0DE1); // GL_TEXTURE_2D
                 let others = view.as_ref().map_or(&[][..], |v| &v.players[..]);
                 for &(slot, pos, look) in others.iter().filter(|(i, ..)| *i != me) {
+                    let visible = shown(pos);
                     let p = &sim.players[slot];
                     let yaw = sim::dequantize(look.0);
                     let face = (!actors.is_empty()).then(|| face_textures[slot % actors.len()].0).flatten();
@@ -1355,11 +1414,15 @@ fn main() {
                         let scale = actors.get(slot % actors.len().max(1)).map_or([1.0; 3], |a| a.scale);
                         let hand = if p.equipped_grenade { p.throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
                         let flash = !p.equipped_grenade && game_time < p.flash_until;
-                        if draw_body(chars, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash) {
+                        // Hidden, the animation still follows them
+                        if !visible || draw_body(chars, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash) {
                             continue;
                         }
                     } else {
                         remote_anim.forget(slot);
+                    }
+                    if !visible {
+                        continue;
                     }
                     // Without the player animations, or when dead: a character, lying where they
                     // fell until they come back
