@@ -1206,21 +1206,21 @@ impl Sim {
         // bullets: the level overlaps itself, and the exterior of a plane must not block
         // anyone inside it
         let player_rooms = self.visibility.player_rooms(&self.level, probe, self.players[slot].current_room);
-        // The room drawing starts from: the one whose floor the player stands on, as
+        // The rooms drawing starts from: those whose floor the player stands on, as
         // overlapping rooms (a stairwell beside a hall, an upstairs over a downstairs)
-        // all claim the same spot. Airborne, the last one stays; flying, the smallest
-        // room around the view.
+        // all claim the same spot. Usually one; two where rooms share the floor (rm02's
+        // deck). Airborne, the last ones stay; flying, the smallest room around the view.
         let controlled = observer.is_none();
-        let floor_room = if controlled {
-            self.world.floor_room([probe[0], probe[1] - 10.0, probe[2]]).filter(|&n| self.visibility.is_room(n))
+        let floor_rooms: Vec<u32> = if controlled {
+            self.world.floor_rooms([probe[0], probe[1] - 10.0, probe[2]]).into_iter().filter(|&n| self.visibility.is_room(n)).collect()
         } else {
-            None
+            Vec::new()
         };
         let p = &self.players[slot];
-        let render_rooms: Vec<u32> = match floor_room {
-            Some(n) => vec![n],
-            None if controlled && !p.last_render_rooms.is_empty() => p.last_render_rooms.clone(),
-            None => p.current_room.and_then(|i| self.visibility.number_of(i)).map(|n| vec![n]).unwrap_or_else(|| player_rooms.clone()),
+        let render_rooms: Vec<u32> = match floor_rooms {
+            rooms if !rooms.is_empty() => rooms,
+            _ if controlled && !p.last_render_rooms.is_empty() => p.last_render_rooms.clone(),
+            _ => p.current_room.and_then(|i| self.visibility.number_of(i)).map(|n| vec![n]).unwrap_or_else(|| player_rooms.clone()),
         };
         // What stops the player: their room, the rooms through its portals but only
         // beyond them, and the other rooms they are well inside (they can hold the floor)

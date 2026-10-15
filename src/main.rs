@@ -27,7 +27,7 @@ use crate::args::parse_args;
 use crate::camera::{Camera, listener_of, apply_camera};
 use rogue_reborn::util::unit3;
 use crate::player::{PlayerMotions, is_upper_body};
-use crate::draw::{WeaponDraw, draw_weapon, draw_character, draw_glass, draw_fracture, build_mesh, Which, draw_plan, wipe_opening, WipeWithin, room_color};
+use crate::draw::{WeaponDraw, draw_weapon, draw_character, draw_glass, draw_fracture, build_mesh, Which, draw_plan, wipe_opening, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
 use rogue_reborn::levels::{find_zone_spawn, find_mission_spawns, pick_index, list_levels, find_level, extract_map_num};
@@ -1099,20 +1099,20 @@ fn main() {
             // seen through the previous one's portals (see visibility::plan)
             let cam_eye = [view.position[0], view.position[1], -view.position[2]];
             let mut plan: Vec<rogue_reborn::visibility::PlanNode> = Vec::new();
-            // EXPERIMENT (--portal-rects): each visible room once, with its screen rectangle
+            // Each visible room once, with its screen rectangle (unless --portal-paths)
             let mut rect_plan: Vec<rogue_reborn::visibility::RectRoom> = Vec::new();
             if sim.culling && !sim.players[me].render_rooms.is_empty() {
                 let (mut modelview, mut projection) = ([0f32; 16], [0f32; 16]);
                 glGetFloatv(0x0BA6, modelview.as_mut_ptr()); // GL_MODELVIEW_MATRIX
                 glGetFloatv(0x0BA7, projection.as_mut_ptr()); // GL_PROJECTION_MATRIX
                 let clip = |v: [f32; 3]| mul_mat4(&projection, mul_mat4(&modelview, [v[0], v[1], v[2], 1.0]));
-                if args.portal_rects {
+                if args.portal_paths {
+                    plan = sim.players[me].render_rooms.iter().map(|&r| sim.visibility.plan(&level, r, &sim.players[me].body, cam_eye, &sim.blocked_portals, &clip)).collect();
+                } else {
                     rect_plan = sim.visibility.rect_plan(&level, &sim.players[me].render_rooms, &sim.players[me].body, cam_eye, &sim.blocked_portals, &clip);
                     // The player's rooms and the doorways they stand in are still cut where
                     // they overlap
                     plan = sim.players[me].render_rooms.iter().map(|&r| sim.visibility.touched_plan(&level, r, &sim.players[me].body, cam_eye, &sim.blocked_portals)).collect();
-                } else {
-                    plan = sim.players[me].render_rooms.iter().map(|&r| sim.visibility.plan(&level, r, &sim.players[me].body, cam_eye, &sim.blocked_portals, &clip)).collect();
                 }
             }
             let mut visible_rooms: Vec<u32> = rect_plan.iter().map(|rr| rr.room).collect();
@@ -1250,11 +1250,12 @@ fn main() {
                 };
 
                 if !rect_plan.is_empty() {
-                    // EXPERIMENT: the player's rooms and the doorways they stand in as before,
-                    // then every other room whole, within its rectangle, nearest first. Inside
-                    // the openings it is seen through it shows in front of the rooms already
-                    // drawn, which can overlap it; the original engine sorts it out by depth
-                    // alone, and shows them (--original-rooms, see BUGS.txt)
+                    // The player's rooms and the doorways they stand in, cut where they
+                    // overlap, then every other room whole, within its rectangle, nearest
+                    // first, sorted out by depth as the original engine does. Inside the
+                    // openings of the player's rooms' own doorways the room beyond shows in
+                    // front of them (rm11's hall's stairs inside 119); deeper, overlaps show,
+                    // as in the original (the hall's wall in 120's doorway, see BUGS.txt)
                     draw_objects(Which::Unowned, &[]);
                     let mut cut_rooms: Vec<u32> = Vec::new();
                     glEnable(0x0B90); // GL_STENCIL_TEST
@@ -1276,15 +1277,7 @@ fn main() {
                         glScissor(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0));
                         // Through the player's room's own doorways, as the original engine does
                         for &(p, plan) in &rr.doorways {
-                            wipe_opening(sim.visibility.polygon(p), WipeWithin::Inside { plan, eye: cam_eye }, level_mode, textured && !room_debug);
-                        }
-                        if !args.original_rooms {
-                            for &p in &rr.portals {
-                                let polygon = sim.visibility.polygon(p);
-                                if let Some(plane) = rogue_reborn::visibility::portal_plane(polygon, cam_eye) {
-                                    wipe_opening(polygon, WipeWithin::Past { beyond: [plane[0], plane[1], plane[2]] }, level_mode, textured && !room_debug);
-                                }
-                            }
+                            wipe_opening(sim.visibility.polygon(p), plan, cam_eye, level_mode, textured && !room_debug);
                         }
                         draw_objects(Which::Room(rr.room), &[]);
                     }
@@ -1777,7 +1770,7 @@ fn main() {
             let report = DebugReport {
                 map_path, map_num: &map_num, level: &level, eye, feet, yaw: camera.yaw, pitch: camera.pitch, dir,
                 hit, first_person, third_person, textured, room_debug, show_portals, show_collisions,
-                fps, render_ms, culling: sim.culling, room: current_rooms.first().copied(), drawn: &drawn_rooms, collision: &sim.players[me].collision_rooms, player_rooms: &sim.players[me].player_rooms, render_rooms: &sim.players[me].render_rooms, doors: &nearby_doors,
+                fps, render_ms, culling: sim.culling, portal_paths: args.portal_paths, room: current_rooms.first().copied(), drawn: &drawn_rooms, collision: &sim.players[me].collision_rooms, player_rooms: &sim.players[me].player_rooms, render_rooms: &sim.players[me].render_rooms, doors: &nearby_doors,
             };
             let clipping = stem.is_some();
             if let Err(e) = std::fs::create_dir_all(stem.as_deref().and_then(|s| Path::new(s).parent()).unwrap_or(Path::new("debug"))) {

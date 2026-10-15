@@ -24,6 +24,8 @@ pub struct DebugReport<'a> {
     pub fps: f32,
     pub render_ms: f32,
     pub culling: bool,
+    /// Drawing each room once per path of portals (--portal-paths)
+    pub portal_paths: bool,
     /// The room the player is in
     pub room: Option<&'a str>,
     /// The rooms drawn this frame, when culling is on
@@ -32,7 +34,7 @@ pub struct DebugReport<'a> {
     pub collision: &'a Option<Vec<rogue_reborn::collision::SolidRoom>>,
     /// Every room whose volume holds the player (rooms overlap)
     pub player_rooms: &'a [u32],
-    /// The room drawing starts from (the floor's room)
+    /// The rooms drawing starts from (the rooms of the floor under the feet)
     pub render_rooms: &'a [u32],
     /// Doors within reach, and how open they are
     pub doors: &'a [String],
@@ -67,7 +69,7 @@ pub fn write_debug_dump(r: &DebugReport, rgb: &[u8], width: u32, height: u32, st
     writeln!(t, "rooms whose volumes contain the feet: {in_rooms:?}")?;
     writeln!(t, "room the player is in: {}", r.room.unwrap_or("none"))?;
     writeln!(t, "rooms whose volumes hold the player (collide): {:?}", r.player_rooms)?;
-    writeln!(t, "room drawing starts from (floor under the feet): {:?}", r.render_rooms)?;
+    writeln!(t, "rooms drawing starts from (floors under the feet): {:?}", r.render_rooms)?;
     if r.culling {
         writeln!(t, "rooms drawn (visible through portals): {}", r.drawn.join(" "))?;
         let collide: Vec<String> = r.collision.as_deref().unwrap_or_default().iter()
@@ -106,7 +108,7 @@ pub fn write_debug_dump(r: &DebugReport, rgb: &[u8], width: u32, height: u32, st
     // `--pos` takes the camera's own coordinates, with Z negated
     let mut repro = format!("cargo rr --map {} --pos {:.1},{:.1},{:.1} --yaw {:.1} --pitch {:.1}",
         r.map_path.display(), r.eye[0], r.eye[1], -r.eye[2], r.yaw, r.pitch);
-    for (on, flag) in [(!r.culling, "--no-cull"), (r.first_person, "--first-person"), (r.textured, "--textured"), (r.room_debug, "--rooms"), (r.show_portals, "--portals"), (r.show_collisions, "--collisions")] {
+    for (on, flag) in [(!r.culling, "--no-cull"), (r.portal_paths, "--portal-paths"), (r.first_person, "--first-person"), (r.textured, "--textured"), (r.room_debug, "--rooms"), (r.show_portals, "--portals"), (r.show_collisions, "--collisions")] {
         if on {
             repro.push(' ');
             repro.push_str(flag);

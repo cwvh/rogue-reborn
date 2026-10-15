@@ -90,6 +90,8 @@ struct Tri {
 
 /// Marks faces that are solid whichever rooms are active
 const NO_ROOM: u32 = u32::MAX;
+/// How close two floors' heights must be to count as the same floor
+const SAME_FLOOR: f32 = 0.5;
 
 /// Where a ray struck the level
 #[derive(Clone, Copy, Debug)]
@@ -391,11 +393,17 @@ impl CollisionWorld {
     /// solid. A ceiling is no floor: on rm11 the stairs of one room climb through the ceiling
     /// of another, which would otherwise be the nearest face under the feet.
     pub fn floor_room(&self, feet: [f32; 3]) -> Option<u32> {
+        self.floor_rooms(feet).first().copied()
+    }
+
+    /// Every room with a floor at the height of the one under `feet`, in the order of their
+    /// first triangle in the level. Two rooms can share a floor: rm02's deck is both the
+    /// deck's (100) and the ship's outside's (605), at the same height.
+    pub fn floor_rooms(&self, feet: [f32; 3]) -> Vec<u32> {
         // A ray straight down meets only triangles over that point so only the
-        // grid cells around it need inspection. Ties go to the first triangle
-        // in the level (surface, not map level).
+        // grid cells around it need inspection
         let origin = [feet[0], feet[1] + 60.0, feet[2]];
-        let mut best = None;
+        let mut hits: Vec<(f32, usize, u32)> = Vec::new();
         for r in self.row(feet[2] - 1.0)..=self.row(feet[2] + 1.0) {
             for c in self.col(feet[0] - 1.0)..=self.col(feet[0] + 1.0) {
                 for &ti in &self.cells[r * self.cols + c] {
@@ -405,14 +413,23 @@ impl CollisionWorld {
                         continue;
                     }
                     if let Some(d) = crate::combat::ray_triangle(origin, [0.0, -1.0, 0.0], t.a, t.b, t.c) {
-                        if d <= 220.0 && best.is_none_or(|(b, bi, _)| d < b || (d == b && ti < bi)) {
-                            best = Some((d, ti, t.room));
+                        if d <= 220.0 {
+                            hits.push((d, ti, t.room));
                         }
                     }
                 }
             }
         }
-        best.and_then(|(_, _, room)| (room != NO_ROOM).then_some(room))
+        let Some(nearest) = hits.iter().map(|h| h.0).reduce(f32::min) else { return Vec::new() };
+        hits.retain(|h| h.0 <= nearest + SAME_FLOOR && h.2 != NO_ROOM);
+        hits.sort_by_key(|h| h.1);
+        let mut rooms: Vec<u32> = Vec::new();
+        for (_, _, room) in hits {
+            if !rooms.contains(&room) {
+                rooms.push(room);
+            }
+        }
+        rooms
     }
 
     /// Whether a face can currently stop anything
@@ -750,9 +767,26 @@ mod tests {
     #[test]
     fn a_ceiling_is_not_a_floor() {
         let Some(w) = load() else { return };
-        assert_eq!(w.floor_room([29901.1, 33087.0, 40031.7]), Some(121), "a tread under 119's ceiling");
-        assert_eq!(w.floor_room([29840.9, 33127.0, 39965.3]), Some(121), "a tread level with 119's ceiling");
-        assert_eq!(w.floor_room([29700.0, 32767.0, 39700.0]), Some(119), "119's own floor");
+        assert_eq!(w.floor_rooms([29901.1, 33087.0, 40031.7]), vec![121], "a tread under 119's ceiling");
+        assert_eq!(w.floor_rooms([29840.9, 33127.0, 39965.3]), vec![121], "a tread level with 119's ceiling");
+        assert_eq!(w.floor_rooms([29700.0, 32767.0, 39700.0]), vec![119], "119's own floor");
+    }
+
+    // rm02's deck is in two rooms with no portal between them, the deck (100) and the ship's
+    // outside (605), and each has a floor there at the same height: both are under the feet
+    #[test]
+    fn two_rooms_can_share_a_floor() {
+        let path = Path::new("data/map/rm02/rm02.map");
+        if !path.exists() {
+            eprintln!("skipping: {} not found", path.display());
+            return;
+        }
+        let w = CollisionWorld::from_map(&map::read(path).expect("rm02 loads"), Params::default());
+        for at in [[39365.4, 32777.0, 30775.0], [39625.4, 32777.0, 31021.8], [39448.5, 32777.0, 30826.9]] {
+            let mut rooms = w.floor_rooms(at);
+            rooms.sort();
+            assert_eq!(rooms, vec![100, 605], "the deck at {at:?}");
+        }
     }
 
     #[test]

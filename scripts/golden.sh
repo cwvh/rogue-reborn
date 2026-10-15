@@ -52,27 +52,35 @@ run m "$D" --level rm05 --pos 37789.8,32932,-35897.7 --yaw 370.5 --pitch -5.1 --
 run n "$D" --level rm05 --pos 37358.7,32932,-36550 --yaw 262.9 --pitch -10.1 --walk 3 --hold ""
 run o "$D" --level rm05 --pos 37400.8,32932,-36566.2 --yaw 189.7 --pitch -13.3 --walk 3 --hold ""
 # In rm11's hall doorway into 119, looking through 119 into 120: the hall's wall, which stands
-# inside 120, must not cover 120's doorway. The original engine shows it there (BUGS.txt), and
-# so does --original-rooms; --portal-rects is the experiment that draws rooms as it does
+# inside 120, covers part of 120's doorway, as in the original engine (BUGS.txt); drawn once
+# per path of portals (--portal-paths), it does not
 run p "$D" --level rm11 --doors-open 1 --pos 29467.9,32932,-39542.9 --yaw 312.8 --pitch -5 --walk 3 --hold ""
-run q "$D" --level rm11 --doors-open 1 --pos 29467.9,32932,-39542.9 --yaw 312.8 --pitch -5 --walk 3 --hold "" --portal-rects
-run r "$D" --level rm11 --doors-open 1 --pos 29467.9,32932,-39542.9 --yaw 312.8 --pitch -5 --walk 3 --hold "" --original-rooms
+run q "$D" --level rm11 --doors-open 1 --pos 29467.9,32932,-39542.9 --yaw 312.8 --pitch -5 --walk 3 --hold "" --portal-paths
 # rm08 by the canal: through the canal side's portals the alley's far facade is seen through room
-# 521 and back, and 521 must not cover it (--portal-rects); and from the stairwell's landing
+# 521 and back, and 521 must not cover it; and from the stairwell's landing
 # the railing across it, on the edge of 521's volume, must show
-run s "$D" --level rm08 --pos 34368,32567,-29610.3 --yaw 329.4 --pitch -0.8 --walk 3 --hold "" --portal-rects
+run s "$D" --level rm08 --pos 34368,32567,-29610.3 --yaw 329.4 --pitch -0.8 --walk 3 --hold ""
 run t "$D" --level rm08 --pos 34448,32567,-29726.5 --yaw 356.1 --pitch -10.9 --walk 3 --hold ""
 # On rm05's boarding stairs, looking up at the top of the fuselage: a character on the upper
 # deck, whose room is not drawn, must not poke out of it
 run u "$D" --level rm05 --spawn 13 --pos 37229.5,32932,-36546.5 --yaw -100.6 --pitch 52 --walk 3 --hold ""
 # On rm08 beside the shed (room 201, no portal into the sky over it), looking up at the
-# crane: its tower must be whole (--portal-rects)
-run v "$D" --level rm08 --pos 33136,32567,-30433.2 --yaw 352.5 --pitch 39 --walk 3 --hold "" --portal-rects
+# crane: its tower must be whole
+run v "$D" --level rm08 --pos 33136,32567,-30433.2 --yaw 352.5 --pitch 39 --walk 3 --hold ""
 # In rm11's hall, 77 units from the doorway into 119 (outside the doorway cut), looking
-# through it: the hall's stairs inside 119 must not show, in either mode (the original hides
-# them too); the hall's wall in 120's doorway shows with --original-rooms only
-run w "$D" --level rm11 --doors-open 1 --pos 29400.5,32932,-39432.1 --yaw -35.8 --pitch 2.7 --walk 3 --hold "" --portal-rects
-run x "$D" --level rm11 --doors-open 1 --pos 29400.5,32932,-39432.1 --yaw -35.8 --pitch 2.7 --walk 3 --hold "" --original-rooms
+# through it: the hall's stairs inside 119 must not show, and the hall's wall in 120's
+# doorway does, as in the original
+run w "$D" --level rm11 --doors-open 1 --pos 29400.5,32932,-39432.1 --yaw -35.8 --pitch 2.7 --walk 3 --hold ""
+# On rm02's deck, which is in two rooms (100, the deck, and 605, the ship's outside) with a
+# floor each at the same height and no portal between them: the deck's railings, crates and
+# chimneys (100) must show, as in the original, wherever the ship's outside's floor comes first
+run y "$D" --level rm02 --pos 39365.4,32932,-30775 --yaw -58 --pitch 2.5 --walk 3 --hold ""
+# On the top landing of rm02's stairwell (room 5), over the doorway into 404 a floor below:
+# the stairwell's walls around the open door into the generators must show
+run z "$D" --level rm02 --doors-open 1 --pos 28527.1,34372,-31874 --yaw -691.6 --pitch -10.3 --walk 3 --hold ""
+# One step past rm11's hall door into 119, looking through 119 into 120: the hall's wall in
+# 120's doorway, which shows from the hall (p), must not show (the original hides it too)
+run aa "$D" --level rm11 --doors-open 1 --pos 29495.1,32932,-39551.7 --yaw -51.2 --pitch -2.9 --walk 3 --hold ""
 # Strafe and walk slowly in the demo room
 run f "$D" --demo --walk 120 --hold DRF
 # Record a run and play it back: it must do the same, and every checksum must match
