@@ -190,5 +190,6 @@ would drop out).
 
 For debugging a level, `--rooms` (or `G`) colors each room, `--no-cull` (or `V`) draws every
 room, `--hide-rooms 5,224` leaves rooms out, and F2 writes a screenshot and a log of where you
-are into `debug/`. `--portal-paths` draws rooms the older way, each masked to the exact openings
+are into `debug/`. `--no-cull-backs` draws the faces turned away from the camera too (the
+original leaves them out, and that hides most overlapping rooms). `--portal-paths` draws rooms the older way, each masked to the exact openings
 it is seen through, instead of within their portals' screen rectangles (see PORTALS.md).

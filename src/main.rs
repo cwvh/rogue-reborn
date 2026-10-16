@@ -1185,6 +1185,21 @@ fn main() {
                             }
                         }
                         let mat_index = od.mn as usize;
+                        // A face is seen from the side its normal points to (its corners in
+                        // order turn counterclockwise there), as in the original engine; the
+                        // mirrored z makes that clockwise on screen. Two-sided materials (glass,
+                        // foliage, nets) show both. Most impossible geometry is a room's surfaces
+                        // seen from behind (rm05's cabin walls from outside, rm11's hall's stairs
+                        // from inside 119), and this hides it.
+                        if !args.no_cull_backs {
+                            if level.materials.materials.get(mat_index).is_some_and(|m| m.two_sided) {
+                                glDisable(0x0B44); // GL_CULL_FACE
+                            } else {
+                                glEnable(0x0B44);
+                                glCullFace(0x0405); // GL_BACK
+                                glFrontFace(0x0900); // GL_CW
+                            }
+                        }
                         // Room colors replace the textures, so they show even where textures are missing
                         let tex_id = if room_debug { Some(0) } else { ensure_texture(&level.materials, mat_index, &map_num, &mut textures) };
                         if let Some(tex_id) = tex_id {
@@ -1247,6 +1262,7 @@ fn main() {
                         glPopMatrix();
                     }
                     }
+                    glDisable(0x0B44); // GL_CULL_FACE
                 };
 
                 if !rect_plan.is_empty() {
@@ -1254,7 +1270,8 @@ fn main() {
                     // overlap, then every other room whole, within its rectangle, nearest
                     // first, sorted out by depth as the original engine does. Inside the
                     // openings of the player's rooms' own doorways the room beyond shows in
-                    // front of them (rm11's hall's stairs inside 119); deeper, overlaps show,
+                    // front of them: rm11's hall's wall, one step past its door into 119 (its
+                    // stairs there are seen from behind, and culled). Deeper, overlaps show,
                     // as in the original (the hall's wall in 120's doorway, see BUGS.txt)
                     draw_objects(Which::Unowned, &[]);
                     let mut cut_rooms: Vec<u32> = Vec::new();

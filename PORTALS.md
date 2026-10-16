@@ -10,7 +10,9 @@ of the portals it is seen through, sorted out by depth; inside the openings of t
 own doorways the room beyond wins. It gets every known view right, including the original's
 own flaw (rm11's wall in 120's doorway, BUGS.txt). The older drawing, which masks each room to
 the exact opening it is seen through, once per path of portals, is kept behind
-`--portal-paths` for now.
+`--portal-paths` for now. Since 2026-10-15 faces seen from behind are not drawn, as in the
+original (see "Back-face culling"): most overlapping geometry is a room's surfaces seen from
+behind, and that hides it.
 
 ## The problem
 
@@ -113,8 +115,9 @@ portals' whole rectangles. Each room is drawn whole, nearest first, sorted by de
 player's room and the doorways they stand in are cut as in the default drawing
 (`touched_plan`). In the opening of each of the player's room's own doorways, the depth is
 wiped where the surface already drawn lies inside the floor plan of the room beyond there
-(`bounds_at`), so that room shows in front: this is what hides 121's stairs from the hall, as
-in the original. The wipe is tested with a box drawn into the stencil (`wipe_opening`), and
+(`bounds_at`), so that room shows in front: this is what hides 121's wall one step past the
+hall's door into 119 (view 14), as in the original. (It also hid 121's stairs from the hall;
+since back faces are culled, nothing needs to: they are seen from behind.) The wipe is tested with a box drawn into the stencil (`wipe_opening`), and
 is done only for an opening seen from the room's far side. (`--portal-rects` also wiped the
 depth in deeper openings, up to 200 units past them, `OVERLAP_DEPTH`, to hide the wall the
 original shows in 120's doorway; that was the one rule not taken from the original, and it
@@ -161,6 +164,7 @@ compare. `--pos` takes z negated. Status: OK, or what goes wrong.
 | 14 | rm11, one step past the hall's door into 119 | OK | OK (golden aa) | wall gone |
 | 15 | rm02 deck by the stairs to the bridge deck | OK (fixed) | OK (golden y) | crates, railings |
 | 16 | rm02 stairwell's top landing, at the generators' door | OK (fixed) | OK (golden z) | |
+| 17 | rm08 105, the door between the crates (nook 209) | | 206 drawn over 105's wall above the nook; a small turn fixes it | |
 
 ```
 1  cargo rr --map data/map/rm08/rm08.map --pos 34202.9,32567.0,-29624.9 --yaw -28.1 --pitch -1.9 --first-person --textured
@@ -178,7 +182,13 @@ compare. `--pos` takes z negated. Status: OK, or what goes wrong.
 14 cargo rr --map data/map/rm11/rm11.map --doors-open 1 --pos 29495.1,32932.0,-39551.7 --yaw -51.2 --pitch -2.9 --first-person --textured
 15 cargo rr --map data/map/rm02/rm02.map --pos 39365.4,32932.0,-30775.0 --yaw -58.0 --pitch 2.5 --first-person --textured
 16 cargo rr --map data/map/rm02/rm02.map --doors-open 1 --pos 28527.1,34372.0,-31874.0 --yaw -691.6 --pitch -10.3 --first-person --textured
+17 cargo rr --map data/map/rm08/rm08.map --pos 35561.5,32567.0,-31217.5 --yaw -17.4 --pitch 16.4 --first-person --textured --rooms
 ```
+
+View 17: the nook 209 between two stacks of crates has no ceiling; its top is a second portal
+`p105_209` back up into 105. The plan goes 105, 209, back into 105 through that opening, and on
+to 206 beyond 105's wall, and 206 (whose faces point at the camera) is drawn over the wall
+there. Whether the plan reaches 206 that way changes with the view. `--no-cull` is right.
 
 Also checked in both modes, all fine: rm05's side door from inside and the upper deck, rm11's
 hall, room 119 and the stairs (four directions each), rm12 room 850, rm17 room 24 (but for the
@@ -208,6 +218,42 @@ hall, room 119 and the stairs (four directions each), rm12 room 850, rm17 room 2
 6. **Room volumes are floor slabs, not air.** They cannot tell overlap junk from real
    surfaces: most portals have some other room's triangles inside the room beyond (77 of
    rm11's 111, 82 of rm08's 104), and rm11's room 500 contains triangles of 21 rooms.
+7. **The original culls back faces.** See below. Most overlaps are a room seen from outside it
+   (cabin walls through the hull, the cellar's snow from inside) and vanish with that. What is
+   left is surfaces that face the viewer (rm05's upper deck is wider and taller than the
+   fuselage, so its ceiling and inner walls face you from outside) and rooms with nothing
+   around them (rm11's buried cellar, 128's building with no outer wall on one side): with
+   culling, their walls vanish from outside and you see in. Portal visibility hides those;
+   drawing everything cannot.
+
+## Back-face culling (default since 2026-10-15)
+
+A face is seen from the side its stored normal points to, which is the side its corners turn
+counterclockwise (every face of rm05, rm08 and rm11 agrees). Materials carry a two-sided
+flag, and on rm05 the eleven that have it are cargo nets, curtains, grass and tree sprites,
+window glass, bars, ladder rungs, landing gear and a garage door: what an engine that culls
+back faces needs drawn from both sides. So the default now leaves out faces seen from behind,
+unless two-sided (`--no-cull-backs` draws them, for comparison).
+
+In the known views and golden scenarios it changes at most 271 pixels, all thin edges seen from
+behind: stray specks on rm11's cornice over 119's doorway (gone), the inside of a lamp shade's
+rim, a door frame's edge. The golden logs are unchanged. Door leaves are turned by their
+door's matrix, and none of those mirrors (no door on any level), so they cull correctly.
+
+With `--no-cull`, culling fixes: rm05's frame through the belly (from the user's dump) and the
+hull through the cabin; most of the upper deck's wall poking out by the side door (a sliver,
+a line and a speck are left); rm11's hall stairs inside 119 (view 11) and wall in 120's
+doorway (view 10); the courtyard snow through the cellar, from inside it. It does not fix
+rm05's upper deck seen from on top of the fuselage or from the boarding stairs, nor rooms with
+no outside seen from outside (the cellar and 128 from the courtyard). So `--no-cull` stays a
+debugging view.
+
+The doorway wipe is still needed: without it, 121's wall shows one step past the hall's door
+into 119 (view 14), which faces the camera. View 11's stairs no longer need it.
+
+`examples/overlaps.rs --cull-backs` sees as the game does: a face seen from behind neither
+shows nor hides anything. With that, rm08 still has no overlaps, and rm05 and rm11 keep about
+20 pairs each, the cases above.
 
 ## Overlap audit (`examples/overlaps.rs`)
 
@@ -218,7 +264,9 @@ alpha-tested (.tga) triangles, since trees are crossing planes. It then asks whe
 see the crossing: an eye stands on each room's floors (on a 96-unit grid over its volumes,
 on flat ground under both feet, with headroom), and looks at the four arms of the crossing.
 Where two surfaces merely meet (a wall running into the ground), one arm of each is buried in
-the other. Where three or four arms are seen, one surface pokes through the other. For each
+the other. Where one eye sees three or four arms, one surface pokes through the other. (Arms
+seen from different eyes do not count: from inside the cellar you see its wall above and
+below the snow line, and from outside the snow, but no one sees both.) For each
 pair of rooms it prints a `cargo rr ... --no-cull` command for a view of it.
 
 ```
@@ -288,13 +336,15 @@ there are only so many maps, but it is work per map and does not explain anythin
    checked against all of the table above. Until then the views live in golden.sh (p to aa).
 2. Play the other levels (rm01 to rm19, citystreet), and dump what looks wrong. Where in
    doubt, check the same spot in the original game, and add the view to the table.
-3. Rerun the overlap audit with the rectangles instead of `--no-cull`: count only crossings
-   where the eye reaches the other room through portals and the crossing is inside that
-   room's rectangle. That is the list of overlaps the drawing can still show.
-4. If nothing new turns up, remove the per-path drawing (`--portal-paths`: `plan`, most of
+3. Rerun the overlap audit with the rectangles instead of `--no-cull` (and `--cull-backs`):
+   count only crossings where the eye reaches the other room through portals and the crossing
+   is inside that room's rectangle. That is the list of overlaps the drawing can still show.
+4. View 17 (rm08's nook): do not plan a room again through a portal back into a room already
+   drawn whole (the nook's ceiling back into 105), or not past it.
+5. If nothing new turns up, remove the per-path drawing (`--portal-paths`: `plan`, most of
    `draw_plan`).
-5. Display lists per room (the frame time on big views).
-5. Characters, decals and glass inside the rectangle of their room (characters show only when
+6. Display lists per room (the frame time on big views).
+7. Characters, decals and glass inside the rectangle of their room (characters show only when
    their room is drawn, but are not limited to its rectangle).
 
 ## Where things are
@@ -306,7 +356,7 @@ there are only so many maps, but it is work per map and does not explain anythin
 - `src/draw.rs`: `draw_plan` (`BOX_SLACK`, `PLANE_SLACK`), `wipe_opening`.
 - `src/main.rs`: chooses the plan and draws it; characters show only when their room is drawn
   (`shown`), in both modes.
-- Flags: `--no-cull`, `--portal-paths`, `--portals` (outlines), `--rooms` (room colors),
+- Flags: `--no-cull`, `--no-cull-backs`, `--portal-paths`, `--portals` (outlines), `--rooms` (room colors),
   `--hide-rooms`, F2 or `--dump`.
 - Tests: `the_halls_wall_stands_inside_the_room_past_119`,
   `the_room_past_the_next_doorway_is_left_to_the_depth_test`,

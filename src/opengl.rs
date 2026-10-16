@@ -56,6 +56,8 @@ unsafe extern "C" {
         pixels: *const std::ffi::c_void
     );
     pub fn glDisable(cap: u32);
+    pub fn glCullFace(mode: u32);
+    pub fn glFrontFace(mode: u32);
     pub fn glReadPixels(
         x: i32,
         y: i32,

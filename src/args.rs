@@ -41,6 +41,9 @@ pub struct Args {
     /// and masked to its opening (the drawing before the rectangles), instead of whole
     /// within the screen rectangle of its portals as the original engine does
     pub portal_paths: bool,
+    /// Draw the faces turned away from the camera too. By default they are left out (but
+    /// for two-sided materials), as the original engine does.
+    pub no_cull_backs: bool,
     /// Start with every door this far open (0 shut, 1 open)
     pub doors_open: Option<f32>,
     /// Rooms to leave out of the drawing, to find which one a stray surface belongs to
@@ -128,6 +131,7 @@ pub fn parse_args() -> Args {
             "--dump" => args.dump = true,
             "--no-cull" => args.no_cull = true,
             "--portal-paths" => args.portal_paths = true,
+            "--no-cull-backs" => args.no_cull_backs = true,
             "--doors-open" => args.doors_open = it.next().and_then(|v| v.parse().ok()),
             "--hide-rooms" => args.hide_rooms = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default(),
             "--info" => args.info = true,
