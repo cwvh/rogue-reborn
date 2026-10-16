@@ -84,6 +84,9 @@ run aa "$D" --level rm11 --doors-open 1 --pos 29495.1,32932,-39551.7 --yaw -51.2
 # rm08's room 105, looking up at the door in the nook between the crates (209): 105's brick
 # wall above the nook must show, not the street beyond it (206)
 run ab "$D" --level rm08 --pos 35561.5,32567,-31217.5 --yaw -17.4 --pitch 16.4 --walk 3 --hold ""
+# The same door from the street (206), standing in the doorway into 208 and looking up: the
+# street's roof over the door must show whole
+run ac "$D" --level rm08 --pos 35619.9,32567,-31889.9 --yaw 540.9 --pitch 76.7 --walk 3 --hold ""
 # Strafe and walk slowly in the demo room
 run f "$D" --demo --walk 120 --hold DRF
 # Record a run and play it back: it must do the same, and every checksum must match

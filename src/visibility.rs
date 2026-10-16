@@ -342,7 +342,7 @@ impl Visibility {
     /// through it.
     pub fn plan<'a>(&'a self, map: &Map, start: u32, touch: &[[f32; 3]], eye: [f32; 3], blocked: &[bool], clip: &dyn Fn([f32; 3]) -> [f32; 4]) -> PlanNode<'a> {
         let mut budget = MAX_NODES;
-        let mut node = PlanNode { room: start, plane: None, polygon: &[], touched: false, cut_in_self: None, cut_in_parent: None, children: Vec::new() };
+        let mut node = PlanNode { room: start, plane: None, polygon: &[], touched: false, cut_in_self: None, cut_in_parent: None, cut_in_self_height: None, cut_in_parent_height: None, children: Vec::new() };
         self.grow(map, &mut node, FULL, touch, eye, blocked, clip, &mut vec![start], &mut budget);
         node
     }
@@ -420,7 +420,7 @@ impl Visibility {
     /// them (each cut at the doorway where they overlap), without the rooms seen through other
     /// portals: those are `rect_plan`'s
     pub fn touched_plan<'a>(&'a self, map: &Map, start: u32, touch: &[[f32; 3]], eye: [f32; 3], blocked: &[bool]) -> PlanNode<'a> {
-        let mut node = PlanNode { room: start, plane: None, polygon: &[], touched: false, cut_in_self: None, cut_in_parent: None, children: Vec::new() };
+        let mut node = PlanNode { room: start, plane: None, polygon: &[], touched: false, cut_in_self: None, cut_in_parent: None, cut_in_self_height: None, cut_in_parent_height: None, children: Vec::new() };
         self.grow_touched(map, &mut node, touch, eye, blocked, &mut vec![start]);
         node
     }
@@ -441,6 +441,8 @@ impl Visibility {
                 touched: true,
                 cut_in_self: self.bounds_at(node.room, other, i),
                 cut_in_parent: self.bounds_at(other, node.room, i),
+                cut_in_self_height: self.height(node.room),
+                cut_in_parent_height: self.height(other),
                 children: Vec::new(),
             };
             path.push(other);
@@ -481,6 +483,8 @@ impl Visibility {
                 // Each room's cut is limited to where it overlaps the other
                 cut_in_self: if touched { self.bounds_at(node.room, other, i) } else { None },
                 cut_in_parent: if touched { self.bounds_at(other, node.room, i) } else { None },
+                cut_in_self_height: if touched { self.height(node.room) } else { None },
+                cut_in_parent_height: if touched { self.height(other) } else { None },
                 children: Vec::new(),
             };
             path.push(other);
@@ -521,6 +525,12 @@ pub struct PlanNode<'a> {
     pub cut_in_self: Option<[f32; 4]>,
     /// ...and the box the room it was reached from is cut within, where it overlaps this one
     pub cut_in_parent: Option<[f32; 4]>,
+    /// How low and how high each box goes: the height of the room whose floor plan it is
+    /// (the room it was reached from for `cut_in_self`, this one for `cut_in_parent`). Above
+    /// and below the other room there is nothing of it to show instead (rm08's street, 206,
+    /// lost its roof over the door into 208 from the doorway).
+    pub cut_in_self_height: Option<[f32; 2]>,
+    pub cut_in_parent_height: Option<[f32; 2]>,
     pub children: Vec<PlanNode<'a>>,
 }
 

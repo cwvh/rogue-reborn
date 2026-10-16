@@ -166,6 +166,7 @@ compare. `--pos` takes z negated. Status: OK, or what goes wrong.
 | 15 | rm02 deck by the stairs to the bridge deck | OK (fixed) | OK (golden y) | crates, railings |
 | 16 | rm02 stairwell's top landing, at the generators' door | OK (fixed) | OK (golden z) | |
 | 17 | rm08 105, the door between the crates (nook 209) | | OK (fixed; golden ab) | |
+| 18 | rm08 206, in the doorway into 208, looking up at the roof over the door | | OK (fixed; golden ac) | |
 
 ```
 1  cargo rr --map data/map/rm08/rm08.map --pos 34202.9,32567.0,-29624.9 --yaw -28.1 --pitch -1.9 --first-person --textured
@@ -184,6 +185,7 @@ compare. `--pos` takes z negated. Status: OK, or what goes wrong.
 15 cargo rr --map data/map/rm02/rm02.map --pos 39365.4,32932.0,-30775.0 --yaw -58.0 --pitch 2.5 --first-person --textured
 16 cargo rr --map data/map/rm02/rm02.map --doors-open 1 --pos 28527.1,34372.0,-31874.0 --yaw -691.6 --pitch -10.3 --first-person --textured
 17 cargo rr --map data/map/rm08/rm08.map --pos 35561.5,32567.0,-31217.5 --yaw -17.4 --pitch 16.4 --first-person --textured --rooms
+18 cargo rr --map data/map/rm08/rm08.map --pos 35619.9,32567.0,-31889.9 --yaw 540.9 --pitch 76.7 --first-person --textured
 ```
 
 View 17: the nook 209 between two stacks of crates is 280 high and open at the top (a second
@@ -199,6 +201,13 @@ That needed a sounder box test. The wipe unmarked only what lies past the box's 
 which holds when every line of sight through the opening goes through the box; with the box
 as tall as the room, one can pass over it (rm08's canal, 521, from the alley: view 5's eave).
 Now it unmarks what is on the outer side of any of the box's six planes.
+
+View 18 is the same mistake in the doorway cut: standing in the doorway from the street (206)
+into 208 (the door's outer step), 206 was drawn only on the near side of the doorway's plane
+or outside 208's floor plan, at any height, and lost its roof over the door, 430 units above
+208. The cut now keeps what is above or below the other room's shell too (two more passes of
+the room, `PlanNode::cut_in_self_height`, `cut_in_parent_height`). It changes view 12: the
+spire's tip, above room 6, is no longer cut with the rest of it.
 
 Also checked in both modes, all fine: rm05's side door from inside and the upper deck, rm11's
 hall, room 119 and the stairs (four directions each), rm12 room 850, rm17 room 24 (but for the
@@ -264,6 +273,28 @@ into 119 (view 14), which faces the camera. View 11's stairs no longer need it.
 `examples/overlaps.rs --cull-backs` sees as the game does: a face seen from behind neither
 shows nor hides anything. With that, rm08 still has no overlaps, and rm05 and rm11 keep about
 20 pairs each, the cases above.
+
+`examples/overlaps.rs --rects` sees as the default drawing does (2026-10-15): from each eye,
+the rooms the game starts from (the floors under its feet) and `rect_plan`'s rooms, each only
+within its rectangle, drawn in order with the doorway wipes before them, backs culled, sorted
+out by depth. Doors are taken open. It reproduces real frames: from view 10, all 736 points of
+a 32 by 24 grid match the game's `--rooms` screenshot; from view 5, 704 do (the rest are the
+door leaves, shut in the game, a character, and the cuts within 40 units of a doorway, which
+it leaves out). Over the 27 levels that load (all but obstacletest):
+
+- 19 levels have nothing, rm05 and rm08 among them; the other 8 have one or two pairs each,
+  short (at most 310 units of crossing): rm04 607/960 and 902/920, rm06 and rm10 1/16 and
+  34/46, rm11 113/121 and 228/229, rm02 101/605, rm17's eave (1/9), citystreet 1/400.
+- The views it gives for the biggest are from eyes standing where players cannot (on rm06's
+  hedge, on rm04's rubble): the eyes stand on anything flat and wide enough. From on top of
+  rm06's hedge (`--pos 28667,32965,-32248 --yaw -84.5 --pitch -26.1 --doors-open 1`), the
+  default drawing shows a black floor past the door with characters standing on nothing; not
+  an overlap, but worth a look.
+- It cannot see a whole surface standing in the wrong room where it meets the room's own
+  surfaces as a wall meets a floor: no eye sees three arms of that crossing. 121's wall in
+  120's doorway is one, and the default drawing shows it from the hall, as the original does.
+
+So, as far as crossings tell, the default drawing shows almost none of the levels' overlaps.
 
 ## Overlap audit (`examples/overlaps.rs`)
 
@@ -346,9 +377,8 @@ there are only so many maps, but it is work per map and does not explain anythin
    checked against all of the table above. Until then the views live in golden.sh (p to aa).
 2. Play the other levels (rm01 to rm19, citystreet), and dump what looks wrong. Where in
    doubt, check the same spot in the original game, and add the view to the table.
-3. Rerun the overlap audit with the rectangles instead of `--no-cull` (and `--cull-backs`):
-   count only crossings where the eye reaches the other room through portals and the crossing
-   is inside that room's rectangle. That is the list of overlaps the drawing can still show.
+3. Look at the few pairs `overlaps --rects` still finds, from places players can stand,
+   and at rm06's black floor seen from the hedge.
 4. If nothing new turns up, remove the per-path drawing (`--portal-paths`: `plan`, most of
    `draw_plan`).
 5. Display lists per room (the frame time on big views).

@@ -296,15 +296,23 @@ pub unsafe fn draw_plan(node: &visibility::PlanNode<'_>, level: i32, fill_mode: 
         // Slackened a little too: rm08's railing over room 521's stairwell lies exactly on the
         // edge of 521's volume, and rounding cut it. A whole PLANE_SLACK brings back a hairline
         // of 121's stairs in the ceiling of rm11's 119.
-        let outside = |b: [f32; 4]| [[-1.0, 0.0, 0.0, b[0]], [1.0, 0.0, 0.0, -b[2]], [0.0, 0.0, -1.0, b[1]], [0.0, 0.0, 1.0, -b[3]]]
-            .map(|p| [p[0], p[1], p[2], p[3] + BOX_SLACK]);
+        // Outside the box: past one of its sides, or above or below it (a unit short of its top,
+        // as in wipe_opening)
+        let outside = |b: [f32; 4], h: Option<[f32; 2]>| {
+            let mut sides = vec![[-1.0, 0.0, 0.0, b[0]], [1.0, 0.0, 0.0, -b[2]], [0.0, 0.0, -1.0, b[1]], [0.0, 0.0, 1.0, -b[3]]];
+            if let Some([low, high]) = h {
+                sides.push([0.0, 1.0, 0.0, -(high - 1.0)]);
+                sides.push([0.0, -1.0, 0.0, low]);
+            }
+            sides.into_iter().map(|p| [p[0], p[1], p[2], p[3] + BOX_SLACK]).collect::<Vec<[f32; 4]>>()
+        };
         let mut fixed: Vec<[f32; 4]> = Vec::new();
         let mut ways: Vec<Vec<[f32; 4]>> = Vec::new();
         match (node.plane, node.cut_in_self) {
             // Entered through a doorway the player stands in
             (Some(p), Some(b)) if node.touched => {
                 ways.push(vec![slackened(p)]);
-                ways.extend(outside(b).into_iter().map(|o| vec![o]));
+                ways.extend(outside(b, node.cut_in_self_height).into_iter().map(|o| vec![o]));
             }
             (Some(p), _) => fixed.push(slackened(p)),
             _ => {}
@@ -315,7 +323,7 @@ pub unsafe fn draw_plan(node: &visibility::PlanNode<'_>, level: i32, fill_mode: 
             match child.cut_in_parent {
                 Some(b) if ways.is_empty() => {
                     ways.push(vec![near]);
-                    ways.extend(outside(b).into_iter().map(|o| vec![o]));
+                    ways.extend(outside(b, child.cut_in_parent_height).into_iter().map(|o| vec![o]));
                 }
                 _ => fixed.push(near),
             }
