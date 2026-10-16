@@ -79,6 +79,8 @@ pub struct Args {
     pub weapon_offset: Option<[f32; 3]>,
     /// Draw the weapon in front of the camera in first person (the original game had no such view)
     pub viewmodel: bool,
+    /// Start with the lag meter shown (L toggles it while connected)
+    pub lag_meter: bool,
     /// Bullet holes drawn for the surface hit, with splinters, sparks and dust, instead of the game sprites
     pub realistic_decals: bool,
     /// Treat every wall as this surface (wood, metal, concrete, earth, soft), to preview bullet holes
@@ -151,6 +153,7 @@ pub fn parse_args() -> Args {
             "--view-orbit" => args.view_orbit = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0),
             "--view-dist" => args.view_dist = it.next().and_then(|v| v.parse().ok()),
             "--viewmodel" => args.viewmodel = true,
+            "--lag-meter" => args.lag_meter = true,
             "--realistic-decals" => args.realistic_decals = true,
             "--decal-surface" => {
                 args.decal_surface = match it.next().unwrap_or_default().to_ascii_lowercase().as_str() {

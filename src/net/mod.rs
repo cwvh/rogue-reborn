@@ -2,8 +2,10 @@
 //! players do and draw what it says happened.
 
 pub mod animation;
+pub mod bot;
 pub mod client;
 pub mod link;
+pub mod meter;
 pub mod proto;
 pub mod server;
 pub mod setup;

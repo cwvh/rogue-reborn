@@ -5,10 +5,17 @@
 //!
 //! `--keys` says what the player does, with the letters of the viewer's `--hold`: W A S D to move,
 //! F to fire, T to take out a grenade and throw it, L to reload.
+//!
+//!   rrbot --connect 127.0.0.1:27960 --fight --skill normal
+//!
+//! `--fight` plays instead, as an opponent (see `net::bot`): it wanders, and shoots at whoever it
+//! sees, until the server goes away (or for `--seconds`). `--skill` is easy, normal or hard, and
+//! `--trace` prints where it is and whom it fights once a second.
 
 use std::net::ToSocketAddrs;
 use std::time::{Duration, Instant};
 
+use rogue_reborn::net::bot::{Bot, Skill};
 use rogue_reborn::net::client::{Client, Status};
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
 use rogue_reborn::net::setup::build_sim;
@@ -19,6 +26,7 @@ fn usage(problem: &str) -> ! {
         eprintln!("rrbot: {problem}");
     }
     eprintln!("usage: rrbot --connect HOST:PORT [--keys WASDFTL] [--seconds N] [--yaw DEGREES] [--turn DEGREES_PER_SECOND]");
+    eprintln!("       rrbot --connect HOST:PORT --fight [--skill easy|normal|hard] [--seconds N, 0 for as long as the server runs] [--trace]");
     eprintln!("             [--sim-latency MS] [--sim-jitter MS] [--sim-loss PERCENT] [--quiet]");
     std::process::exit(if problem.is_empty() { 0 } else { 2 });
 }
@@ -26,13 +34,20 @@ fn usage(problem: &str) -> ! {
 fn main() {
     let (mut connect, mut keys, mut seconds, mut yaw, mut turn) = (None, String::new(), 10.0f64, 0.0f32, 0.0f32);
     let (mut latency, mut jitter, mut loss, mut quiet) = (0.0f64, 0.0f64, 0.0f32, false);
+    let (mut fight, mut skill, mut seconds_given, mut trace) = (false, Skill::normal(), false, false);
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut value = |name: &str| it.next().unwrap_or_else(|| usage(&format!("{name} needs a value")));
         match arg.as_str() {
             "--connect" => connect = Some(value("--connect")),
             "--keys" => keys = value("--keys").to_ascii_uppercase(),
-            "--seconds" => seconds = value("--seconds").parse().unwrap_or_else(|_| usage("--seconds expects a number")),
+            "--seconds" => {
+                seconds = value("--seconds").parse().unwrap_or_else(|_| usage("--seconds expects a number"));
+                seconds_given = true;
+            }
+            "--fight" => fight = true,
+            "--trace" => trace = true,
+            "--skill" => skill = Skill::named(&value("--skill")).unwrap_or_else(|| usage("--skill expects easy, normal or hard")),
             "--yaw" => yaw = value("--yaw").parse().unwrap_or_else(|_| usage("--yaw expects degrees")),
             "--turn" => turn = value("--turn").parse().unwrap_or_else(|_| usage("--turn expects degrees a second")),
             "--sim-latency" => latency = value("--sim-latency").parse::<f64>().unwrap_or_else(|_| usage("--sim-latency expects milliseconds")) / 1000.0,
@@ -44,6 +59,10 @@ fn main() {
         }
     }
     let Some(connect) = connect else { usage("--connect is needed") };
+    // A fighter plays for as long as the server runs, unless told otherwise
+    if fight && !seconds_given || seconds <= 0.0 {
+        seconds = f64::INFINITY;
+    }
     let server_addr = connect.to_socket_addrs().ok().and_then(|mut a| a.next()).unwrap_or_else(|| usage(&format!("cannot find {connect}")));
 
     let mut link = Impaired::new(
@@ -84,6 +103,7 @@ fn main() {
     let slot = client.slot();
     sim.activate_slot(slot, [0.0, 0.0, 0.0]);
     println!("joined as player {slot}: {}, {} characters", setup.map, setup.npcs.len());
+    let mut bot = fight.then(|| Bot::new(skill, std::process::id() as u64 ^ start.elapsed().as_nanos() as u64));
 
     // Play
     let held = |c: char| keys.contains(c);
@@ -95,16 +115,44 @@ fn main() {
         link.set_time(now);
         if now >= next {
             next += TICK as f64;
-            let mut input = Input {
-                forward: held('W'), left: held('A'), back: held('S'), right: held('D'), run: !held('R'),
-                fire: held('F') || (held('T') && ticks < 30), ..Input::default()
+            let input = match bot.as_mut() {
+                Some(bot) => {
+                    let view = client.view(now);
+                    bot.think(&sim, slot, &view)
+                }
+                None => {
+                    let mut input = Input {
+                        forward: held('W'), left: held('A'), back: held('S'), right: held('D'), run: !held('R'),
+                        fire: held('F') || (held('T') && ticks < 30), ..Input::default()
+                    };
+                    // T takes out a grenade first and throws it after holding for half a second
+                    input.grenade = held('T') && ticks == 0;
+                    input.reload = held('L') && ticks == 5;
+                    input.set_look(yaw + turn * ticks as f32 * TICK, 0.0);
+                    input
+                }
             };
-            // T takes out a grenade first and throws it after holding for half a second
-            input.grenade = held('T') && ticks == 0;
-            input.reload = held('L') && ticks == 5;
-            input.set_look(yaw + turn * ticks as f32 * TICK, 0.0);
             let before = client.snapshots;
-            events.extend(client.tick(now, &mut link, &mut sim, input));
+            let news = client.tick(now, &mut link, &mut sim, input);
+            // A fighter says at once who killed whom, as it may never get to the end
+            if fight && !quiet {
+                for e in &news {
+                    if let Event::Kill { killer, victim, .. } = e {
+                        let who = |s: usize| if s == slot { "this bot".to_string() } else { format!("player {s}") };
+                        match killer {
+                            Some(k) => println!("{} killed {}", who(*k), who(*victim)),
+                            None => println!("{} died", who(*victim)),
+                        }
+                    }
+                }
+            }
+            events.extend(news);
+            // Where it is and whom it fights, once a second
+            if trace && ticks % 60 == 0 {
+                let p = &sim.players[slot];
+                let target = bot.as_ref().and_then(|b| b.target());
+                println!("t={:.0} pos=({:.0}, {:.0}, {:.0}) hp={:.0} target={target:?}", ticks as f32 * TICK, p.player.pos[0], p.player.pos[1], p.player.pos[2], p.hp);
+            }
             if client.snapshots != before {
                 corrections += 1;
                 // The first few snapshots put the player where the server has them, which is

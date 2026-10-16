@@ -494,6 +494,7 @@ fn main() {
     let mut textured = args.textured;
     let mut first_person = args.first_person;
     let mut planning_level_index = 0;
+    let mut lag_meter = args.lag_meter;
     let mut show_portals = args.portals;
     let mut show_collisions = args.collisions;
     let mut room_debug = args.rooms;
@@ -578,6 +579,9 @@ fn main() {
                         }
                         (Key::T, Action::Press) => {
                             textured = !textured;
+                        }
+                        (Key::L, Action::Press) if net.is_some() => {
+                            lag_meter = !lag_meter;
                         }
                         (Key::L, Action::Press) => {
                             if !level.planning_levels.levels.is_empty() {
@@ -1731,7 +1735,8 @@ fn main() {
             let marker = tracer.is_some_and(|t| t.2 && game_time < t.3);
             let lines: Vec<(String, [f32; 3])> = feed.iter().map(|(_, text, color)| (text.clone(), *color)).collect();
             let dead = net.is_some() && sim.players[me].respawn_at.is_some();
-            draw_hud(w, h, &status, msg, marker, veil, &lines, dead);
+            let meter = net.as_ref().filter(|_| lag_meter).map(|(client, _)| (&client.meter, net_clock.elapsed().as_secs_f64()));
+            draw_hud(w, h, &status, msg, marker, veil, &lines, dead, meter);
         }
         let rooms_text = if sim.culling {
             format!("ROOM: {} DRAWN: {}", current_rooms.join(" "), drawn_rooms.join(" "))

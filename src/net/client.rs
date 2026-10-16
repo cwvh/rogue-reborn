@@ -10,6 +10,7 @@ use std::collections::VecDeque;
 
 use crate::collision::Player;
 use crate::net::link::{Addr, Link};
+use crate::net::meter::Meter;
 use crate::net::proto::{INPUTS_PER_PACKET, Setup, Snapshot, ToClient, ToServer};
 use crate::sim::{Event, Input, Sim, TICK};
 
@@ -91,6 +92,8 @@ pub struct Client {
     /// The server tick that other players are shown at, which runs at the pace of the clock
     view_tick: Option<f64>,
     view_at: f64,
+    /// How the connection is doing, for the lag meter
+    pub meter: Meter,
 }
 
 impl Client {
@@ -100,6 +103,7 @@ impl Client {
             recent: VecDeque::new(), pending: VecDeque::new(), last_snapshot: 0, event_seen: 0, heard: 0.0,
             asked: f64::NEG_INFINITY, correction: 0.0, snapshots: 0,
             history: VecDeque::new(), received: VecDeque::new(), arrived: 0.0, view_tick: None, view_at: 0.0,
+            meter: Meter::default(),
         }
     }
 
@@ -137,6 +141,7 @@ impl Client {
             if from != self.server {
                 continue;
             }
+            self.meter.received(now, bytes.len());
             let received = &self.received;
             let Ok(msg) = ToClient::decode_with(&bytes, &|tick| received.iter().find(|s| s.tick == tick)) else { continue };
             match msg {
@@ -156,6 +161,7 @@ impl Client {
                 }
                 ToClient::Snapshot(mut s) if self.status == Status::Connected => {
                     self.heard = now;
+                    self.meter.snapshot(now, s.tick, s.ack_seq);
                     let announced = std::mem::take(&mut s.events);
                     self.received.push_back(s.clone());
                     while self.received.len() > REMEMBERED {
@@ -196,6 +202,7 @@ impl Client {
             self.snapshots += 1;
             self.remember(now, &snap);
             self.reconcile(sim, &snap);
+            self.meter.fixed(self.correction);
             events = snap.events.into_iter().map(|(_, e)| e).collect();
         }
         if self.status != Status::Connected {
@@ -223,7 +230,9 @@ impl Client {
             view: (self.view_tick.unwrap_or(self.last_snapshot as f64 - 4.0).max(1.0) * 16.0) as u32,
             inputs: self.recent.iter().map(|(_, i)| *i).collect(),
         };
-        link.send(self.server, &msg.encode());
+        let bytes = msg.encode();
+        self.meter.sent(now, seq, bytes.len());
+        link.send(self.server, &bytes);
         events
     }
 
@@ -260,6 +269,7 @@ impl Client {
             _ => target,
         };
         let t = t.min(newest as f64);
+        self.meter.frame(now, newest as f64 - t, newest as f64 + (now - self.arrived) / TICK as f64 - t);
         self.view_tick = Some(t);
         self.view_at = now;
         blend(&self.history, t)
@@ -269,6 +279,9 @@ impl Client {
     /// from where the server had them by the inputs it has not used yet
     fn reconcile(&mut self, sim: &mut Sim, snap: &Snapshot) {
         let before = sim.players.get(self.slot).map(|p| p.player.pos);
+        // Coming back after dying moves the player too, and is no misprediction
+        let was_dead = sim.players.get(self.slot).is_some_and(|p| p.respawn_at.is_some());
+        self.correction = 0.0;
         snap.apply(sim, self.slot);
         let Some(mine) = snap.players.iter().find(|p| p.slot as usize == self.slot) else { return };
         while self.pending.front().is_some_and(|&(s, _)| s <= snap.ack_seq) {
@@ -280,7 +293,7 @@ impl Client {
         for input in &inputs {
             sim.predict(self.slot, input, TICK);
         }
-        if let Some(b) = before {
+        if let (Some(b), false) = (before, was_dead) {
             let a = sim.players[self.slot].player.pos;
             self.correction = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
         }

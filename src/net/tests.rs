@@ -1,5 +1,6 @@
 //! The server and its clients, run against each other on a pretend network and a pretend clock.
 
+use crate::net::bot::{Bot, Skill};
 use crate::net::client::{Client, Status};
 use crate::net::link::{Conditions, FakeLink, FakeNet};
 use crate::net::proto::Setup;
@@ -33,6 +34,8 @@ struct Peer {
     link: FakeLink,
     sim: Option<Sim>,
     script: Box<dyn FnMut(u32) -> Input>,
+    /// A computer player, which plays instead of the script
+    bot: Option<Bot>,
     /// Ticks this client has run
     ticks: u32,
     /// Whether the client is running: a client that is not is a computer that has been switched off
@@ -67,8 +70,14 @@ impl Game {
     fn join_with(&mut self, build: &str, script: impl FnMut(u32) -> Input + 'static) -> usize {
         let link = self.net.endpoint();
         let client = Client::new(self.server_link.addr(), 1000 + self.peers.len() as u32, build);
-        self.peers.push(Peer { client, link, sim: None, script: Box::new(script), ticks: 0, on: true, events: Vec::new() });
+        self.peers.push(Peer { client, link, sim: None, script: Box::new(script), bot: None, ticks: 0, on: true, events: Vec::new() });
         self.peers.len() - 1
+    }
+
+    fn join_bot(&mut self, skill: Skill, seed: u64) -> usize {
+        let peer = self.join(|_| Input::default());
+        self.peers[peer].bot = Some(Bot::new(skill, seed));
+        peer
     }
 
     fn join(&mut self, script: impl FnMut(u32) -> Input + 'static) -> usize {
@@ -87,7 +96,13 @@ impl Game {
                 }
             }
             if let Some(sim) = p.sim.as_mut() {
-                let input = (p.script)(p.ticks);
+                let input = match p.bot.as_mut() {
+                    Some(bot) => {
+                        let view = p.client.view(now);
+                        bot.think(sim, p.client.slot(), &view)
+                    }
+                    None => (p.script)(p.ticks),
+                };
                 p.ticks += 1;
                 let news = p.client.tick(now, &mut p.link, sim, input);
                 p.events.extend(news);
@@ -363,4 +378,76 @@ fn a_player_shot_dead_is_dead_for_everyone_and_comes_back_where_the_server_says(
     assert_eq!(game.sim_of(target).players[b].hp, sim::PLAYER_HP);
     assert!(distance(game.me(target), game.server_pos(b)) < 1.0);
     assert_eq!(game.sim_of(shooter).players[a].kills, 1);
+}
+
+#[test]
+fn a_bot_finds_a_player_standing_in_the_room_and_shoots_them_dead() {
+    let mut game = Game::new(Conditions::broadband());
+    game.server.sim.pvp = true;
+    let bot = game.join_bot(Skill::normal(), 3);
+    let target = game.join(|_| run_key());
+    game.run(20.0);
+    let (a, b) = (game.peers[bot].client.slot(), game.peers[target].client.slot());
+    let server = &game.server.sim.players;
+    assert!(server[a].kills >= 1 && server[b].deaths >= 1, "kills {} deaths {}", server[a].kills, server[b].deaths);
+    // And the target never hurt it back
+    assert_eq!(server[a].deaths, 0);
+}
+
+#[test]
+fn a_bot_alone_keeps_walking_around_the_room() {
+    let mut game = Game::new(Conditions::broadband());
+    let bot = game.join_bot(Skill::normal(), 5);
+    game.run(1.0);
+    let start = game.me(bot);
+    let (mut farthest, mut last) = (0.0f32, start);
+    let mut still = 0;
+    for _ in 0..30 {
+        game.run(1.0);
+        let here = game.me(bot);
+        farthest = farthest.max(distance(here, start));
+        if distance(here, last) < 30.0 {
+            still += 1;
+        }
+        last = here;
+    }
+    assert!(farthest > 300.0, "it stayed within {farthest} of where it began");
+    assert!(still <= 3, "it stood still for {still} of 30 seconds");
+}
+
+/// The lag meter's figures for a player walking about for ten seconds on a connection like this
+fn metered(conditions: Conditions) -> crate::net::meter::Figures {
+    let mut game = Game::new(conditions);
+    let a = game.join(|t| Input { forward: (t / 60) % 2 == 0, run: true, ..Input::default() });
+    for _ in 0..600 {
+        game.step();
+        let now = game.steps as f64 * TICK as f64;
+        game.peers[a].client.view(now);
+    }
+    game.peers[a].client.meter.figures()
+}
+
+#[test]
+fn the_lag_meter_reads_a_clean_connection_as_clean() {
+    let f = metered(Conditions::NONE);
+    // Nothing on the wire, so only the server's input queue and the wait for the next snapshot
+    assert!(f.ping < 0.07, "{f:?}");
+    assert!(f.jitter < 0.005, "{f:?}");
+    assert_eq!(f.loss, 0.0, "{f:?}");
+    assert_eq!(f.fixes, 0, "{f:?}");
+    assert!(f.bytes_in > 0.0 && f.bytes_out > 0.0, "{f:?}");
+}
+
+#[test]
+fn the_lag_meter_sees_the_latency_jitter_and_loss_of_a_bad_connection() {
+    let clean = metered(Conditions::NONE);
+    let f = metered(Conditions { latency: 0.08, jitter: 0.04, loss: 0.08, duplicate: 0.0 });
+    // 80 ms each way, 20 more each way on average from the jitter, and the inputs the server
+    // holds back so that a late one does not leave it with nothing (that lag is felt too)
+    let added = f.ping - clean.ping;
+    assert!((0.2..0.3).contains(&added), "{added} added to the ping: {f:?}");
+    assert!((0.005..0.03).contains(&f.jitter), "{f:?}");
+    assert!((0.03..0.15).contains(&f.loss), "{f:?}");
+    // Other players are shown later than on a clean connection by at least the trip
+    assert!(f.view - clean.view > 0.08, "{f:?} against {clean:?}");
 }

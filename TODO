@@ -50,4 +50,6 @@ Network play
 * [net] No protection beyond the token: anyone who can see the traffic can speak for a player. No limit on connection attempts, and a client behind a changed address cannot resume.
 * [net] The build check compares the commit, so a dirty tree or a stale binary of the other program passes it. Hash the binary or the sim's constants instead.
 * [net] A listen server (one `rr` hosting) and a lobby are not built, nor is changing level while connected.
+* [gameplay] A player who walks off the edge of the level (rm08's docks end in nothing) falls for ever: nothing kills or brings them back. A bot did this before bots learned to stop at ledges.
+* [bots] The bots (net::bot) find their way by feelers, not a map of the level: they open doors they see, stop at drops over 200 (and jump down when penned in for 10 s), but do not plan routes, take cover, crouch or jump, and ignore the characters. On rm02 they stay within about 1700 of where they start.
 

@@ -77,6 +77,7 @@ On other platforms, or without the aliases:
 | F1 | toggle between first person and free-fly (collision off, Shift = faster, scroll = zoom) |
 | T | textured / wireframe |
 | P, C | show portals, show collision points |
+| L | on a server: show or hide the lag meter (`--lag-meter` starts with it shown) |
 | V | toggle room culling (on by default; `--no-cull` starts with it off) |
 | G | color each room's geometry (the room you stand in is white) and list your rooms |
 | F2 | debug dump: writes `debug/dump-<time>.png` and `.txt` with your position, rooms, what you are looking at and a command to come back to the spot |
@@ -152,7 +153,42 @@ shots, hits, grenades, doors, glass, kills. Other players are shown standing whe
 To see how it copes with a poor connection, add `--sim-latency 80 --sim-jitter 30 --sim-loss 5` to
 `rrsrv` and/or `rr` (milliseconds each way, milliseconds of jitter, percent lost).
 
-`rrbot` is a client with no window, for trying the server without a screen (`rrbot --connect
+L shows the lag meter at the top left, over the last 4 seconds. Its figures:
+- **ping:** from sending an input until a snapshot says the server used it. This includes the
+  inputs the server holds back against late ones, so it is the lag you feel, a little more than
+  the network's.
+- **jitter:** the spread of the snapshots' arrival times.
+- **loss:** snapshots that never came.
+- **view:** how far in the past the other players are shown.
+- **fixes:** how often the server moved you from where your computer predicted, and by how much
+  at most.
+- **in, out:** bytes a second.
+
+The graph's upper band is how much the view of the other players has in hand: blue, or yellow
+when it runs dry and they stall. The lower band has a bar for each snapshot: green to its ping,
+red for one lost, and yellow from the top for a fix.
+
+To play alone against the computer, `scripts/mp.sh` starts a server, some bots and your own window,
+and stops them all when you close it:
+
+```
+scripts/mp.sh                              # the box room, three bots
+scripts/mp.sh rm11 --bots 5 --skill hard   # a level, five hard bots
+scripts/mp.sh rm08 --net bad               # your connection 90 ms each way, 30 ms jitter, 4% lost
+```
+
+`--net` is `clean`, `good`, `typical`, `bad` or `awful`, and makes only your own connection worse.
+`--skill` is `easy`, `normal` or `hard`, `--npcs N` and `--no-pvp` go to the server, and anything
+after `--` goes to `rr`. Who killed whom is printed as it happens.
+
+The bots are `rrbot --connect HOST:PORT --fight [--skill hard]`. They wander the level, opening the
+doors they come to, and turn on whoever they see: they react after a moment, turn at a limited rate,
+fire in bursts with an aim that drifts and settles, sidestep, keep their distance and now and then
+throw a grenade. They see what a person on the same computer would (other players as the client
+shows them, not through walls, within a field of view), so their shots are judged the same way.
+`--trace` prints where a bot is and whom it fights, once a second.
+
+`rrbot` without `--fight` is a scripted client, for trying the server without a screen (`rrbot --connect
 HOST:PORT --keys WF --seconds 10`; `--keys` takes the letters of `--hold`), and
 `scripts/net-test.sh` runs a server and two bots over real sockets, on a clean and a bad connection,
 and checks that the game stayed in agreement.
