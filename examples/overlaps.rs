@@ -13,19 +13,23 @@ use std::path::PathBuf;
 /// when nothing stands between it and an eye standing in some room's volume. Each pair of
 /// rooms that crosses where it is seen gets a command for a view of it.
 ///
-///   cargo run --release --target x86_64-pc-windows-gnu --example overlaps -- [levels...] [--depth N] [--length N] [--all]
+///   cargo run --release --target x86_64-pc-windows-gnu --example overlaps -- [levels...] [--depth N] [--length N] [--all] [--cull-backs]
 ///
 /// With no levels, every level under data/map. --all also lists pairs that cross only
-/// where no one can see it (walls running into the ground).
+/// where no one can see it (walls running into the ground). --cull-backs sees as the game
+/// does with that flag: a face seen from behind is not drawn (unless its material is
+/// two-sided), so it neither shows nor hides anything. What is left then is what culling
+/// does not fix.
 fn main() -> Result<()> {
     let mut names = Vec::new();
-    let mut opts = Options { depth: 8.0, length: 16.0, all: false };
+    let mut opts = Options { depth: 8.0, length: 16.0, all: false, cull: false };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--depth" => opts.depth = args.next().and_then(|v| v.parse().ok()).unwrap_or(opts.depth),
             "--length" => opts.length = args.next().and_then(|v| v.parse().ok()).unwrap_or(opts.length),
             "--all" => opts.all = true,
+            "--cull-backs" => opts.cull = true,
             _ => names.push(a),
         }
     }
@@ -47,6 +51,7 @@ struct Options {
     depth: f32,
     length: f32,
     all: bool,
+    cull: bool,
 }
 
 type V3 = [f32; 3];
@@ -64,6 +69,8 @@ const EYE_SPACING: f32 = 96.0;
 const SIGHT: f32 = 4000.0;
 /// The most crossings of a pair of rooms to look for, longest first
 const LOOKS: usize = 60;
+/// The most eyes to try on a crossing, nearest first
+const EYES_PER_CROSSING: usize = 400;
 /// How far off the other surface to look at each arm of a crossing
 const ARM: f32 = 6.0;
 /// How far from a crossing a view of it is best, and the least
@@ -76,6 +83,10 @@ struct Tri {
     /// Alpha-tested foliage, fences and the like
     alpha: bool,
     material: usize,
+    /// Shown from behind as well as in front, even when backs are culled
+    two_sided: bool,
+    /// The side it is seen from (its corners turn counterclockwise there)
+    normal: V3,
     p: [V3; 3],
     lo: V3,
     hi: V3,
@@ -96,6 +107,8 @@ struct Scene {
     /// Which query last tested each triangle
     stamp: Vec<u32>,
     query: u32,
+    /// Faces seen from behind are not drawn
+    cull: bool,
 }
 
 fn cell(p: V3) -> [i32; 3] {
@@ -103,7 +116,7 @@ fn cell(p: V3) -> [i32; 3] {
 }
 
 impl Scene {
-    fn new(level: &map::Map) -> Self {
+    fn new(level: &map::Map, cull: bool) -> Self {
         let rooms: HashSet<u32> = level.rooms.rooms.iter().filter_map(|r| r.section_name.parse().ok()).collect();
         // Door leaves and glass panes are kept in their own space, away from where they are drawn
         let doors: HashSet<usize> = door::doors(level).iter().map(|d| d.model_index).collect();
@@ -116,12 +129,15 @@ impl Scene {
             let room = map::object_room(&o.name).filter(|r| rooms.contains(r)).unwrap_or(NO_ROOM);
             let v = |k: u16| o.vertices.get(k as usize).map(|v| [v.x, v.y, v.z]);
             for od in &o.object_datas {
-                let alpha = level.materials.materials.get(od.mn as usize).is_some_and(|m| m.filename.to_ascii_lowercase().ends_with(".tga"));
+                let material = level.materials.materials.get(od.mn as usize);
+                let alpha = material.is_some_and(|m| m.filename.to_ascii_lowercase().ends_with(".tga"));
+                let two_sided = material.is_some_and(|m| m.two_sided);
                 for &(a, b, c) in &od.faces.face_indices {
                     let (Some(a), Some(b), Some(c)) = (v(a), v(b), v(c)) else { continue };
                     let lo = [0, 1, 2].map(|k| a[k].min(b[k]).min(c[k]));
                     let hi = [0, 1, 2].map(|k| a[k].max(b[k]).max(c[k]));
-                    tris.push(Tri { room, object: i, alpha, material: od.mn as usize, p: [a, b, c], lo, hi });
+                    let normal = plane(&[a, b, c]).map_or([0.0; 3], |p| p.0);
+                    tris.push(Tri { room, object: i, alpha, material: od.mn as usize, two_sided, normal, p: [a, b, c], lo, hi });
                 }
             }
         }
@@ -142,7 +158,7 @@ impl Scene {
             }
         }
         let stamp = vec![0; tris.len()];
-        Self { tris, grid, big, stamp, query: 0 }
+        Self { tris, grid, big, stamp, query: 0, cull }
     }
 
     /// Every pair of triangles of different rooms that cross
@@ -179,15 +195,24 @@ impl Scene {
         out
     }
 
+    /// Whether triangle `i` is drawn seen from `from`
+    fn shows(&self, i: usize, from: V3) -> bool {
+        let t = &self.tris[i];
+        !self.cull || t.two_sided || dot(t.normal, sub(from, t.p[0])) > 0.0
+    }
+
     /// The nearest triangle the segment from `a` to `b` passes through: how far along (as a
-    /// fraction of the way) and which, leaving out `skip` and alpha-tested ones
+    /// fraction of the way) and which, leaving out `skip`, alpha-tested ones, and ones seen
+    /// from behind when backs are culled
     fn hit(&mut self, a: V3, b: V3, skip: [usize; 2]) -> Option<(f32, usize)> {
         self.query += 1;
         let q = self.query;
         let d = sub(b, a);
         let mut best: Option<(f32, usize)> = None;
+        let cull = self.cull;
         let try_tri = |i: usize, stamp: &mut Vec<u32>, tris: &Vec<Tri>, best: &mut Option<(f32, usize)>| {
-            if stamp[i] == q || skip.contains(&i) || tris[i].alpha {
+            let t = &tris[i];
+            if stamp[i] == q || skip.contains(&i) || t.alpha || (cull && !t.two_sided && dot(t.normal, d) > 0.0) {
                 return;
             }
             stamp[i] = q;
@@ -331,7 +356,7 @@ struct Pair {
 }
 
 fn report(name: &str, level: &map::Map, opts: &Options) {
-    let mut scene = Scene::new(level);
+    let mut scene = Scene::new(level, opts.cull);
     let crossings = scene.crossings(opts);
     let mut by_pair: BTreeMap<(u32, u32), Vec<&Crossing>> = BTreeMap::new();
     for c in &crossings {
@@ -354,30 +379,44 @@ fn report(name: &str, level: &map::Map, opts: &Options) {
         list.sort_by(|a, b| b.length.total_cmp(&a.length));
         for c in list.iter().take(LOOKS) {
             // Where two surfaces merely meet (a wall running into the ground), one arm of
-            // each is hidden, inside the other's solid. Where both arms of one of them can
-            // be seen, it pokes through the other.
+            // each is hidden, inside the other's solid, from every eye. Where one eye sees
+            // both arms of one of them and an arm of the other, it pokes through the other.
             let mid = lerp(c.ends[0], c.ends[1], 0.5);
-            let mut visible = 0;
-            let mut view = None;
+            let mut arms = Vec::with_capacity(4);
             for (own, other) in [(c.s, c.t), (c.t, c.s)] {
                 let Some((n, d)) = plane(&scene.tris[other].p) else { continue };
                 for side in [1.0f32, -1.0] {
-                    let Some(point) = arm(&scene.tris[own].p, mid, n, d, side) else { continue };
-                    let mut near: Vec<(f32, u32, V3)> = eyes.iter()
-                        .map(|&(room, eye)| (dot(sub(point, eye), sub(point, eye)).sqrt(), room, eye))
-                        .filter(|e| e.0 < SIGHT && e.0 > 1.0)
-                        .collect();
-                    // Nearest first, but from a little way off when it can be, for a view
-                    near.sort_by(|a, b| (a.0 < MIN_VIEW).cmp(&(b.0 < MIN_VIEW)).then(a.0.total_cmp(&b.0)));
-                    for (distance, room, eye) in near {
-                        // Stop just short of the surface, so its neighbors do not hide it
-                        let to = lerp(eye, point, 1.0 - 0.5 / distance);
-                        if scene.hit(eye, to, [own, usize::MAX]).is_none() {
-                            visible += 1;
-                            view = Some((distance, room, eye));
-                            break;
-                        }
+                    if let Some(point) = arm(&scene.tris[own].p, mid, n, d, side) {
+                        arms.push((own, point));
                     }
+                }
+            }
+            let mut near: Vec<(f32, u32, V3)> = eyes.iter()
+                .map(|&(room, eye)| (dot(sub(mid, eye), sub(mid, eye)).sqrt(), room, eye))
+                .filter(|e| e.0 < SIGHT && e.0 > 1.0)
+                .collect();
+            // Nearest first, but from a little way off when it can be, for a view
+            near.sort_by(|a, b| (a.0 < MIN_VIEW).cmp(&(b.0 < MIN_VIEW)).then(a.0.total_cmp(&b.0)));
+            let mut visible = 0;
+            let mut view = None;
+            for &(distance, room, eye) in near.iter().take(EYES_PER_CROSSING) {
+                let mut seen = 0;
+                for (k, &(own, point)) in arms.iter().enumerate() {
+                    // Not enough arms left to make three
+                    if seen + arms.len() - k < 3 {
+                        break;
+                    }
+                    // Stop just short of the surface, so its neighbors do not hide it
+                    let far = dot(sub(point, eye), sub(point, eye)).sqrt();
+                    let to = lerp(eye, point, 1.0 - 0.5 / far);
+                    if scene.shows(own, eye) && scene.hit(eye, to, [own, usize::MAX]).is_none() {
+                        seen += 1;
+                    }
+                }
+                if seen >= 3 {
+                    visible = seen;
+                    view = Some((distance, room, eye));
+                    break;
                 }
             }
             if visible >= 3 {
@@ -403,7 +442,7 @@ fn report(name: &str, level: &map::Map, opts: &Options) {
         .map(|p| (p.room.min(p.opposite_room), p.room.max(p.opposite_room)))
         .collect();
     let rooms = level.rooms.rooms.len();
-    println!("{name}: {rooms} rooms, {} triangles, {} eyes, {} pairs of rooms cross where seen", scene.tris.len(), eyes.len(), pairs.iter().filter(|p| p.1.seen > 0).count());
+    println!("{name}: {rooms} rooms, {} triangles, {} eyes, {} pairs of rooms cross where seen{}", scene.tris.len(), eyes.len(), pairs.iter().filter(|p| p.1.seen > 0).count(), if opts.cull { " (backs culled)" } else { "" });
     // Unlike materials first
     pairs.sort_by(|a, b| (b.1.unlike > 0).cmp(&(a.1.unlike > 0)).then(b.1.seen_length.total_cmp(&a.1.seen_length)));
     for ((a, b), p) in pairs {
