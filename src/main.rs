@@ -1294,7 +1294,8 @@ fn main() {
                         glScissor(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0));
                         // Through the player's room's own doorways, as the original engine does
                         for &(p, plan) in &rr.doorways {
-                            wipe_opening(sim.visibility.polygon(p), plan, cam_eye, level_mode, textured && !room_debug);
+                            let height = sim.visibility.height(rr.room);
+                            wipe_opening(sim.visibility.polygon(p), plan, height, cam_eye, level_mode, textured && !room_debug);
                         }
                         draw_objects(Which::Room(rr.room), &[]);
                     }

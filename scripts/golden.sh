@@ -81,6 +81,9 @@ run z "$D" --level rm02 --doors-open 1 --pos 28527.1,34372,-31874 --yaw -691.6 -
 # One step past rm11's hall door into 119, looking through 119 into 120: the hall's wall in
 # 120's doorway, which shows from the hall (p), must not show (the original hides it too)
 run aa "$D" --level rm11 --doors-open 1 --pos 29495.1,32932,-39551.7 --yaw -51.2 --pitch -2.9 --walk 3 --hold ""
+# rm08's room 105, looking up at the door in the nook between the crates (209): 105's brick
+# wall above the nook must show, not the street beyond it (206)
+run ab "$D" --level rm08 --pos 35561.5,32567,-31217.5 --yaw -17.4 --pitch 16.4 --walk 3 --hold ""
 # Strafe and walk slowly in the demo room
 run f "$D" --demo --walk 120 --hold DRF
 # Record a run and play it back: it must do the same, and every checksum must match

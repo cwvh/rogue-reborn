@@ -57,6 +57,9 @@ pub struct Visibility {
     /// The objects that belong to no room, and the room of each object
     unowned: Vec<usize>,
     object_rooms: Vec<Option<u32>>,
+    /// How low and how high each room's shell goes (the object named after the room, which
+    /// every room has; its door leaves and panes are kept near the origin)
+    heights: HashMap<u32, [f32; 2]>,
 }
 
 impl Visibility {
@@ -128,7 +131,12 @@ impl Visibility {
             }
             object_rooms.push(room);
         }
-        Self { by_room, outdoors, centers, numbers, index, corners, polygons, sides, footprints, objects, unowned, object_rooms }
+        let heights = map.geometries.objects.iter()
+            .filter_map(|o| Some((o.name.parse::<u32>().ok().filter(|n| index.contains_key(n))?, o)))
+            .filter(|(_, o)| !o.vertices.is_empty())
+            .map(|(n, o)| (n, o.vertices.iter().fold([f32::MAX, f32::MIN], |h, v| [h[0].min(v.y), h[1].max(v.y)])))
+            .collect();
+        Self { by_room, outdoors, centers, numbers, index, corners, polygons, sides, footprints, objects, unowned, object_rooms, heights }
     }
 
     /// The volume of a room that meets a portal, floor plan only (min x, min z, max x,
@@ -212,6 +220,11 @@ impl Visibility {
     /// The objects that belong to no room
     pub fn unowned_objects(&self) -> &[usize] {
         &self.unowned
+    }
+
+    /// How low and how high a room's shell goes
+    pub fn height(&self, room: u32) -> Option<[f32; 2]> {
+        self.heights.get(&room).copied()
     }
 
     /// The room an object belongs to, if it belongs to one

@@ -399,11 +399,13 @@ pub unsafe fn draw_plan(node: &visibility::PlanNode<'_>, level: i32, fill_mode: 
 
 /// Wipe the depth in the part of one of the player's room's doorways that is not behind
 /// something nearer, where what is drawn there lies inside the floor plan `plan` of the room
-/// beyond (min x, min z, max x, max z; at any height, seen from `eye`, map space), so that
-/// room, drawn next, shows there in front of it. Rooms overlap: this is what hides rm11's
-/// hall's stairs inside room 119, as the original engine does. The stencil is expected to be
-/// 1 everywhere, and is left so.
-pub unsafe fn wipe_opening(polygon: &[[f32; 3]], plan: [f32; 4], eye: [f32; 3], fill_mode: u32, textured: bool) {
+/// beyond (min x, min z, max x, max z, map space) and within its `height` (low, high), seen
+/// from `eye`, so that room, drawn next, shows there in front of it. Not above or below the
+/// room beyond: it has nothing there to show, and the wipe would open a hole in the player's
+/// room (rm08's nook between the crates is 280 high, and 105's wall above it is inside its
+/// floor plan). Rooms overlap: this is what hides rm11's hall's wall one step into room 119,
+/// as the original engine does. The stencil is expected to be 1 everywhere, and is left so.
+pub unsafe fn wipe_opening(polygon: &[[f32; 3]], plan: [f32; 4], height: Option<[f32; 2]>, eye: [f32; 3], fill_mode: u32, textured: bool) {
     const ALWAYS: u32 = 0x0207;
     const EQUAL: u32 = 0x0202;
     const KEEP: u32 = 0x1E00;
@@ -416,25 +418,27 @@ pub unsafe fn wipe_opening(polygon: &[[f32; 3]], plan: [f32; 4], eye: [f32; 3], 
             }
             glEnd();
         };
-        let quad = |c: [[f32; 3]; 4]| {
-            for p in c {
+        // The room's box, as the six planes bounding it: an axis, where along it, and which
+        // way is out
+        let [x0, z0, x1, z1] = plan;
+        // Tall enough for anything seen through the opening, when the room's height is not known
+        let tall = (polygon.iter().map(|p| p[1]).fold(f32::MAX, f32::min) - 2000.0, polygon.iter().map(|p| p[1]).fold(f32::MIN, f32::max) + 2000.0);
+        // A unit short of the room's top: walls resting on it (rm08's 105 over the nook) meet
+        // the plane there, and along that line the depth test speckles
+        let (y0, y1) = height.map_or(tall, |h| (h[0] - BOX_SLACK, h[1] - 1.0));
+        let planes = [(0, x0, -1.0), (0, x1, 1.0), (1, y0, -1.0), (1, y1, 1.0), (2, z0, -1.0), (2, z1, 1.0)];
+        // A plane as a quad big enough to cover the view, centered on the eye
+        const FAR: f32 = 100_000.0;
+        let plane_quad = |axis: usize, at: f32| {
+            let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+            glBegin(0x0007); // GL_QUADS
+            for (du, dv) in [(-FAR, -FAR), (FAR, -FAR), (FAR, FAR), (-FAR, FAR)] {
+                let mut p = [0.0f32; 3];
+                p[axis] = at;
+                p[u] = eye[u] + du;
+                p[v] = eye[v] + dv;
                 glVertex3f(p[0], p[1], p[2]);
             }
-        };
-        // Where a line of sight through the opening leaves the room's box: its faces turned
-        // away from the camera
-        let [x0, z0, x1, z1] = plan;
-        let past = || {
-            // Tall enough for anything seen through the opening
-            let y0 = polygon.iter().map(|p| p[1]).fold(f32::MAX, f32::min) - 2000.0;
-            let y1 = polygon.iter().map(|p| p[1]).fold(f32::MIN, f32::max) + 2000.0;
-            glBegin(0x0007); // GL_QUADS
-            if eye[0] > x0 { quad([[x0, y0, z0], [x0, y1, z0], [x0, y1, z1], [x0, y0, z1]]); }
-            if eye[0] < x1 { quad([[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]]); }
-            if eye[2] > z0 { quad([[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0]]); }
-            if eye[2] < z1 { quad([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]]); }
-            if eye[1] > y0 { quad([[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]]); }
-            if eye[1] < y1 { quad([[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]]); }
             glEnd();
         };
         glEnable(0x0B90); // GL_STENCIL_TEST
@@ -450,11 +454,18 @@ pub unsafe fn wipe_opening(polygon: &[[f32; 3]], plan: [f32; 4], eye: [f32; 3], 
         glPolygonOffset(2.0, 2.0);
         opening();
         glDisable(0x8037);
-        // Unmark where what is drawn lies beyond the box: a line of sight through the opening
-        // leaves the box once, through its far end or a side, and the box is nearer there
+        // Unmark where what is drawn lies outside the box, on the outer side of one of its
+        // planes: past the plane where the eye is inside it (the plane is nearer), in front of
+        // it where the eye is outside (the plane is farther). Not only the box's far faces: a
+        // line of sight can pass over a low room's box without going through it.
         glStencilFunc(EQUAL, 3, !0);
         glStencilOp(KEEP, KEEP, 0x1E03); // GL_DECR
-        past();
+        for (axis, at, out) in planes {
+            let eye_out = (eye[axis] - at) * out > 0.0;
+            glDepthFunc(if eye_out { 0x0204 } else { 0x0201 }); // GL_GREATER, GL_LESS
+            plane_quad(axis, at);
+        }
+        glDepthFunc(0x0201); // GL_LESS
         // Wipe the depth where the mark is left
         glStencilFunc(EQUAL, 3, !0);
         glStencilOp(KEEP, KEEP, KEEP);

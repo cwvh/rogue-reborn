@@ -115,10 +115,11 @@ portals' whole rectangles. Each room is drawn whole, nearest first, sorted by de
 player's room and the doorways they stand in are cut as in the default drawing
 (`touched_plan`). In the opening of each of the player's room's own doorways, the depth is
 wiped where the surface already drawn lies inside the floor plan of the room beyond there
-(`bounds_at`), so that room shows in front: this is what hides 121's wall one step past the
-hall's door into 119 (view 14), as in the original. (It also hid 121's stairs from the hall;
-since back faces are culled, nothing needs to: they are seen from behind.) The wipe is tested with a box drawn into the stencil (`wipe_opening`), and
-is done only for an opening seen from the room's far side. (`--portal-rects` also wiped the
+(`bounds_at`) and within its height (`Visibility::height`), so that room shows in front: this
+is what hides 121's wall one step past the hall's door into 119 (view 14), as in the
+original. (It also hid 121's stairs from the hall; since back faces are culled, nothing needs
+to: they are seen from behind.) The wipe is tested against the box's six planes in the
+stencil (`wipe_opening`), and is done only for an opening seen from the room's far side. (`--portal-rects` also wiped the
 depth in deeper openings, up to 200 units past them, `OVERLAP_DEPTH`, to hide the wall the
 original shows in 120's doorway; that was the one rule not taken from the original, and it
 was removed on 2026-10-14.)
@@ -164,7 +165,7 @@ compare. `--pos` takes z negated. Status: OK, or what goes wrong.
 | 14 | rm11, one step past the hall's door into 119 | OK | OK (golden aa) | wall gone |
 | 15 | rm02 deck by the stairs to the bridge deck | OK (fixed) | OK (golden y) | crates, railings |
 | 16 | rm02 stairwell's top landing, at the generators' door | OK (fixed) | OK (golden z) | |
-| 17 | rm08 105, the door between the crates (nook 209) | | 206 drawn over 105's wall above the nook; a small turn fixes it | |
+| 17 | rm08 105, the door between the crates (nook 209) | | OK (fixed; golden ab) | |
 
 ```
 1  cargo rr --map data/map/rm08/rm08.map --pos 34202.9,32567.0,-29624.9 --yaw -28.1 --pitch -1.9 --first-person --textured
@@ -185,10 +186,19 @@ compare. `--pos` takes z negated. Status: OK, or what goes wrong.
 17 cargo rr --map data/map/rm08/rm08.map --pos 35561.5,32567.0,-31217.5 --yaw -17.4 --pitch 16.4 --first-person --textured --rooms
 ```
 
-View 17: the nook 209 between two stacks of crates has no ceiling; its top is a second portal
-`p105_209` back up into 105. The plan goes 105, 209, back into 105 through that opening, and on
-to 206 beyond 105's wall, and 206 (whose faces point at the camera) is drawn over the wall
-there. Whether the plan reaches 206 that way changes with the view. `--no-cull` is right.
+View 17: the nook 209 between two stacks of crates is 280 high and open at the top (a second
+portal `p105_209` back up into 105), and 105's brick wall rises from its top, 20 units inside
+its floor plan. The doorway wipe of the nook's opening wiped everything inside that floor plan
+at any height, 105's wall above the nook too; the nook had nothing to draw there, and 206 (the
+street beyond the wall, reached through 111 and the sky) showed through wherever the plan
+reached it, which changed with the view. Fixed on 2026-10-15: the wipe is limited to the room
+beyond's height too (its shell, the object named after it), a unit short of its top, where
+walls rest on it.
+
+That needed a sounder box test. The wipe unmarked only what lies past the box's far faces,
+which holds when every line of sight through the opening goes through the box; with the box
+as tall as the room, one can pass over it (rm08's canal, 521, from the alley: view 5's eave).
+Now it unmarks what is on the outer side of any of the box's six planes.
 
 Also checked in both modes, all fine: rm05's side door from inside and the upper deck, rm11's
 hall, room 119 and the stairs (four directions each), rm12 room 850, rm17 room 24 (but for the
@@ -339,12 +349,10 @@ there are only so many maps, but it is work per map and does not explain anythin
 3. Rerun the overlap audit with the rectangles instead of `--no-cull` (and `--cull-backs`):
    count only crossings where the eye reaches the other room through portals and the crossing
    is inside that room's rectangle. That is the list of overlaps the drawing can still show.
-4. View 17 (rm08's nook): do not plan a room again through a portal back into a room already
-   drawn whole (the nook's ceiling back into 105), or not past it.
-5. If nothing new turns up, remove the per-path drawing (`--portal-paths`: `plan`, most of
+4. If nothing new turns up, remove the per-path drawing (`--portal-paths`: `plan`, most of
    `draw_plan`).
-6. Display lists per room (the frame time on big views).
-7. Characters, decals and glass inside the rectangle of their room (characters show only when
+5. Display lists per room (the frame time on big views).
+6. Characters, decals and glass inside the rectangle of their room (characters show only when
    their room is drawn, but are not limited to its rectangle).
 
 ## Where things are
@@ -362,7 +370,7 @@ there are only so many maps, but it is work per map and does not explain anythin
   `the_room_past_the_next_doorway_is_left_to_the_depth_test`,
   `every_room_in_view_is_planned_once`, `standing_in_a_portal_means_in_its_opening`
   (`src/visibility.rs`), `two_rooms_can_share_a_floor` (`src/collision.rs`); golden
-  scenarios p to aa (`scripts/golden.sh`).
+  scenarios p to ab (`scripts/golden.sh`).
 - BUGS.txt: the spire and the hall's wall. TODO: the stairs hairline, characters through
   walls in the per-path drawing, and the [perf] entries.
 - Local and git-ignored: `debug/perf-instrumentation.patch` (draw counters, prints the plan
