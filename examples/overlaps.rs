@@ -1,4 +1,6 @@
 use anyhow::Result;
+use rogue_reborn::collision::{CollisionWorld, Params};
+use rogue_reborn::visibility::{RectRoom, Visibility};
 use rogue_reborn::{door, glass, levels, map};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
@@ -13,16 +15,28 @@ use std::path::PathBuf;
 /// when nothing stands between it and an eye standing in some room's volume. Each pair of
 /// rooms that crosses where it is seen gets a command for a view of it.
 ///
-///   cargo run --release --target x86_64-pc-windows-gnu --example overlaps -- [levels...] [--depth N] [--length N] [--all] [--cull-backs]
+///   cargo run --release --target x86_64-pc-windows-gnu --example overlaps -- [levels...] [--depth N] [--length N] [--all] [--cull-backs] [--rects]
 ///
 /// With no levels, every level under data/map. --all also lists pairs that cross only
 /// where no one can see it (walls running into the ground). --cull-backs sees as the game
 /// does with that flag: a face seen from behind is not drawn (unless its material is
 /// two-sided), so it neither shows nor hides anything. What is left then is what culling
 /// does not fix.
+///
+/// --rects sees as the default drawing does (backs culled too): from each eye, the rooms the
+/// game would start from (the floors under its feet, doors open) and `rect_plan`'s rooms, each
+/// only within its rectangle, drawn in order with the doorway wipes before them and sorted out
+/// by depth. What is left is what the game shows. (The rectangles are taken from six square
+/// views around the eye, not the game's own, and the cuts near a doorway the player stands in
+/// are left out.)
+///
+/// With --rects, two environment variables look closer: OV_VIEW=x,y,z,yaw,pitch prints the
+/// object the drawing shows at each point of a 32 by 24 grid over a 1024 by 768 frame from that
+/// camera (to check against the game's --rooms screenshot), and OV_EYE=x,y,z with OV_PAIR=a,b
+/// prints that eye's plans and which arms of the pair's crossings it sees.
 fn main() -> Result<()> {
     let mut names = Vec::new();
-    let mut opts = Options { depth: 8.0, length: 16.0, all: false, cull: false };
+    let mut opts = Options { depth: 8.0, length: 16.0, all: false, cull: false, rects: false };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -30,6 +44,10 @@ fn main() -> Result<()> {
             "--length" => opts.length = args.next().and_then(|v| v.parse().ok()).unwrap_or(opts.length),
             "--all" => opts.all = true,
             "--cull-backs" => opts.cull = true,
+            "--rects" => {
+                opts.rects = true;
+                opts.cull = true;
+            }
             _ => names.push(a),
         }
     }
@@ -52,6 +70,7 @@ struct Options {
     length: f32,
     all: bool,
     cull: bool,
+    rects: bool,
 }
 
 type V3 = [f32; 3];
@@ -288,6 +307,61 @@ impl Scene {
         None
     }
 
+    /// Every triangle the segment from `a` to `b` passes through, nearest first: how far
+    /// along (as a fraction of the way) and which, leaving out alpha-tested ones
+    fn along(&mut self, a: V3, b: V3) -> Vec<(f32, usize)> {
+        self.query += 1;
+        let q = self.query;
+        let d = sub(b, a);
+        let mut out = Vec::new();
+        let mut try_tri = |i: usize, stamp: &mut Vec<u32>, tris: &Vec<Tri>| {
+            if stamp[i] == q || tris[i].alpha {
+                return;
+            }
+            stamp[i] = q;
+            if let Some(t) = segment_hits(a, d, &tris[i].p) {
+                out.push((t, i));
+            }
+        };
+        for &i in &self.big {
+            try_tri(i, &mut self.stamp, &self.tris);
+        }
+        let mut c = cell(a);
+        let end = cell(b);
+        let mut t_max = [0.0f32; 3];
+        let mut t_delta = [0.0f32; 3];
+        let mut step = [0i32; 3];
+        for k in 0..3 {
+            if d[k].abs() < 1e-9 {
+                t_max[k] = f32::INFINITY;
+                t_delta[k] = f32::INFINITY;
+            } else {
+                step[k] = if d[k] > 0.0 { 1 } else { -1 };
+                let edge = (c[k] + if d[k] > 0.0 { 1 } else { 0 }) as f32 * CELL;
+                t_max[k] = (edge - a[k]) / d[k];
+                t_delta[k] = CELL / d[k].abs();
+            }
+        }
+        loop {
+            if let Some(list) = self.grid.get(&c) {
+                for &i in list {
+                    try_tri(i, &mut self.stamp, &self.tris);
+                }
+            }
+            if c == end {
+                break;
+            }
+            let k = if t_max[0] < t_max[1] { if t_max[0] < t_max[2] { 0 } else { 2 } } else if t_max[1] < t_max[2] { 1 } else { 2 };
+            if t_max[k] > 1.0 {
+                break;
+            }
+            c[k] += step[k];
+            t_max[k] += t_delta[k];
+        }
+        out.sort_by(|x, y| x.0.total_cmp(&y.0));
+        out
+    }
+
     /// Where a player's eyes could be: on a grid over each of the room's volumes, at eye
     /// height over the floor found below
     fn eyes(&mut self, level: &map::Map) -> Vec<(u32, V3)> {
@@ -338,6 +412,174 @@ fn floor_up(p: V3) -> V3 {
     [p[0], p[1] + 1.0, p[2]]
 }
 
+/// One of six square views around an eye (90 degrees across), as a camera's axes
+struct Face {
+    forward: V3,
+    right: V3,
+    up: V3,
+    /// From the slope off the forward axis to the screen's -1..1
+    scale: [f32; 2],
+}
+
+fn faces() -> [Face; 6] {
+    let axes: [V3; 6] = [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0]];
+    axes.map(|forward| {
+        let hint = if forward[1].abs() > 0.5 { [0.0, 0.0, 1.0] } else { [0.0, 1.0, 0.0] };
+        let right = cross(forward, hint);
+        let up = cross(right, forward);
+        Face { forward, right, up, scale: [1.0, 1.0] }
+    })
+}
+
+/// The game's camera: 60 degrees high on a 4:3 screen, turned as `--yaw` and `--pitch` turn it
+/// (the camera works with z negated, as `--pos` takes it)
+fn game_view(yaw: f32, pitch: f32, aspect: f32) -> Face {
+    let (y, p) = (yaw.to_radians(), pitch.to_radians());
+    let forward = [-y.sin() * p.cos(), p.sin(), -y.cos() * p.cos()];
+    let right = [y.cos(), 0.0, -y.sin()];
+    let up = cross(right, forward);
+    let flip = |v: V3| [v[0], v[1], -v[2]];
+    let t = 30f32.to_radians().tan();
+    Face { forward: flip(forward), right: flip(right), up: flip(up), scale: [1.0 / (t * aspect), 1.0 / t] }
+}
+
+/// What the default drawing does from one eye: the rooms it starts from, and each face's
+/// rectangle plan
+struct Seer {
+    eye: V3,
+    starts: Vec<u32>,
+    faces: Vec<Face>,
+    plans: Vec<Vec<RectRoom>>,
+}
+
+/// The game's side of the level: rooms, portals and floors. Doors are taken open: players
+/// open them, and the door leaves are left out of the scene.
+struct Game {
+    visibility: Visibility,
+    world: CollisionWorld,
+    blocked: Vec<bool>,
+}
+
+impl Game {
+    fn new(level: &map::Map) -> Self {
+        let visibility = Visibility::new(level);
+        let world = CollisionWorld::from_map(level, Params::default());
+        let blocked = vec![false; level.portals.portals.len()];
+        Self { visibility, world, blocked }
+    }
+
+    fn seer(&self, level: &map::Map, eye: V3) -> Option<Seer> {
+        self.seer_through(level, eye, faces().into())
+    }
+
+    fn seer_through(&self, level: &map::Map, eye: V3, faces: Vec<Face>) -> Option<Seer> {
+        let feet = [eye[0], eye[1] - EYE, eye[2]];
+        let starts: Vec<u32> = self.world.floor_rooms(feet).into_iter().filter(|&n| self.visibility.is_room(n)).collect();
+        if starts.is_empty() {
+            return None;
+        }
+        let body = [[feet[0], feet[1] + 10.0, feet[2]], eye];
+        let plans = faces.iter().map(|f| {
+            let clip = |p: [f32; 3]| {
+                let d = sub(p, eye);
+                [dot(d, f.right) * f.scale[0], dot(d, f.up) * f.scale[1], 0.0, dot(d, f.forward)]
+            };
+            self.visibility.rect_plan(level, &starts, &body, eye, &self.blocked, &clip)
+        }).collect();
+        Some(Seer { eye, starts, faces, plans })
+    }
+
+    /// Whether the drawing shows triangle `own` at `point`, seen from the seer's eye
+    fn shows(&self, scene: &mut Scene, seer: &Seer, own: usize, point: V3) -> bool {
+        let to = sub(point, seer.eye);
+        let distance = dot(to, to).sqrt();
+        // Everything along the line of sight, a little past the point
+        self.surface(scene, seer, to.map(|c| c / distance), distance + 300.0)
+            .is_some_and(|(d, i)| i == own && (d - distance).abs() < 1.0)
+    }
+
+    /// What the drawing shows along `dir` (a unit vector) from the seer's eye, out to `reach`:
+    /// how far, and which triangle
+    fn surface(&self, scene: &mut Scene, seer: &Seer, dir: V3, reach: f32) -> Option<(f32, usize)> {
+        let eye = seer.eye;
+        let (f, face) = seer.faces.iter().enumerate().max_by(|a, b| dot(dir, a.1.forward).total_cmp(&dot(dir, b.1.forward))).unwrap();
+        let w = dot(dir, face.forward);
+        if w <= 0.0 {
+            return None;
+        }
+        let at = [dot(dir, face.right) / w * face.scale[0], dot(dir, face.up) / w * face.scale[1]];
+        let hits: Vec<(f32, usize)> = scene.along(eye, [eye[0] + dir[0] * reach, eye[1] + dir[1] * reach, eye[2] + dir[2] * reach]).into_iter()
+            .map(|(t, i)| (t * reach, i))
+            .filter(|&(_, i)| scene.shows(i, eye))
+            .collect();
+        let nearest = |room: u32| hits.iter().find(|&&(_, i)| scene.tris[i].room == room).copied();
+        let mut depth: Option<(f32, usize)> = None;
+        let draw = |room: u32, depth: &mut Option<(f32, usize)>| {
+            if let Some(h) = nearest(room) {
+                if depth.is_none_or(|d| h.0 < d.0) {
+                    *depth = Some(h);
+                }
+            }
+        };
+        draw(NO_ROOM, &mut depth);
+        for &r in &seer.starts {
+            draw(r, &mut depth);
+        }
+        for rr in seer.plans[f].iter().filter(|rr| !seer.starts.contains(&rr.room)) {
+            let r = rr.rect;
+            if at[0] < r[0] || at[0] > r[2] || at[1] < r[1] || at[1] > r[3] {
+                continue;
+            }
+            // The doorway wipes, before the room is drawn
+            for &(p, plan) in &rr.doorways {
+                let Some((through, _)) = depth else { break };
+                let Some(opening) = crosses_polygon(eye, dir, self.visibility.polygon(p)) else { continue };
+                if opening >= through {
+                    continue;
+                }
+                let s = [eye[0] + dir[0] * through, eye[1] + dir[1] * through, eye[2] + dir[2] * through];
+                let height = self.visibility.height(rr.room).map_or([f32::MIN, f32::MAX], |h| [h[0] - 0.25, h[1] - 1.0]);
+                if s[0] >= plan[0] && s[0] <= plan[2] && s[2] >= plan[1] && s[2] <= plan[3] && s[1] >= height[0] && s[1] <= height[1] {
+                    depth = None;
+                }
+            }
+            draw(rr.room, &mut depth);
+        }
+        depth
+    }
+}
+
+/// How far along `dir` from `from` the line crosses inside a convex polygon
+fn crosses_polygon(from: V3, dir: V3, polygon: &[V3]) -> Option<f32> {
+    if polygon.len() < 3 {
+        return None;
+    }
+    let n = cross(sub(polygon[1], polygon[0]), sub(polygon[2], polygon[0]));
+    let along = dot(n, dir);
+    if along.abs() < 1e-9 {
+        return None;
+    }
+    let t = dot(n, sub(polygon[0], from)) / along;
+    if t <= 0.0 {
+        return None;
+    }
+    let p = [from[0] + dir[0] * t, from[1] + dir[1] * t, from[2] + dir[2] * t];
+    let mut sign = 0.0f32;
+    for k in 0..polygon.len() {
+        let (a, b) = (polygon[k], polygon[(k + 1) % polygon.len()]);
+        let s = dot(cross(sub(b, a), sub(p, a)), n);
+        if s.abs() < 1e-6 {
+            continue;
+        }
+        if sign == 0.0 {
+            sign = s.signum();
+        } else if s.signum() != sign {
+            return None;
+        }
+    }
+    Some(t)
+}
+
 /// What two rooms' crossings add up to
 #[derive(Default)]
 struct Pair {
@@ -366,6 +608,60 @@ fn report(name: &str, level: &map::Map, opts: &Options) {
         }
     }
     let eyes = scene.eyes(level);
+    let game = opts.rects.then(|| Game::new(level));
+    // OV_VIEW=x,y,z,yaw,pitch (as --pos, --yaw and --pitch take them): the object the drawing
+    // shows at each pixel of a 32 by 24 grid of a 1024 by 768 frame, to check against the
+    // game's --rooms screenshot
+    if let (Ok(v), Some(g)) = (std::env::var("OV_VIEW"), &game) {
+        let v: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+        let eye = [v[0], v[1], -v[2]];
+        let face = game_view(v[3], v[4], 1024.0 / 768.0);
+        let (fw, rt, up, sc) = (face.forward, face.right, face.up, face.scale);
+        if let Some(seer) = g.seer_through(level, eye, vec![face]) {
+            for gy in 0..24 {
+                for gx in 0..32 {
+                    let (px, py) = (gx * 32 + 16, gy * 32 + 16);
+                    let (nx, ny) = ((px as f32 + 0.5) / 512.0 - 1.0, 1.0 - (py as f32 + 0.5) / 384.0);
+                    let d = [0, 1, 2].map(|k| fw[k] + rt[k] * nx / sc[0] + up[k] * ny / sc[1]);
+                    let len = dot(d, d).sqrt();
+                    let name = g.surface(&mut scene, &seer, d.map(|c| c / len), SIGHT * 4.0)
+                        .map_or("-".to_string(), |(_, i)| level.geometries.objects[scene.tris[i].object].name.clone());
+                    println!("pixel {px} {py} {name}");
+                }
+            }
+        }
+        return;
+    }
+    // OV_EYE=x,y,z (as --pos takes it) and OV_PAIR=a,b: what the drawing shows of that pair's
+    // crossings from there
+    if let (Ok(e), Ok(pr), Some(g)) = (std::env::var("OV_EYE"), std::env::var("OV_PAIR"), &game) {
+        let v: Vec<f32> = e.split(',').filter_map(|x| x.parse().ok()).collect();
+        let eye = [v[0], v[1], -v[2]];
+        let pr: Vec<u32> = pr.split(',').filter_map(|x| x.parse().ok()).collect();
+        let seer = g.seer(level, eye);
+        println!("starts {:?}", seer.as_ref().map(|s| s.starts.clone()));
+        if let Some(seer) = seer {
+            for (f, plan) in seer.plans.iter().enumerate() {
+                println!("face {f}: {:?}", plan.iter().map(|r| (r.room, r.rect.map(|x| (x * 100.0).round() / 100.0), r.doorways.len())).collect::<Vec<_>>());
+            }
+            for c in &crossings {
+                let (s, t) = (&scene.tris[c.s], &scene.tris[c.t]);
+                if !((s.room == pr[0] && t.room == pr[1]) || (s.room == pr[1] && t.room == pr[0])) || s.alpha || t.alpha { continue; }
+                let mid = lerp(c.ends[0], c.ends[1], 0.5);
+                let mut shown = Vec::new();
+                for (own, other) in [(c.s, c.t), (c.t, c.s)] {
+                    let Some((n, d)) = plane(&scene.tris[other].p) else { continue };
+                    for side in [1.0f32, -1.0] {
+                        if let Some(point) = arm(&scene.tris[own].p, mid, n, d, side) {
+                            shown.push((scene.tris[own].room, g.shows(&mut scene, &seer, own, point)));
+                        }
+                    }
+                }
+                println!("crossing at {:.0},{:.0},{:.0}: {:?}", mid[0], mid[1], -mid[2], shown);
+            }
+        }
+    }
+    let mut seers: HashMap<usize, Option<Seer>> = HashMap::new();
 
     let mut pairs: Vec<((u32, u32), Pair)> = Vec::new();
     for (key, mut list) in by_pair {
@@ -391,15 +687,22 @@ fn report(name: &str, level: &map::Map, opts: &Options) {
                     }
                 }
             }
-            let mut near: Vec<(f32, u32, V3)> = eyes.iter()
-                .map(|&(room, eye)| (dot(sub(mid, eye), sub(mid, eye)).sqrt(), room, eye))
+            let mut near: Vec<(f32, u32, V3, usize)> = eyes.iter().enumerate()
+                .map(|(k, &(room, eye))| (dot(sub(mid, eye), sub(mid, eye)).sqrt(), room, eye, k))
                 .filter(|e| e.0 < SIGHT && e.0 > 1.0)
                 .collect();
             // Nearest first, but from a little way off when it can be, for a view
             near.sort_by(|a, b| (a.0 < MIN_VIEW).cmp(&(b.0 < MIN_VIEW)).then(a.0.total_cmp(&b.0)));
             let mut visible = 0;
             let mut view = None;
-            for &(distance, room, eye) in near.iter().take(EYES_PER_CROSSING) {
+            for &(distance, room, eye, k) in near.iter().take(EYES_PER_CROSSING) {
+                let seer = match &game {
+                    Some(g) => match seers.entry(k).or_insert_with(|| g.seer(level, eye)) {
+                        Some(s) => Some(&*s),
+                        None => continue,
+                    },
+                    None => None,
+                };
                 let mut seen = 0;
                 for (k, &(own, point)) in arms.iter().enumerate() {
                     // Not enough arms left to make three
@@ -409,7 +712,11 @@ fn report(name: &str, level: &map::Map, opts: &Options) {
                     // Stop just short of the surface, so its neighbors do not hide it
                     let far = dot(sub(point, eye), sub(point, eye)).sqrt();
                     let to = lerp(eye, point, 1.0 - 0.5 / far);
-                    if scene.shows(own, eye) && scene.hit(eye, to, [own, usize::MAX]).is_none() {
+                    let shown = match (&game, seer) {
+                        (Some(g), Some(s)) => g.shows(&mut scene, s, own, point),
+                        _ => scene.shows(own, eye) && scene.hit(eye, to, [own, usize::MAX]).is_none(),
+                    };
+                    if shown {
                         seen += 1;
                     }
                 }
@@ -442,7 +749,7 @@ fn report(name: &str, level: &map::Map, opts: &Options) {
         .map(|p| (p.room.min(p.opposite_room), p.room.max(p.opposite_room)))
         .collect();
     let rooms = level.rooms.rooms.len();
-    println!("{name}: {rooms} rooms, {} triangles, {} eyes, {} pairs of rooms cross where seen{}", scene.tris.len(), eyes.len(), pairs.iter().filter(|p| p.1.seen > 0).count(), if opts.cull { " (backs culled)" } else { "" });
+    println!("{name}: {rooms} rooms, {} triangles, {} eyes, {} pairs of rooms cross where seen{}", scene.tris.len(), eyes.len(), pairs.iter().filter(|p| p.1.seen > 0).count(), if opts.rects { " (as the default drawing)" } else if opts.cull { " (backs culled)" } else { "" });
     // Unlike materials first
     pairs.sort_by(|a, b| (b.1.unlike > 0).cmp(&(a.1.unlike > 0)).then(b.1.seen_length.total_cmp(&a.1.seen_length)));
     for ((a, b), p) in pairs {
@@ -464,7 +771,9 @@ fn report(name: &str, level: &map::Map, opts: &Options) {
             let len = dot(d, d).sqrt();
             let pitch = (d[1] / len).asin().to_degrees();
             let yaw = (-d[0]).atan2(d[2]).to_degrees();
-            println!("        cargo rr --level {name} --pos {:.0},{:.0},{:.0} --yaw {yaw:.1} --pitch {pitch:.1} --first-person --textured --no-cull", eye[0], eye[1], -eye[2]);
+            // Seen as the default drawing sees it, with the doors open; else with every room drawn
+            let mode = if opts.rects { "--doors-open 1" } else if opts.cull { "--no-cull" } else { "--no-cull --no-cull-backs" };
+            println!("        cargo rr --level {name} --pos {:.0},{:.0},{:.0} --yaw {yaw:.1} --pitch {pitch:.1} --first-person --textured {mode}", eye[0], eye[1], -eye[2]);
         }
     }
 }
