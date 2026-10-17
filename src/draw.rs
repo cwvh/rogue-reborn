@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use rogue_reborn::{map, crp, glass, visibility};
 use crate::opengl::*;
-use crate::textures::ensure_texture;
+use crate::textures::{ensure_texture, is_tga};
 
 pub struct Mesh {
     pub vertices: Vec<[f32; 3]>,
@@ -59,17 +59,18 @@ pub fn draw_weapon(wd: &WeaponDraw, textured: bool, flash: bool) {
 // positions and `face` replaces the HRT placeholder face texture.
 pub fn draw_character(c: &crp::Crp, verts: &[[f32; 3]], part_textures: &[Option<u32>], face: Option<u32>, textured: bool) {
     unsafe {
-    // Opaque parts first, then glass (.tga materials) blended over them
-    for glass_pass in [false, true] {
+    // Opaque parts first, then the see-through ones (.tga materials) blended over them
+    for alpha_pass in [false, true] {
     for (pi, part) in c.parts.iter().enumerate() {
-        let is_glass = part.material.to_ascii_lowercase().ends_with(".tga");
-        if is_glass != glass_pass { continue; }
+        // See-through surfaces, like a visor or goggles
+        let has_alpha = is_tga(&part.material);
+        if has_alpha != alpha_pass { continue; }
         // The HRT placeholder face is replaced by the team member's own
         let is_face = part.material.eq_ignore_ascii_case("hrt_face.bmp");
         let tex = if is_face { face } else { None }
             .or(part_textures.get(pi).copied().flatten());
         let uvs = &part.corner_uvs;
-        if is_glass && textured { glEnable(0x0BE2); glBlendFunc(0x0302, 0x0303); } // GL_BLEND, SRC_ALPHA, ONE_MINUS_SRC_ALPHA
+        if has_alpha && textured { glEnable(0x0BE2); glBlendFunc(0x0302, 0x0303); } // GL_BLEND, SRC_ALPHA, ONE_MINUS_SRC_ALPHA
         // Solid mode shows the texture; wireframe shows flat color lines
         if let (true, Some(id)) = (textured, tex) {
             glEnable(0x0DE1); // GL_TEXTURE_2D
@@ -77,8 +78,8 @@ pub fn draw_character(c: &crp::Crp, verts: &[[f32; 3]], part_textures: &[Option<
             glColor4f(1.0, 1.0, 1.0, 1.0);
         } else {
             glDisable(0x0DE1);
-            if textured && is_glass {
-                // Glass with no texture file: faint tinted pane
+            if textured && has_alpha {
+                // See-through part with no texture file: faint tinted pane
                 glColor4f(0.45, 0.55, 0.65, 0.2);
             } else if textured {
                 glColor4f(0.3, 0.35, 0.4, 1.0);
@@ -96,7 +97,7 @@ pub fn draw_character(c: &crp::Crp, verts: &[[f32; 3]], part_textures: &[Option<
             }
         }
         glEnd();
-        if is_glass { glDisable(0x0BE2); }
+        if has_alpha { glDisable(0x0BE2); }
     }
     }
     }

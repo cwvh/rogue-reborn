@@ -55,8 +55,7 @@ pub const SPRITE_MODES: [&str; 3] = ["writes depth, offset toward the camera", "
 /// pixels are nearly all solid or clear (a wheel's face), which blending would only soften
 /// at the edges. Glass panes are drawn apart.
 fn sprite_blend(m: &map::Material, map_num: &str) -> Option<bool> {
-    let is_tga = m.filename.to_ascii_lowercase().ends_with(".tga");
-    if !is_tga || m.two_sided {
+    if !textures::is_tga(&m.filename) || m.two_sided {
         return None;
     }
     let glows = m.emissive_strength != 0;
