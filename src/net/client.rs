@@ -9,6 +9,7 @@
 use std::collections::VecDeque;
 
 use crate::collision::Player;
+use crate::net::animation::TELEPORT;
 use crate::net::link::{Addr, Link};
 use crate::net::meter::Meter;
 use crate::net::proto::{INPUTS_PER_PACKET, Setup, Snapshot, ToClient, ToServer};
@@ -16,8 +17,9 @@ use crate::sim::{Event, Input, Sim, TICK};
 
 type V3 = [f32; 3];
 
-/// Where one other player was in a snapshot: their slot, position and look
-pub type Seen = (usize, V3, (u16, u16));
+/// Where one other player was in a snapshot: their slot, position and look, and if they were dead,
+/// when (server time) they come back
+pub type Seen = (usize, V3, (u16, u16), Option<f32>);
 
 /// A grenade in the air: who threw it, where it is and how far it has turned
 pub type Flying = (u8, V3, f32);
@@ -26,6 +28,8 @@ pub type Flying = (u8, V3, f32);
 /// characters (position and facing in degrees) and the grenades
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Frame {
+    /// The server's clock at that moment
+    pub time: f32,
     pub players: Vec<Seen>,
     pub npcs: Vec<(V3, f32)>,
     pub grenades: Vec<Flying>,
@@ -239,7 +243,8 @@ impl Client {
     fn remember(&mut self, now: f64, snap: &Snapshot) {
         self.arrived = now;
         self.history.push_back((snap.tick, Frame {
-            players: snap.players.iter().map(|p| (p.slot as usize, p.pos, p.look)).collect(),
+            time: snap.time,
+            players: snap.players.iter().map(|p| (p.slot as usize, p.pos, p.look, p.respawn_at)).collect(),
             npcs: snap.npcs.iter().map(|n| (n.pos, n.yaw)).collect(),
             grenades: snap.thrown.iter().map(|t| (t.owner, t.pos, t.spin)).collect(),
         }));
@@ -316,10 +321,14 @@ fn blend(history: &VecDeque<(u32, Frame)>, t: f64) -> Frame {
     let (a, b) = (&a.1, &b.1);
     let lerp = |from: V3, to: V3| [0, 1, 2].map(|i| from[i] + (to[i] - from[i]) * f);
 
-    let players = b.players.iter().map(|&(slot, pos, look)| match a.players.iter().find(|s| s.0 == slot) {
+    let players = b.players.iter().map(|&(slot, pos, look, dead)| match a.players.iter().find(|s| s.0 == slot) {
         // Just arrived in the game: there is nothing earlier to move from
-        None => (slot, pos, look),
-        Some(&(_, from, from_look)) => (slot, lerp(from, pos), (turn_between(from_look.0, look.0, f), turn_between(from_look.1, look.1, f))),
+        None => (slot, pos, look, dead),
+        // Came back, or was put somewhere else: as they were until the moment they are not
+        Some(&earlier @ (_, from, ..)) if earlier.3.is_some() != dead.is_some() || distance(from, pos) > TELEPORT => {
+            if f < 1.0 { earlier } else { (slot, pos, look, dead) }
+        }
+        Some(&(_, from, from_look, _)) => (slot, lerp(from, pos), (turn_between(from_look.0, look.0, f), turn_between(from_look.1, look.1, f)), dead),
     }).collect();
 
     let npcs = if a.npcs.len() == b.npcs.len() {
@@ -339,7 +348,11 @@ fn blend(history: &VecDeque<(u32, Frame)>, t: f64) -> Frame {
             None => (owner, pos, spin),
         }
     }).collect();
-    Frame { players, npcs, grenades }
+    Frame { time: a.time + (b.time - a.time) * f, players, npcs, grenades }
+}
+
+fn distance(a: V3, b: V3) -> f32 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
 
 /// A quantized angle part of the way from `a` to `b`, by the shorter way round
@@ -359,7 +372,8 @@ mod tests {
 
     fn history(points: &[(u32, f32, u16)]) -> VecDeque<(u32, Frame)> {
         points.iter().map(|&(t, x, yaw)| (t, Frame {
-            players: vec![(1, [x, 0.0, 0.0], (yaw, 0))],
+            time: t as f32 * TICK,
+            players: vec![(1, [x, 0.0, 0.0], (yaw, 0), None)],
             npcs: vec![([x, 0.0, 0.0], yaw as f32)],
             grenades: vec![(2, [x, 1.0, 0.0], x * 10.0)],
         })).collect()
@@ -373,6 +387,23 @@ mod tests {
         assert_eq!(blend(&h, 11.0).players[0].2.0, 50);
         assert_eq!(blend(&h, 5.0).players[0].1[0], 0.0);
         assert_eq!(blend(&h, 99.0).players[0].1[0], 6.0);
+    }
+
+    #[test]
+    fn a_player_who_comes_back_is_not_slid_across_the_map() {
+        let mut h = history(&[(10, 0.0, 0), (12, 0.0, 0), (14, 2000.0, 0), (16, 2010.0, 0)]);
+        h[0].1.players[0].3 = Some(1.0);
+        h[1].1.players[0].3 = Some(1.0);
+        // Dead and lying still, then still dead right up to the snapshot they are back in
+        assert_eq!(blend(&h, 11.0).players[0], (1, [0.0; 3], (0, 0), Some(1.0)));
+        assert_eq!(blend(&h, 13.9).players[0], (1, [0.0; 3], (0, 0), Some(1.0)));
+        assert_eq!(blend(&h, 14.0).players[0], (1, [2000.0, 0.0, 0.0], (0, 0), None));
+        // And alive, they move smoothly again
+        assert_eq!(blend(&h, 15.0).players[0].1[0], 2005.0);
+        // Put far away while alive is no slide either
+        let h = history(&[(10, 0.0, 0), (12, 1000.0, 0)]);
+        assert_eq!(blend(&h, 11.0).players[0].1[0], 0.0);
+        assert_eq!(blend(&h, 11.0).time, 11.0 * TICK);
     }
 
     #[test]

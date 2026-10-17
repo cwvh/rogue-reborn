@@ -14,8 +14,8 @@ const SMOOTHING: f32 = 12.0;
 /// Slower than this (units a second, at normal speed) is standing still
 const STILL: f32 = 60.0;
 
-/// Further than this in a frame is not walking but being put somewhere else
-const TELEPORT: f32 = 250.0;
+/// Further than this in a frame (or between two snapshots) is not walking but being put somewhere else
+pub const TELEPORT: f32 = 250.0;
 
 /// What a player is doing besides moving, as the snapshots say. Progress is from 0 to 1.
 #[derive(Clone, Copy, Debug, Default)]

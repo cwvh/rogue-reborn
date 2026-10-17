@@ -1413,12 +1413,14 @@ fn main() {
             if let Some(chars) = &sim.characters {
                 glDisable(0x0DE1); // GL_TEXTURE_2D
                 let others = view.as_ref().map_or(&[][..], |v| &v.players[..]);
-                for &(slot, pos, look) in others.iter().filter(|(i, ..)| *i != me) {
+                // Alive or dead as the view has them, at the moment it shows, not as the newest snapshot says
+                let view_time = view.as_ref().map_or(game_time, |v| v.time);
+                for &(slot, pos, look, dead) in others.iter().filter(|(i, ..)| *i != me) {
                     let visible = shown(pos);
                     let p = &sim.players[slot];
                     let yaw = sim::dequantize(look.0);
                     let face = (!actors.is_empty()).then(|| face_textures[slot % actors.len()].0).flatten();
-                    if p.respawn_at.is_none() {
+                    if dead.is_none() {
                         let doing = Doing {
                             throwing: p.throw.map(|t| (game_time - t.start) / sim::THROW_SECONDS),
                             reloading: p.reload_until.map(|t| 1.0 - (t - game_time) / sim::RELOAD_SECONDS),
@@ -1439,11 +1441,17 @@ fn main() {
                     if !visible {
                         continue;
                     }
-                    // Without the player animations, or when dead: a character, lying where they
-                    // fell until they come back
+                    // Without the player animations, or when dead: a character, falling where they
+                    // died. Once the fall is over the body is gone, so that nobody sees it put
+                    // where they come back.
                     let mut health = combat::Health::new();
-                    if let Some(until) = p.respawn_at {
-                        health.state = combat::NpcState::Dead { motion: "thdu_1", start: until - sim::RESPAWN_SECONDS };
+                    if let Some(until) = dead {
+                        let start = until - sim::RESPAWN_SECONDS;
+                        let frames = chars.motions.get(sim::PLAYER_DEATH_MOTION).map_or(0, |m| m.frames);
+                        if (view_time - start) * 30.0 >= frames as f32 {
+                            continue;
+                        }
+                        health.state = combat::NpcState::Dead { motion: sim::PLAYER_DEATH_MOTION, start };
                     }
                     let ghost = Npc {
                         health,
@@ -1454,7 +1462,7 @@ fn main() {
                         stagger: slot as f32 * 0.73,
                     };
                     let idle = game_time * 30.0 + ghost.stagger * 9.0;
-                    let posed = chars.pose(&ghost, game_time, idle);
+                    let posed = chars.pose(&ghost, view_time, idle);
                     let verts: &[[f32; 3]] = if posed.is_empty() { &chars.model.vertices } else { &posed };
                     glPushMatrix();
                     glTranslatef(ghost.pos[0], ghost.pos[1], ghost.pos[2]);

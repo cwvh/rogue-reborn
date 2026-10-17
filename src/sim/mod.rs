@@ -34,9 +34,13 @@ pub const TICK: f32 = 1.0 / 60.0;
 /// How long a reload takes
 pub const RELOAD_SECONDS: f32 = 2.2;
 
-/// A player's health at the start, and how long a dead player waits to come back
+/// A player's health at the start
 pub const PLAYER_HP: f32 = 100.0;
-pub const RESPAWN_SECONDS: f32 = 3.0;
+
+/// How a dead player falls, and how long they wait to come back: long enough for the fall to play
+/// out (111 frames at 30 a second), so that the body is gone before they appear somewhere else
+pub const PLAYER_DEATH_MOTION: &str = "thdu_1";
+pub const RESPAWN_SECONDS: f32 = 3.7;
 
 /// How wide a player is to a bullet
 const HIT_RADIUS: f32 = 25.0;
@@ -1485,6 +1489,16 @@ mod tests {
         sim.pvp = false;
         sim.tick(&[aim(0.0), holding()], TICK);
         assert_eq!(sim.players[1].hp, 100.0);
+    }
+
+    #[test]
+    fn a_dead_player_falls_for_the_whole_of_the_wait() {
+        let path = std::path::Path::new("data/motion").join(format!("{PLAYER_DEATH_MOTION}.DAM"));
+        if !path.exists() {
+            return;
+        }
+        let frames = crate::motion::read(&path).unwrap().frames;
+        assert!(frames as f32 / 30.0 <= RESPAWN_SECONDS, "{PLAYER_DEATH_MOTION} takes {frames} frames");
     }
 
     #[test]

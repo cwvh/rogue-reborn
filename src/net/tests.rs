@@ -451,3 +451,35 @@ fn the_lag_meter_sees_the_latency_jitter_and_loss_of_a_bad_connection() {
     // Other players are shown later than on a clean connection by at least the trip
     assert!(f.view - clean.view > 0.08, "{f:?} against {clean:?}");
 }
+
+#[test]
+fn others_see_a_dead_player_fall_and_then_appear_where_they_come_back() {
+    let mut game = Game::new(Conditions::broadband());
+    game.server.sim.pvp = true;
+    let bot = game.join_bot(Skill::hard(), 3);
+    // Pacing to and fro, so that where they die is never a spawn point
+    let target = game.join(|t| Input { forward: (t / 40) % 2 == 0, back: (t / 40) % 2 == 1, ..run_key() });
+    let mut last: Option<([f32; 3], bool)> = None;
+    let (mut died_at, mut comebacks) = (None, 0);
+    for _ in 0..(25.0 / TICK) as usize {
+        game.step();
+        let now = game.steps as f64 * TICK as f64;
+        let slot = game.peers[target].client.slot();
+        let view = game.peers[bot].client.view(now);
+        let Some(&(_, pos, _, dead)) = view.players.iter().find(|p| p.0 == slot) else { continue };
+        match (last, dead.is_some()) {
+            (Some((_, false)), true) => died_at = Some(pos),
+            (Some((_, true)), false) => {
+                // Not standing up where they fell, and not slid there from it
+                let fell = died_at.expect("seen to die first");
+                assert!(distance(pos, fell) > 1.0, "came back at {pos:?}, where they died");
+                assert!((0..MAX_PLAYERS).any(|i| distance(pos, [-300.0 + i as f32 * 80.0, 0.0, -350.0]) < 30.0), "came back at {pos:?}, which is no spawn point");
+                comebacks += 1;
+            }
+            (Some((before, false)), false) => assert!(distance(pos, before) < 50.0, "slid from {before:?} to {pos:?}"),
+            _ => {}
+        }
+        last = Some((pos, dead.is_some()));
+    }
+    assert!(comebacks >= 1, "never seen to die and come back");
+}
