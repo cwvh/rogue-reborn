@@ -80,3 +80,12 @@ pub fn resolve_texture_path(map_num: &str, material_filename: &str) -> Option<Pa
 
     None
 }
+
+// Whether a .tga material's texture has mostly in-between alpha (a shadow, a glow), as
+// opposed to pixels that are nearly all solid or clear (a wheel's face). Soft sprites are
+// blended; the others are cut out, since a blended sprite does not write depth.
+pub fn has_soft_alpha(map_num: &str, material_filename: &str) -> bool {
+    let Some(tex) = resolve_texture_path(map_num, material_filename).and_then(|p| rsb::read(&p).ok()) else { return false };
+    let seen: Vec<u8> = tex.to_rgba8().into_iter().skip(3).step_by(4).filter(|&a| a > 15).collect();
+    seen.iter().filter(|&&a| a < 240).count() * 2 > seen.len()
+}

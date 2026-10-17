@@ -43,6 +43,20 @@ const BENCH_WARMUP: u32 = 30;
 // How long F4 records, in seconds
 const CLIP_SECONDS: f32 = 2.0;
 
+/// How a material's soft sprite is blended over the level, if it is one: `Some(true)` adds
+/// (a light, whose material glows), `Some(false)` blends (a shadow, a stain). Other .tga
+/// materials are cut out with an alpha test instead: foliage (two-sided), and sprites whose
+/// pixels are nearly all solid or clear (a wheel's face), which blending would only soften
+/// at the edges. Glass panes are drawn apart.
+fn sprite_blend(m: &map::Material, map_num: &str) -> Option<bool> {
+    let is_tga = m.filename.to_ascii_lowercase().ends_with(".tga");
+    if !is_tga || m.two_sided {
+        return None;
+    }
+    let glows = m.emissive_strength != 0;
+    (glows || textures::has_soft_alpha(map_num, &m.filename)).then_some(glows)
+}
+
 fn main() {
     // Load the map
     // let map_path = Path::new("data/map/m00/demolitions_area.MAP");
@@ -508,6 +522,7 @@ fn main() {
     // Faces lying over others in the same plane (a door frame on its wall) get drawn on top
     let coplanar_layers: Vec<rogue_reborn::coplanar::Layers> = level.geometries.objects.iter().map(rogue_reborn::coplanar::layers).collect();
     let pane_objects: Vec<bool> = level.geometries.objects.iter().map(|o| sim.panes.iter().any(|g| g.name == o.name)).collect();
+    let sprite_blends: Vec<Option<bool>> = level.materials.materials.iter().map(|m| sprite_blend(m, &map_num)).collect();
     let all_objects: Vec<usize> = (0..level.geometries.objects.len()).collect();
     // Doors: each leaf is drawn where its door is. Space or Backspace opens and closes the
     // one being looked at.
@@ -1150,11 +1165,6 @@ fn main() {
                 // An object belongs to the room its name starts with ("204", "20_doormetal").
                 let mut draw_objects = |which: Which, planes: &[[f32; 4]]| {
                     set_clip_planes(planes);
-                    if textured {
-                        // Foliage and fences are drawn on quads, with alpha for the gaps
-                        glEnable(0x0BC0); // GL_ALPHA_TEST
-                        glAlphaFunc(0x0204, 0.5); // GL_GREATER
-                    }
                     let indices: &[usize] = match which {
                         Which::All => &all_objects,
                         Which::Room(n) => sim.visibility.objects_of(n),
@@ -1167,8 +1177,10 @@ fn main() {
                         Which::Room(n) => doors_by_room.get(&n).map(Vec::as_slice).unwrap_or_default(),
                         Which::Unowned => &[],
                     };
-                    let items = indices.iter().map(|&i| (i, None)).chain(room_doors.iter().map(|&d| (sim.doors[d].model_index, Some(d))));
-                    for (object_index, door) in items {
+                    let items: Vec<(usize, Option<usize>)> = indices.iter().map(|&i| (i, None)).chain(room_doors.iter().map(|&d| (sim.doors[d].model_index, Some(d)))).collect();
+                    // Opaque and cut-out faces first, then the soft sprites over them
+                    for pass in 0..2 {
+                    for &(object_index, door) in &items {
                         let object = &level.geometries.objects[object_index];
                         // Panes are drawn in place below, and door leaves with their doors
                         if pane_objects[object_index] || (door_leaf[object_index] && door.is_none()) {
@@ -1194,6 +1206,29 @@ fn main() {
                             }
                         }
                         let mat_index = od.mn as usize;
+                        let blend = if textured { sprite_blends.get(mat_index).copied().flatten() } else { None };
+                        if blend.is_some() != (pass == 1) {
+                            continue;
+                        }
+                        match blend {
+                            Some(additive) => {
+                                // The sprite writes depth, so that a room drawn again through another
+                                // portal does not blend it a second time (a shadow twice as dark, a
+                                // light twice as bright). The alpha test keeps its clear pixels out
+                                // of the depth buffer.
+                                glEnable(0x0BC0); // GL_ALPHA_TEST
+                                glAlphaFunc(0x0204, 0.02); // GL_GREATER
+                                glEnable(0x0BE2); // GL_BLEND
+                                glBlendFunc(0x0302, if additive { 1 } else { 0x0303 }); // SRC_ALPHA, ONE or ONE_MINUS_SRC_ALPHA
+                            }
+                            None => {
+                                glDisable(0x0BE2);
+                                if textured {
+                                    glEnable(0x0BC0);
+                                    glAlphaFunc(0x0204, 0.5);
+                                }
+                            }
+                        }
                         // A face is seen from the side its normal points to (its corners in
                         // order turn counterclockwise there), as in the original engine; the
                         // mirrored z makes that clockwise on screen. Two-sided materials (glass,
@@ -1271,8 +1306,10 @@ fn main() {
                         glPopMatrix();
                     }
                     }
+                    }
                     glDisable(0x0B44); // GL_CULL_FACE
                     glDisable(0x0BC0); // GL_ALPHA_TEST
+                    glDisable(0x0BE2); // GL_BLEND
                 };
 
                 if !rect_plan.is_empty() {
