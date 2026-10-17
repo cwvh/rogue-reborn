@@ -77,6 +77,7 @@ On other platforms, or without the aliases:
 | F1 | toggle between first person and free-fly (collision off, Shift = faster, scroll = zoom) |
 | T | textured / wireframe |
 | P, C | show portals, show collision points |
+| H | cycle how soft sprites (shadows, light pools) are drawn, to track down a flicker: writes depth and is pulled toward the camera (the default), writes depth, no depth writes. F2 and F4 record the mode and the depth buffer's bits, and `--sprite-mode N` starts in one |
 | L | on a server: show or hide the lag meter (`--lag-meter` starts with it shown) |
 | V | toggle room culling (on by default; `--no-cull` starts with it off) |
 | G | color each room's geometry (the room you stand in is white) and list your rooms |

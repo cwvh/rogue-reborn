@@ -21,6 +21,10 @@ pub struct DebugReport<'a> {
     pub room_debug: bool,
     pub show_portals: bool,
     pub show_collisions: bool,
+    /// How soft sprites are drawn (H cycles it, --sprite-mode starts it)
+    pub sprite_mode: u8,
+    /// The depth buffer's precision, which decides how close two surfaces can lie without fighting
+    pub depth_bits: i32,
     pub fps: f32,
     pub render_ms: f32,
     pub culling: bool,
@@ -61,6 +65,8 @@ pub fn write_debug_dump(r: &DebugReport, rgb: &[u8], width: u32, height: u32, st
     writeln!(t, "args: {}", std::env::args().skip(1).collect::<Vec<_>>().join(" "))?;
     writeln!(t, "mode: {}{}", if r.first_person { "first person" } else { "free fly" }, if r.third_person { ", third person view" } else { "" })?;
     writeln!(t, "toggles: textured={} room_colors={} portals={} collisions={}", r.textured, r.room_debug, r.show_portals, r.show_collisions)?;
+    writeln!(t, "sprite mode: {} ({})", r.sprite_mode, crate::SPRITE_MODES[r.sprite_mode as usize % crate::SPRITE_MODES.len()])?;
+    writeln!(t, "depth buffer: {} bits", r.depth_bits)?;
     writeln!(t, "frame: {:.1} fps, {:.2} ms render", r.fps, r.render_ms)?;
     writeln!(t)?;
     writeln!(t, "eye (map space): {:.1}, {:.1}, {:.1}", r.eye[0], r.eye[1], r.eye[2])?;
@@ -113,6 +119,9 @@ pub fn write_debug_dump(r: &DebugReport, rgb: &[u8], width: u32, height: u32, st
             repro.push(' ');
             repro.push_str(flag);
         }
+    }
+    if r.sprite_mode != 0 {
+        repro.push_str(&format!(" --sprite-mode {}", r.sprite_mode));
     }
     writeln!(t, "\nreproduce: {repro}")?;
     writeln!(t, "git commit: {}", option_env!("GIT_HASH").unwrap_or("unknown"))?;

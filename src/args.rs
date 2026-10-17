@@ -49,6 +49,8 @@ pub struct Args {
     /// Rooms to leave out of the drawing, to find which one a stray surface belongs to
     pub hide_rooms: Vec<u32>,
     pub collisions: bool,
+    /// How the level's soft sprites (shadows, light pools) are drawn: 0 as shipped, see `SPRITE_MODES`
+    pub sprite_mode: u8,
     pub first_person: bool,
     pub info: bool,
     pub spawn_zone: Option<String>,
@@ -129,6 +131,7 @@ pub fn parse_args() -> Args {
             "--textured" => args.textured = true,
             "--portals" => args.portals = true,
             "--collisions" => args.collisions = true,
+            "--sprite-mode" => args.sprite_mode = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "--rooms" => args.rooms = true,
             "--dump" => args.dump = true,
             "--no-cull" => args.no_cull = true,

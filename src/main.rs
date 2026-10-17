@@ -43,6 +43,12 @@ const BENCH_WARMUP: u32 = 30;
 // How long F4 records, in seconds
 const CLIP_SECONDS: f32 = 2.0;
 
+/// The ways to draw the level's soft sprites (H cycles them, `--sprite-mode` starts one), for
+/// finding why a shadow flickers: whether it writes depth, and whether it is pulled toward the
+/// camera so that it wins against the surface it lies on. A shadow a fraction of a unit off its
+/// wall flickered with no offset, so the first mode, which has one, is the default.
+pub const SPRITE_MODES: [&str; 3] = ["writes depth, offset toward the camera", "writes depth", "no depth writes"];
+
 /// How a material's soft sprite is blended over the level, if it is one: `Some(true)` adds
 /// (a light, whose material glows), `Some(false)` blends (a shadow, a stain). Other .tga
 /// materials are cut out with an alpha test instead: foliage (two-sided), and sprites whose
@@ -511,6 +517,7 @@ fn main() {
     let mut lag_meter = args.lag_meter;
     let mut show_portals = args.portals;
     let mut show_collisions = args.collisions;
+    let mut sprite_mode = args.sprite_mode % SPRITE_MODES.len() as u8;
     let mut room_debug = args.rooms;
     let mut last_rooms: Vec<String> = Vec::new();
     let mut dump_requested = args.dump;
@@ -605,6 +612,10 @@ fn main() {
                         }
                         (Key::P, Action::Press) => {
                             show_portals = !show_portals;
+                        }
+                        (Key::H, Action::Press) => {
+                            sprite_mode = (sprite_mode + 1) % SPRITE_MODES.len() as u8;
+                            println!("sprite mode {sprite_mode}: {}", SPRITE_MODES[sprite_mode as usize]);
                         }
                         (Key::F2, Action::Press) => {
                             dump_requested = true;
@@ -1220,8 +1231,10 @@ fn main() {
                                 glAlphaFunc(0x0204, 0.02); // GL_GREATER
                                 glEnable(0x0BE2); // GL_BLEND
                                 glBlendFunc(0x0302, if additive { 1 } else { 0x0303 }); // SRC_ALPHA, ONE or ONE_MINUS_SRC_ALPHA
+                                glDepthMask(u8::from(sprite_mode != 2));
                             }
                             None => {
+                                glDepthMask(1);
                                 glDisable(0x0BE2);
                                 if textured {
                                     glEnable(0x0BC0);
@@ -1265,9 +1278,11 @@ fn main() {
                             if !layers.per_face[od_index][..face_count].contains(&layer) {
                                 continue;
                             }
-                            if layer > 0 {
+                            // A sprite's faces come nearer than the surface they lie on
+                            let offset = f32::from(layer) + if blend.is_some() && sprite_mode == 0 { 2.0 } else { 0.0 };
+                            if offset > 0.0 {
                                 glEnable(0x8037); // GL_POLYGON_OFFSET_FILL
-                                glPolygonOffset(-f32::from(layer), -f32::from(layer));
+                                glPolygonOffset(-offset, -offset);
                             }
                             glBegin(0x0004); // GL_TRIANGLES
                             for i in 0..face_count {
@@ -1297,7 +1312,7 @@ fn main() {
                             }
                             glEnd();
                             }
-                            if layers.max > 0 {
+                            if layers.max > 0 || blend.is_some() {
                                 glDisable(0x8037);
                             }
                         }
@@ -1310,6 +1325,7 @@ fn main() {
                     glDisable(0x0B44); // GL_CULL_FACE
                     glDisable(0x0BC0); // GL_ALPHA_TEST
                     glDisable(0x0BE2); // GL_BLEND
+                    glDepthMask(1);
                 };
 
                 if !rect_plan.is_empty() {
@@ -1841,9 +1857,14 @@ fn main() {
                         d.portal.map_or(String::new(), |p| format!(", portal {}", level.portals.portals[p].name))))
                 })
                 .collect();
+            let depth_bits = {
+                let mut bits = 0;
+                unsafe { glGetIntegerv(0x0D56, &mut bits) }; // GL_DEPTH_BITS
+                bits
+            };
             let report = DebugReport {
                 map_path, map_num: &map_num, level: &level, eye, feet, yaw: camera.yaw, pitch: camera.pitch, dir,
-                hit, first_person, third_person, textured, room_debug, show_portals, show_collisions,
+                hit, first_person, third_person, textured, room_debug, show_portals, show_collisions, sprite_mode, depth_bits,
                 fps, render_ms, culling: sim.culling, portal_paths: args.portal_paths, room: current_rooms.first().copied(), drawn: &drawn_rooms, collision: &sim.players[me].collision_rooms, player_rooms: &sim.players[me].player_rooms, render_rooms: &sim.players[me].render_rooms, doors: &nearby_doors,
             };
             let clipping = stem.is_some();
