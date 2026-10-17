@@ -10,3 +10,9 @@ wireframe = "rr"
 wtest = "test --target x86_64-pc-windows-gnu"
 wcheck = "check --target x86_64-pc-windows-gnu --all-targets"
 demo = "run --release --target x86_64-pc-windows-gnu --bin rr -- --first-person --textured --max-fps 144 --spawn 1 --realistic-decals"
+
+# CMake picks its "MSYS Makefiles" generator when a `sh` is on PATH, and w64devkit's `sh`
+# cannot resolve the /C/... paths it writes, so GLFW's build fails ("cmake.exe: not found").
+# Ninja (shipped with w64devkit) needs no shell.
+[env]
+CMAKE_GENERATOR_x86_64_pc_windows_gnu = "Ninja"
