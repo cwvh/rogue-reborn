@@ -1150,6 +1150,11 @@ fn main() {
                 // An object belongs to the room its name starts with ("204", "20_doormetal").
                 let mut draw_objects = |which: Which, planes: &[[f32; 4]]| {
                     set_clip_planes(planes);
+                    if textured {
+                        // Foliage and fences are drawn on quads, with alpha for the gaps
+                        glEnable(0x0BC0); // GL_ALPHA_TEST
+                        glAlphaFunc(0x0204, 0.5); // GL_GREATER
+                    }
                     let indices: &[usize] = match which {
                         Which::All => &all_objects,
                         Which::Room(n) => sim.visibility.objects_of(n),
@@ -1267,6 +1272,7 @@ fn main() {
                     }
                     }
                     glDisable(0x0B44); // GL_CULL_FACE
+                    glDisable(0x0BC0); // GL_ALPHA_TEST
                 };
 
                 if !rect_plan.is_empty() {

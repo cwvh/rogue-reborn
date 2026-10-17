@@ -38,6 +38,7 @@ unsafe extern "C" {
     pub fn glPolygonOffset(factor: f32, units: f32);
     pub fn glColor4f(r: f32, g: f32, b: f32, a: f32);
     pub fn glBlendFunc(sfactor: u32, dfactor: u32);
+    pub fn glAlphaFunc(func: u32, reference: f32);
     pub fn glPopMatrix();
     pub fn glColor3f(r: f32, g: f32, b: f32);
     pub fn glTexCoord2f(s: f32, t: f32);
