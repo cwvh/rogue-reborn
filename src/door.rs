@@ -9,7 +9,10 @@
 //! How the numbers read, checked against rm11 (swinging) and rm02 (swinging and sliding):
 //! - `oneTimeRotation`: the second value of `direction` is the angle the door turns, in
 //!   radians, and its sign picks the way; the first is twice that, which is the turning
-//!   speed that makes every door take half a second.
+//!   speed that makes every door take half a second. The hinge is the leaf's local axis
+//!   that points up in the world. That is Y for most doors, but 25 doors (rm05, rm06, rm08,
+//!   rm10, rm12, rm17) have their model turned on its side, with X up, and the leaf then
+//!   extends along local -z from a hinge on X. Nothing in the record names the hinge.
 //! - `oneTimeTranslation`: the second value is how far the door slides and the first the
 //!   speed in units a second (150 for 115 units, about 0.77 s). The last value and
 //!   `velocity` make a world X/Z direction (1,0), (0,1), (-1,0) or (0,-1) that says which
@@ -21,7 +24,8 @@ type V3 = [f32; 3];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Motion {
-    /// Turns about the hinge (the door's local Y axis) by this angle in radians, signed
+    /// Turns about the hinge (the door's local axis that points up in the world, see
+    /// `Door::hinge`) by this angle in radians, signed
     Swing { angle: f32 },
     /// Slides along this unit direction, in the world, by this distance
     Slide { dir: V3, distance: f32 },
@@ -51,14 +55,24 @@ pub struct Door {
 }
 
 impl Door {
+    /// Which local axis (0 for X, 1 for Y) is the hinge of a swinging door: the one that
+    /// points up in the world
+    pub fn hinge(&self) -> usize {
+        if self.axes[0][1].abs() > self.axes[1][1].abs() { 0 } else { 1 }
+    }
+
     /// A point of the door's own space in the world, with the door `open` of the way (0 to 1)
     pub fn place(&self, p: V3, open: f32) -> V3 {
-        let (mut x, y, mut z) = (p[0], p[1], p[2]);
+        let (mut x, mut y, mut z) = (p[0], p[1], p[2]);
         let mut shift = [0.0; 3];
         match self.motion {
             Motion::Swing { angle } => {
                 let (s, c) = (angle * open).sin_cos();
-                (x, z) = (x * c + z * s, -x * s + z * c);
+                if self.hinge() == 0 {
+                    (y, z) = (y * c - z * s, y * s + z * c);
+                } else {
+                    (x, z) = (x * c + z * s, -x * s + z * c);
+                }
             }
             Motion::Slide { dir, distance } => {
                 shift = [dir[0] * distance * open, dir[1] * distance * open, dir[2] * distance * open];
@@ -247,6 +261,46 @@ mod tests {
         let m = door.matrix(1.0);
         let by_matrix = [m[8] * 120.0 + m[12], m[9] * 120.0 + m[13], m[10] * 120.0 + m[14]];
         assert!((by_matrix[0] - end[0]).abs() < 0.01 && (by_matrix[2] - end[2]).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_door_lying_on_its_side_turns_about_the_axis_that_points_up() {
+        // The model's X axis is up in the world, like rm06's 04_door03, and its leaf runs
+        // along local -z (to world -z here)
+        let door = Door {
+            name: "d".into(), model: "d".into(), model_index: 0,
+            origin: [100.0, 0.0, 200.0],
+            axes: [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            motion: Motion::Swing { angle: -std::f32::consts::FRAC_PI_2 },
+            seconds: 0.5, open_sound: String::new(), close_sound: String::new(), portal: None, rooms: vec![], center_local: [0.0; 3],
+        };
+        assert_eq!(door.hinge(), 0);
+        // The free end stays at the hinge's height and the hinge stays put
+        let end = door.place([0.0, 0.0, -95.0], 1.0);
+        assert!((end[1] - 0.0).abs() < 0.01, "{end:?}");
+        assert!((end[0] - 195.0).abs() < 0.01 && (end[2] - 200.0).abs() < 0.01, "{end:?}");
+        assert_eq!(door.place([130.0, 0.0, 0.0], 1.0), [100.0, 130.0, 200.0]);
+        // Its partner, mirrored, swings to the same side
+        let partner = Door { origin: [100.0, 0.0, 10.0], axes: [[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]],
+            motion: Motion::Swing { angle: std::f32::consts::FRAC_PI_2 }, ..door.clone() };
+        let end = partner.place([0.0, 0.0, -95.0], 1.0);
+        assert!((end[0] - 195.0).abs() < 0.01 && (end[2] - 10.0).abs() < 0.01, "{end:?}");
+    }
+
+    #[test]
+    fn rm06_double_doors_in_room_4_have_their_hinges_up() {
+        let Some(map) = load("data/map/rm06/rm06.map") else { return };
+        let doors = doors(&map);
+        let tipped: Vec<_> = doors.iter().filter(|d| d.name.starts_with("04_door")).collect();
+        assert_eq!(tipped.len(), 4);
+        for d in tipped {
+            assert_eq!(d.hinge(), 0, "{}", d.name);
+            // Fully open, the leaf's free end is still as high as when it is closed
+            let free = [0.0, 0.0, -95.0];
+            assert!((d.place(free, 1.0)[1] - d.place(free, 0.0)[1]).abs() < 0.01, "{}", d.name);
+        }
+        // Every other swinging door in the map turns about local Y
+        assert!(doors.iter().filter(|d| !d.name.starts_with("04_door")).all(|d| d.hinge() == 1));
     }
 
     #[test]
