@@ -590,6 +590,8 @@ fn main() {
     let mut walk_held = false;
     // A blast leaves the player shaken (the view), dazzled (a white veil) and deafened (muffled sound)
     let (mut shake, mut veil, mut deaf) = (0.0f32, 0.0f32, 0.0f32);
+    // ...and what they hear is dull: how much, and seconds since it began (see `sound::stunned_after`)
+    let mut stun = (0.0f32, f32::MAX);
     // ...and flinches, and sees a grey tunnel for a moment
     let mut concussion = concussion::Concussion::default();
     let master_volume = args.volume.unwrap_or(1.0).clamp(0.0, 1.0);
@@ -918,7 +920,9 @@ fn main() {
         deaf = (deaf - 0.2 * step_dt).max(0.0);
         concussion.update(step_dt);
         if let Some(snd) = sound.as_mut() {
-            snd.master = master_volume * (1.0 - 0.85 * deaf.min(1.0));
+            snd.master = master_volume * (1.0 - 0.5 * deaf.min(1.0));
+            stun.1 += step_dt;
+            snd.set_muffle(sound::stunned_after(stun.0, stun.1));
         }
 
         // What happened in the ticks: sounds to play, effects to draw, lines for the log
@@ -1010,6 +1014,13 @@ fn main() {
                         deaf = deaf.max(s.min(1.0));
                         if let Some(snd) = sound.as_mut() {
                             snd.ring(3.5 * s.min(1.0) + 1.0, 0.2 * s.min(1.0));
+                            snd.thump(s.min(1.0));
+                            // Never less stunned than what is left of an earlier blast. It takes
+                            // less of a blast to stun the ears than to shake the view.
+                            let stunned = (s * 2.0).min(1.0);
+                            if stunned >= sound::stunned_after(stun.0, stun.1) {
+                                stun = (stunned, 0.0);
+                            }
                         }
                     }
                 }
