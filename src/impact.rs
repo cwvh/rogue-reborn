@@ -425,12 +425,18 @@ pub enum Kind {
     Spark,
     /// A small hard fragment
     Chip,
+    /// One of the hundreds of burning fragments a grenade throws: white-hot, cooling to red
+    Flare,
+    /// What a fragment becomes once it has cooled: a dull red point that fades
+    Ember,
 }
 
 #[derive(Clone, Debug)]
 pub struct Particle {
     pub kind: Kind,
     pub pos: V3,
+    /// Where it was before the last update
+    pub prev: V3,
     vel: V3,
     pub age: f32,
     pub life: f32,
@@ -443,9 +449,13 @@ pub struct Particle {
 impl Particle {
     /// The tail of the streak: where the particle was a moment ago
     pub fn tail(&self) -> V3 {
+        if self.kind == Kind::Flare {
+            return self.prev;
+        }
         let v = norm(self.vel);
         let l = match self.kind {
             Kind::Spark => (dot(self.vel, self.vel).sqrt() * 0.025).clamp(0.5, self.len),
+            Kind::Flare => (dot(self.vel, self.vel).sqrt() * 0.03).clamp(0.5, self.len),
             _ => self.len,
         };
         sub(self.pos, mul(v, l))
@@ -453,7 +463,9 @@ impl Particle {
 
     /// 1 when new, fading to 0
     pub fn alpha(&self) -> f32 {
-        (1.0 - self.age / self.life).clamp(0.0, 1.0)
+        let t = (self.age / self.life).clamp(0.0, 1.0);
+        // A fragment is as bright as it gets until it is gone
+        if self.kind == Kind::Flare { 1.0 - 0.5 * t } else { 1.0 - t }
     }
 }
 
@@ -502,6 +514,20 @@ pub struct Effects {
     pub puffs: Vec<Puff>,
 }
 
+/// How many burning fragments a grenade throws
+pub const FLARES: usize = 1500;
+/// How fast they go, slowest to fastest (around 200 feet per second), and how far they glow before they are gone
+const FLARE_SPEED: (f32, f32) = (5000.0, 7200.0);
+const FLARE_RANGE: (f32, f32) = (180.0, 330.0);
+const FLARE_HOT: [f32; 3] = [1.0, 0.95, 0.75];
+const FLARE_COOL: [f32; 3] = [0.9, 0.18, 0.04];
+const EMBER_COOL: [f32; 3] = [0.3, 0.04, 0.0];
+/// How many embers a blast throws, fewest to most
+const EMBERS: (usize, usize) = (8, 24);
+/// How fast an ember leaves, slowest to fastest
+const EMBER_SPEED: (f32, f32) = (500.0, 1800.0);
+const EMBER_GRAVITY: f32 = 980.0;
+
 /// Chance a bullet striking metal throws sparks
 pub const SPARK_CHANCE: f32 = 0.4;
 
@@ -529,6 +555,7 @@ impl Effects {
                     self.particles.push(Particle {
                         kind: Kind::Splinter,
                         pos: p,
+                        prev: p,
                         vel: v,
                         age: 0.0,
                         life: rng.range(0.5, 1.1),
@@ -553,6 +580,7 @@ impl Effects {
                         self.particles.push(Particle {
                             kind: Kind::Spark,
                             pos: p,
+                            prev: p,
                             vel: v,
                             age: 0.0,
                             life: rng.range(0.08, 0.28),
@@ -571,6 +599,7 @@ impl Effects {
                     self.particles.push(Particle {
                         kind: Kind::Chip,
                         pos: p,
+                        prev: p,
                         vel: v,
                         age: 0.0,
                         life: rng.range(0.4, 0.9),
@@ -590,7 +619,9 @@ impl Effects {
     /// flash, a shockwave spreading over the surface, a wave of dust and a dark cloud lifting
     /// off it, and debris flung out.
     /// `on_surface` is false for a blast in mid-air, which has no ground to throw dust along.
-    pub fn explosion(&mut self, point: V3, normal: V3, seed: u64, on_surface: bool) {
+    /// `reach` is how far a ray goes from an origin along a unit direction before it meets
+    /// something solid (given the farthest to look), which stops the fragments at walls.
+    pub fn explosion(&mut self, point: V3, normal: V3, seed: u64, on_surface: bool, reach: &dyn Fn(V3, V3, f32) -> Option<f32>) {
         let mut rng = Rng::new(seed);
         let n = norm(normal);
         let p = add(point, mul(n, 6.0));
@@ -631,6 +662,7 @@ impl Effects {
             self.particles.push(Particle {
                 kind: Kind::Chip,
                 pos: p,
+                prev: p,
                 vel: v,
                 age: 0.0,
                 life: rng.range(0.6, 1.5),
@@ -639,12 +671,75 @@ impl Effects {
                 gravity: 980.0,
             });
         }
+        // The shower: the casing, in a thousand pieces going every way at 200 feet per second. Each
+        // glows white-hot for a few meters and is dark beyond that, or stops at a wall. They
+        // cross that in a fraction of a second, so a frame shows each as a point
+        // and the line it crossed since the last one.
+        for _ in 0..FLARES {
+            let mut d = along(&mut rng);
+            if on_surface && dot(d, n) < 0.0 {
+                d = sub(d, mul(n, 2.0 * dot(d, n)));
+            }
+            let fast = rng.next();
+            let speed = FLARE_SPEED.0 + (FLARE_SPEED.1 - FLARE_SPEED.0) * fast;
+            let range = rng.range(FLARE_RANGE.0, FLARE_RANGE.1);
+            let dist = reach(p, d, range).map_or(range, |hit| hit - 1.0);
+            if dist < 2.0 {
+                continue;
+            }
+            self.particles.push(Particle {
+                kind: Kind::Flare,
+                pos: p,
+                prev: p,
+                vel: mul(d, speed),
+                age: 0.0,
+                life: dist / speed,
+                color: FLARE_HOT,
+                len: 0.0,
+                gravity: 0.0,
+            });
+        }
+        // A few embers that fly on a good way, fall, and cool and go out as they please. Each
+        // flight is followed once here to find where it meets something, and ends there.
+        for _ in 0..rng.range(EMBERS.0 as f32, EMBERS.1 as f32 + 1.0) as usize {
+            let mut d = along(&mut rng);
+            if on_surface && dot(d, n) < 0.0 {
+                d = sub(d, mul(n, 2.0 * dot(d, n)));
+            }
+            let launch = mul(d, rng.range(EMBER_SPEED.0, EMBER_SPEED.1));
+            let mut life = rng.range(0.5, 2.0);
+            let (mut vel, mut at, mut t) = (launch, p, 0.0);
+            while t < life {
+                let h = (1.0 / 30.0f32).min(life - t);
+                vel[1] -= EMBER_GRAVITY * h;
+                let step = mul(vel, h);
+                let travel = dot(step, step).sqrt();
+                if let Some(hit) = reach(at, mul(step, 1.0 / travel), travel) {
+                    life = t + h * hit / travel;
+                    break;
+                }
+                at = add(at, step);
+                t += h;
+            }
+            self.particles.push(Particle {
+                kind: Kind::Ember,
+                pos: p,
+                prev: p,
+                vel: launch,
+                age: 0.0,
+                life,
+                color: FLARE_COOL,
+                len: 0.0,
+                gravity: EMBER_GRAVITY,
+            });
+        }
         // A few fast glints of casing
         for _ in 0..10 {
             let d = along(&mut rng);
             self.particles.push(Particle {
                 kind: Kind::Spark,
                 pos: p,
+                prev: p,
                 vel: mul(d, rng.range(1400.0, 3200.0)),
                 age: 0.0,
                 life: rng.range(0.08, 0.22),
@@ -672,12 +767,26 @@ impl Effects {
     }
 
     pub fn update(&mut self, dt: f32) {
+        // A fragment that has run its distance is gone one update after the last it was shown
+        self.particles.retain(|p| p.kind != Kind::Flare || p.age < p.life);
         for p in &mut self.particles {
+            p.prev = p.pos;
+            if p.kind == Kind::Flare {
+                // Never past the end of its range, and burning down from white to red on the way
+                let h = dt.min(p.life - p.age);
+                p.age += h;
+                p.pos = add(p.pos, mul(p.vel, h));
+                p.color = mix(FLARE_HOT, FLARE_COOL, (p.age / p.life).clamp(0.0, 1.0));
+                continue;
+            }
             p.age += dt;
             p.vel[1] -= p.gravity * dt;
             p.pos = add(p.pos, mul(p.vel, dt));
+            if p.kind == Kind::Ember {
+                p.color = mix(FLARE_COOL, EMBER_COOL, (p.age / p.life).clamp(0.0, 1.0));
+            }
         }
-        self.particles.retain(|p| p.age < p.life);
+        self.particles.retain(|p| p.kind == Kind::Flare || p.age < p.life);
         for f in &mut self.puffs {
             f.age += dt;
             f.pos = add(f.pos, mul(f.vel, dt));
@@ -799,5 +908,47 @@ mod tests {
             e.update(1.0 / 60.0);
         }
         assert!(e.particles.is_empty() && e.puffs.is_empty());
+    }
+
+    fn norm_len(a: V3) -> f32 { dot(a, a).sqrt() }
+
+    // Bullet-fast pieces glow for a few meters at most, are shown at least once, and stop at a wall
+    #[test]
+    fn the_fragments_of_a_blast_go_fast_and_far_only_as_far_as_a_wall() {
+        let flares = |e: &Effects| e.particles.iter().filter(|p| p.kind == Kind::Flare).count();
+        let mut open = Effects::default();
+        open.explosion([0.0; 3], [0.0, 1.0, 0.0], 5, false, &|_, _, _| None);
+        assert!(flares(&open) > 1000);
+        open.update(1.0 / 60.0);
+        for p in open.particles.iter().filter(|p| p.kind == Kind::Flare) {
+            let from_blast = norm_len(sub(p.pos, [0.0, 6.0, 0.0]));
+            assert!(from_blast <= FLARE_RANGE.1 + 1.0, "{from_blast}");
+        }
+        assert!(flares(&open) > 1000, "shown once before they go");
+        for _ in 0..8 {
+            open.update(1.0 / 60.0);
+        }
+        assert_eq!(flares(&open), 0, "gone within a few frames");
+        let embers = open.particles.iter().filter(|p| p.kind == Kind::Ember).count();
+        assert!(embers >= EMBERS.0 && embers <= EMBERS.1, "{embers}");
+        for _ in 0..180 {
+            open.update(1.0 / 60.0);
+        }
+        assert!(open.particles.iter().all(|p| p.kind != Kind::Ember), "embers fade out");
+
+        let mut walled = Effects::default();
+        walled.explosion([0.0; 3], [0.0, 1.0, 0.0], 5, false, &|_, _, _| Some(50.0));
+        walled.update(1.0 / 60.0);
+        for p in walled.particles.iter().filter(|p| p.kind == Kind::Flare) {
+            assert!(norm_len(sub(p.pos, [0.0, 6.0, 0.0])) < 50.0);
+        }
+        // An ember thrown at a floor 30 units down is out before it can fall through
+        let floor = |o: V3, d: V3, far: f32| (d[1] < 0.0 && o[1] > 0.0).then(|| o[1] / -d[1]).filter(|&t| t <= far);
+        let mut over_floor = Effects::default();
+        over_floor.explosion([0.0, 24.0, 0.0], [0.0, 1.0, 0.0], 9, false, &floor);
+        for _ in 0..240 {
+            over_floor.update(1.0 / 60.0);
+            assert!(over_floor.particles.iter().filter(|p| p.kind == Kind::Ember).all(|p| p.pos[1] > -2.0));
+        }
     }
 }

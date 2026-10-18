@@ -369,6 +369,10 @@ fn main() {
     let mut decals: Vec<impact::Decal> = Vec::new();
     let mut effects = impact::Effects::default();
     const MAX_DECALS: usize = 300;
+    // A blast's embers: how wide they are, and the width of a pixel for each unit of distance
+    // (a 60 degree view about a thousand pixels high)
+    const EMBER_SIZE: f32 = 2.0;
+    const ONE_PIXEL_PER_UNIT: f32 = 0.0012;
 
     // Where the weapon sits relative to the right hand. The weapon models are made in the
     // hand bone's own space: the origin is the wrist, forward (-Y) runs along the hand as
@@ -957,7 +961,8 @@ fn main() {
                     fractures.push(glass::shatter(&sim.panes[pane], at, dir, seed));
                 }
                 sim::Event::Blast { point, normal, surface, on_surface, seed } => {
-                    effects.explosion(point, normal, seed, on_surface);
+                    let reach = sim.world.local_raycaster(point, 1500.0);
+                    effects.explosion(point, normal, seed, on_surface, &*reach);
                     if on_surface && surface != Surface::Glass {
                         let roll = ((seed >> 20) & 0xFFFF) as f32 / 65536.0;
                         decals.push(impact::Decal::scorch(point, normal, 100.0 + (seed >> 50) as f32 % 40.0, (seed >> 33) as usize % SCORCH_VARIANTS, roll));
@@ -1642,13 +1647,38 @@ fn main() {
                     glBlendFunc(0x0302, if sparks { 1 } else { 0x0303 });
                     glLineWidth(if sparks { 1.5 } else { 2.0 });
                     glBegin(0x0001); // GL_LINES
-                    for pt in effects.particles.iter().filter(|p| (p.kind == impact::Kind::Spark) == sparks && p.kind != impact::Kind::Chip) {
+                    for pt in effects.particles.iter().filter(|p| matches!(p.kind, impact::Kind::Spark | impact::Kind::Flare) == sparks && p.kind != impact::Kind::Chip && p.kind != impact::Kind::Ember) {
                         let (a, b) = (pt.tail(), pt.pos);
-                        glColor4f(pt.color[0], pt.color[1], pt.color[2], pt.alpha());
+                        // The line a fragment crossed since the last frame fades behind it
+                        let tail = if pt.kind == impact::Kind::Flare { 0.12 } else { 1.0 };
+                        glColor4f(pt.color[0], pt.color[1], pt.color[2], pt.alpha() * tail);
                         glVertex3f(a[0], a[1], a[2]);
+                        glColor4f(pt.color[0], pt.color[1], pt.color[2], pt.alpha());
                         glVertex3f(b[0], b[1], b[2]);
                     }
                     glEnd();
+                    if sparks {
+                        glPointSize(3.0);
+                        glBegin(0x0000); // GL_POINTS
+                        for pt in effects.particles.iter().filter(|p| p.kind == impact::Kind::Flare) {
+                            glColor4f(pt.color[0], pt.color[1], pt.color[2], pt.alpha());
+                            glVertex3f(pt.pos[0], pt.pos[1], pt.pos[2]);
+                        }
+                        glEnd();
+                        // Embers are small things in the world, not a number of pixels: a couple
+                        // of units across, but never less than a pixel or so
+                        let eye = listener_of(&camera).pos; // in the map's space, like the embers
+                        glBegin(0x0007); // GL_QUADS
+                        for pt in effects.particles.iter().filter(|p| p.kind == impact::Kind::Ember) {
+                            let away = ((pt.pos[0] - eye[0]).powi(2) + (pt.pos[1] - eye[1]).powi(2) + (pt.pos[2] - eye[2]).powi(2)).sqrt();
+                            let h = EMBER_SIZE.max(away * ONE_PIXEL_PER_UNIT) / 2.0;
+                            glColor4f(pt.color[0], pt.color[1], pt.color[2], pt.alpha());
+                            for (dx, dy) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                                glVertex3f(pt.pos[0] + right[0] * dx * h, pt.pos[1] + dy * h, pt.pos[2] + right[2] * dx * h);
+                            }
+                        }
+                        glEnd();
+                    }
                 }
                 glBlendFunc(0x0302, 0x0303);
                 glPointSize(2.5);
