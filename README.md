@@ -30,6 +30,14 @@ see anything**: without a level's textures the level is not drawn at all (only t
 shows), and without the character, animation and sound folders you get no characters, no
 weapon animation and no sound. The viewer prints what it could not load and carries on.
 
+### One level on its own
+
+From a full `data/`, `cargo run --example level-manifest` lists every file the viewer and the
+server read to play a level (with one character model and one face), and
+`scripts/pack-level.sh` copies the files a list names into a zip that unpacks to a `data/` that
+plays that level and nothing else. Run from an unpacked copy, `level-manifest` reports anything
+missing. [docs/PACK.md](docs/PACK.md) walks through packing citystreet_large.
+
 ## Building
 
 You need Rust (a recent stable, the crate uses edition 2024) and CMake, because GLFW is built
