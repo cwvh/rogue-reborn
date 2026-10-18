@@ -452,11 +452,9 @@ impl CollisionWorld {
         best
     }
 
-    /// A ray caster for many rays near one spot: only the solid triangles within `radius` of
-    /// `center` are kept, so each ray costs a few hundred tests and not the whole level. It
-    /// takes an origin, a unit direction and a longest distance, like `raycast`, and is only
-    /// right for rays that stay within `radius` of `center`; one that leaves it may miss what is out there.
-    pub fn local_raycaster(&self, center: V3, radius: f32) -> Box<dyn Fn(V3, V3, f32) -> Option<f32>> {
+    /// The solid triangles in the grid cells within `radius` of `center` (a square, so some
+    /// are farther than that), each once
+    pub fn solid_tris_near(&self, center: V3, radius: f32) -> Vec<[V3; 3]> {
         let mut near: Vec<usize> = Vec::new();
         for r in self.row(center[2] - radius)..=self.row(center[2] + radius) {
             for c in self.col(center[0] - radius)..=self.col(center[0] + radius) {
@@ -465,7 +463,15 @@ impl CollisionWorld {
         }
         near.sort_unstable();
         near.dedup();
-        let tris: Vec<[V3; 3]> = near.into_iter().map(|i| &self.tris[i]).filter(|t| self.solid(t)).map(|t| [t.a, t.b, t.c]).collect();
+        near.into_iter().map(|i| &self.tris[i]).filter(|t| self.solid(t)).map(|t| [t.a, t.b, t.c]).collect()
+    }
+
+    /// A ray caster for many rays near one spot: only the solid triangles within `radius` of
+    /// `center` are kept, so each ray costs a few hundred tests and not the whole level. It
+    /// takes an origin, a unit direction and a longest distance, like `raycast`, and is only
+    /// right for rays that stay within `radius` of `center`; one that leaves it may miss what is out there.
+    pub fn local_raycaster(&self, center: V3, radius: f32) -> Box<dyn Fn(V3, V3, f32) -> Option<f32>> {
+        let tris = self.solid_tris_near(center, radius);
         Box::new(move |origin, dir, max_dist| {
             tris.iter()
                 .filter_map(|t| crate::combat::ray_triangle(origin, dir, t[0], t[1], t[2]))

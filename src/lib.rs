@@ -17,6 +17,7 @@ pub mod visibility;
 pub mod coplanar;
 pub mod door;
 pub mod grenade;
+pub mod blastlight;
 pub mod demo;
 pub mod sim;
 pub mod util;

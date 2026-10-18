@@ -93,7 +93,7 @@ impl CharacterArrays {
 
 // Draw one posed character: `verts` are its (possibly animated) vertex
 // positions and `face` replaces the HRT placeholder face texture.
-pub fn draw_character(c: &crp::Crp, arrays: &CharacterArrays, verts: &[[f32; 3]], part_textures: &[Option<u32>], face: Option<u32>, textured: bool) {
+pub fn draw_character(c: &crp::Crp, arrays: &CharacterArrays, verts: &[[f32; 3]], part_textures: &[Option<u32>], face: Option<u32>, textured: bool, glow: [f32; 3]) {
     // The posed position of every corner, gathered once for all the parts
     let mut positions = arrays.positions.borrow_mut();
     positions.clear();
@@ -134,6 +134,30 @@ pub fn draw_character(c: &crp::Crp, arrays: &CharacterArrays, verts: &[[f32; 3]]
         glDrawArrays(0x0004, arrays.first[pi], part.triangles.len() as i32 * 3); // GL_TRIANGLES
         if has_alpha { glDisable(0x0BE2); }
     }
+    }
+    // A blast's light on the body: the opaque parts again, added over themselves
+    if textured && glow.iter().any(|&g| g > 0.003) {
+        glEnable(0x0BE2); // GL_BLEND
+        glBlendFunc(1, 1); // ONE, ONE
+        glDepthFunc(0x0203); // GL_LEQUAL: the same triangles again
+        glDepthMask(0);
+        glEnable(0x8037); // GL_POLYGON_OFFSET_FILL
+        glPolygonOffset(-1.0, -1.0);
+        glEnable(0x0DE1); // GL_TEXTURE_2D
+        glColor4f(glow[0], glow[1], glow[2], 1.0);
+        for (pi, part) in c.parts.iter().enumerate() {
+            if is_tga(&part.material) { continue; }
+            let is_face = part.material.eq_ignore_ascii_case("hrt_face.bmp");
+            let tex = if is_face { face } else { None }.or(part_textures.get(pi).copied().flatten());
+            let Some(id) = tex else { continue };
+            glBindTexture(0x0DE1, id);
+            glDrawArrays(0x0004, arrays.first[pi], part.triangles.len() as i32 * 3);
+        }
+        glDisable(0x8037);
+        glDepthMask(1);
+        glDepthFunc(0x0201); // GL_LESS
+        glDisable(0x0BE2);
+        glColor4f(1.0, 1.0, 1.0, 1.0);
     }
     glDisableClientState(0x8078);
     glDisableClientState(0x8074);

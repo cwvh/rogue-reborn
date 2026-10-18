@@ -13,7 +13,7 @@ use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 use std::sync::Arc;
 use std::net::ToSocketAddrs;
-use rogue_reborn::{map, rsb, actor, combat, demo, grenade, recording, skeleton, sim, sound, weapon, ambience, glass};
+use rogue_reborn::{map, rsb, actor, combat, demo, grenade, blastlight, recording, skeleton, sim, sound, weapon, ambience, glass};
 use rogue_reborn::net::client::{Client, Status};
 use rogue_reborn::net::animation::Doing;
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
@@ -368,6 +368,17 @@ fn main() {
     }
     let mut decals: Vec<impact::Decal> = Vec::new();
     let mut effects = impact::Effects::default();
+    // The light of a blast: a round patch of light, laid over each surface it reaches
+    let light_tex = upload_rgba_to_gl(blastlight::TEXTURE_SIZE as u32, blastlight::TEXTURE_SIZE as u32, &blastlight::texture());
+    if let Some(id) = light_tex {
+        unsafe {
+            glBindTexture(0x0DE1, id);
+            // The patch must not repeat where a surface runs on past it
+            glTexParameteri(0x0DE1, 0x2802, 0x812F); // GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE
+            glTexParameteri(0x0DE1, 0x2803, 0x812F); // GL_TEXTURE_WRAP_T
+        }
+    }
+    let mut blast_lights: Vec<blastlight::BlastLight> = Vec::new();
     const MAX_DECALS: usize = 300;
     // A blast's embers: how wide they are, and the width of a pixel for each unit of distance
     // (a 60 degree view about a thousand pixels high)
@@ -963,6 +974,19 @@ fn main() {
                 sim::Event::Blast { point, normal, surface, on_surface, seed } => {
                     let reach = sim.world.local_raycaster(point, 1500.0);
                     effects.explosion(point, normal, seed, on_surface, &*reach);
+                    // The light sits a little off the surface, as far as there is room
+                    let n = unit3(normal);
+                    let lift = reach(point, n, 60.0).map_or(60.0, |hit| hit * 0.5);
+                    let at = [point[0] + n[0] * lift, point[1] + n[1] * lift, point[2] + n[2] * lift];
+                    let blocked = |from: [f32; 3], to: [f32; 3]| {
+                        let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+                        let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                        dist > 4.0 && reach(from, [d[0] / dist, d[1] / dist, d[2] / dist], dist - 4.0).is_some()
+                    };
+                    blast_lights.push(blastlight::BlastLight::new(at, &sim.world.solid_tris_near(at, blastlight::RADIUS), &blocked));
+                    if blast_lights.len() > blastlight::MOST {
+                        blast_lights.remove(0);
+                    }
                     if on_surface && surface != Surface::Glass {
                         let roll = ((seed >> 20) & 0xFFFF) as f32 / 65536.0;
                         decals.push(impact::Decal::scorch(point, normal, 100.0 + (seed >> 50) as f32 % 40.0, (seed >> 33) as usize % SCORCH_VARIANTS, roll));
@@ -1394,6 +1418,24 @@ fn main() {
             let shown = |feet: [f32; 3]| visible_rooms.is_empty()
                 || sim.visibility.player_rooms(&level, [feet[0], feet[1] + 10.0, feet[2]], None).iter().any(|r| visible_rooms.contains(r));
 
+            // The light of a blast on a character standing at `feet`: nothing when there is none
+            let glow_on = |feet: [f32; 3]| -> [f32; 3] {
+                let mut sum = [0.0f32; 3];
+                let chest = [feet[0], feet[1] + 100.0, feet[2]];
+                let blocked = |from: [f32; 3], to: [f32; 3]| {
+                    let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+                    let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                    dist > 10.0 && sim.world.raycast(from, [d[0] / dist, d[1] / dist, d[2] / dist], dist - 10.0).is_some()
+                };
+                for l in &blast_lights {
+                    let g = l.glow_at(chest, &blocked);
+                    for k in 0..3 {
+                        sum[k] += g[k];
+                    }
+                }
+                sum
+            };
+
             // Characters at the spawn points, posed for what they are doing
             if let Some(chars) = &sim.characters {
                 let c = &chars.model;
@@ -1426,7 +1468,7 @@ fn main() {
                     let face = npc_actor[i].map(|a| face_textures[a]).and_then(|(main, blink)| {
                         if blinking { blink.or(main) } else { main }
                     });
-                    draw_character(c, &character_arrays, verts, &part_textures, face, textured);
+                    draw_character(c, &character_arrays, verts, &part_textures, face, textured, glow_on([spot.pos[0], y, spot.pos[2]]));
                     glPopMatrix();
                 }
                 glColor4f(1.0, 1.0, 1.0, 1.0);
@@ -1456,7 +1498,7 @@ fn main() {
                 // The body faces where the player looks (model forward is +Z)
                 glRotatef(yaw_deg, 0.0, 1.0, 0.0);
                 glScalef(scale[0], scale[1], scale[2]);
-                draw_character(&chars.model, &character_arrays, &verts, &part_textures, face, textured);
+                draw_character(&chars.model, &character_arrays, &verts, &part_textures, face, textured, glow_on(feet));
 
                 // The MP5K in the right hand, or a grenade until it is thrown
                 if let (Some(Some(wd)), Some((hand, off))) = (hand, &weapon_attach) {
@@ -1532,7 +1574,7 @@ fn main() {
                     glPushMatrix();
                     glTranslatef(ghost.pos[0], ghost.pos[1], ghost.pos[2]);
                     glRotatef(ghost.yaw, 0.0, 1.0, 0.0);
-                    draw_character(&chars.model, &character_arrays, verts, &part_textures, face, textured);
+                    draw_character(&chars.model, &character_arrays, verts, &part_textures, face, textured, glow_on(ghost.pos));
                     glPopMatrix();
                 }
                 glColor4f(1.0, 1.0, 1.0, 1.0);
@@ -1567,6 +1609,42 @@ fn main() {
                     draw_weapon(gd, textured, false);
                     glPopMatrix();
                 }
+                glColor4f(1.0, 1.0, 1.0, 1.0);
+            }
+
+            // The light of a blast, over what it reaches
+            for l in &mut blast_lights {
+                l.update(step_dt);
+            }
+            blast_lights.retain(|l| !l.done());
+            if let (true, Some(id)) = (textured && !blast_lights.is_empty(), light_tex) {
+                set_clip_planes(&[]);
+                glEnable(0x0DE1); // GL_TEXTURE_2D
+                glBindTexture(0x0DE1, id);
+                glEnable(0x0BE2); // GL_BLEND
+                glBlendFunc(1, 1); // ONE, ONE: it adds to what is there
+                glDisable(0x0B44); // GL_CULL_FACE
+                glEnable(0x8037); // GL_POLYGON_OFFSET_FILL: the light lies on the surface it lights
+                glPolygonOffset(-1.0, -1.0);
+                glDepthFunc(0x0203); // GL_LEQUAL
+                glDepthMask(0);
+                glBegin(0x0004); // GL_TRIANGLES
+                for l in &blast_lights {
+                    let (k, c) = (l.intensity(), l.color());
+                    for lit in &l.lit {
+                        for ((corner, uv), strength) in lit.corners.iter().zip(&lit.uv).zip(&lit.strength) {
+                            let s = k * strength;
+                            glColor3f(c[0] * s, c[1] * s, c[2] * s);
+                            glTexCoord2f(uv[0], uv[1]);
+                            glVertex3f(corner[0], corner[1], corner[2]);
+                        }
+                    }
+                }
+                glEnd();
+                glDepthFunc(0x0201); // GL_LESS
+                glDepthMask(1);
+                glDisable(0x8037);
+                glDisable(0x0BE2);
                 glColor4f(1.0, 1.0, 1.0, 1.0);
             }
 
