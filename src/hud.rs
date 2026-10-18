@@ -1,5 +1,6 @@
 //! The heads-up display: status text, crosshair, and the bitmap font.
 
+use rogue_reborn::concussion;
 use rogue_reborn::net::meter::{FIX, Meter, WINDOW};
 use rogue_reborn::sim::TICK;
 
@@ -10,7 +11,7 @@ use crate::opengl::*;
 // under the crosshair. A dead player's view is tinted red. Leaves the 2D projection set; the
 // debug text that follows re-enables depth testing.
 #[allow(clippy::too_many_arguments)]
-pub fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_marker: bool, veil: f32, feed: &[(String, [f32; 3])], dead: bool, meter: Option<(&Meter, f64)>) {
+pub fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_marker: bool, veil: f32, daze: f32, feed: &[(String, [f32; 3])], dead: bool, meter: Option<(&Meter, f64)>) {
     unsafe {
         glMatrixMode(0x1701); // GL_PROJECTION
         glLoadIdentity();
@@ -19,6 +20,41 @@ pub fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_ma
         glLoadIdentity();
         glDisable(0x0B71); // GL_DEPTH_TEST
         glDisable(0x0DE1); // GL_TEXTURE_2D
+
+        // The eyes squinting shut against a blast, to a dark slit
+        if daze > 0.01 {
+            glEnable(0x0BE2); // GL_BLEND
+            glBlendFunc(0x0302, 0x0303);
+            // Rings of dark from the edge of the clear middle out past the corners, coming on
+            // quickly at first so the tunnel has a wall and not just a dim edge
+            let (cx, cy) = (win_w as f32 / 2.0, win_h as f32 / 2.0);
+            let corner = (cx * cx + cy * cy).sqrt();
+            // The edge of the eye, scaled so that it reaches past every corner of the screen
+            let corner_angle = cy.atan2(cx);
+            let outer = corner * 1.05 / concussion::eye(corner_angle);
+            let inner = outer * concussion::clear_radius(daze);
+            let edge = concussion::edge_darkness(daze);
+            const SEGMENTS: usize = 64;
+            const RINGS: usize = 8;
+            let ring = |k: usize| {
+                let t = k as f32 / RINGS as f32;
+                (inner + (outer - inner) * t, edge * (t / 0.5).min(1.0).powf(0.6))
+            };
+            for k in 0..RINGS {
+                glBegin(0x0005); // GL_TRIANGLE_STRIP
+                for i in 0..=SEGMENTS {
+                    let a = i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+                    let (s, c) = a.sin_cos();
+                    let reach = concussion::eye(a);
+                    for (radius, alpha) in [ring(k), ring(k + 1)] {
+                        glColor4f(0.0, 0.0, 0.0, alpha);
+                        glVertex3f(cx + c * radius * reach, cy + s * radius * reach, 0.0);
+                    }
+                }
+                glEnd();
+            }
+            glDisable(0x0BE2);
+        }
 
         // The white-out from a blast close by
         if veil > 0.01 {

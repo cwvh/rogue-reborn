@@ -13,7 +13,7 @@ use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 use std::sync::Arc;
 use std::net::ToSocketAddrs;
-use rogue_reborn::{map, rsb, actor, combat, demo, grenade, blastlight, recording, skeleton, sim, sound, weapon, ambience, glass};
+use rogue_reborn::{map, rsb, actor, combat, demo, grenade, blastlight, concussion, recording, skeleton, sim, sound, weapon, ambience, glass};
 use rogue_reborn::net::client::{Client, Status};
 use rogue_reborn::net::animation::Doing;
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
@@ -590,6 +590,8 @@ fn main() {
     let mut walk_held = false;
     // A blast leaves the player shaken (the view), dazzled (a white veil) and deafened (muffled sound)
     let (mut shake, mut veil, mut deaf) = (0.0f32, 0.0f32, 0.0f32);
+    // ...and flinches, and sees a grey tunnel for a moment
+    let mut concussion = concussion::Concussion::default();
     let master_volume = args.volume.unwrap_or(1.0).clamp(0.0, 1.0);
     // Last shot: start, end, whether it struck a character, and when it fades
     let mut tracer: Option<([f32; 3], [f32; 3], bool, f32)> = None;
@@ -911,9 +913,10 @@ fn main() {
         }
 
         // A blast leaves the view shaken and whited out, and the sound muffled, for a while
-        shake = (shake - 1.4 * step_dt).max(0.0);
-        veil = (veil - 1.6 * step_dt).max(0.0);
+        shake = (shake - 9.0 * step_dt).max(0.0);
+        veil = (veil - 5.0 * step_dt).max(0.0);
         deaf = (deaf - 0.2 * step_dt).max(0.0);
+        concussion.update(step_dt);
         if let Some(snd) = sound.as_mut() {
             snd.master = master_volume * (1.0 - 0.85 * deaf.min(1.0));
         }
@@ -998,6 +1001,11 @@ fn main() {
                 sim::Event::PlayerBlast { player, shake: s, veil: v } if player == me => {
                     shake = shake.max(s);
                     veil = veil.max(v);
+                    // The blast knocks the head: where the player points jumps, and drops
+                    if let Some((turn, drop)) = concussion.hit(s, (game_time * 1000.0) as u64) {
+                        camera.yaw += turn;
+                        camera.pitch = (camera.pitch - drop).clamp(-89.0, 89.0);
+                    }
                     if s > 0.1 {
                         deaf = deaf.max(s.min(1.0));
                         if let Some(snd) = sound.as_mut() {
@@ -1912,7 +1920,7 @@ fn main() {
             let lines: Vec<(String, [f32; 3])> = feed.iter().map(|(_, text, color)| (text.clone(), *color)).collect();
             let dead = net.is_some() && sim.players[me].respawn_at.is_some();
             let meter = net.as_ref().filter(|_| lag_meter).map(|(client, _)| (&client.meter, net_clock.elapsed().as_secs_f64()));
-            draw_hud(w, h, &status, msg, marker, veil, &lines, dead, meter);
+            draw_hud(w, h, &status, msg, marker, veil, concussion.daze(), &lines, dead, meter);
         }
         let rooms_text = if sim.culling {
             format!("ROOM: {} DRAWN: {}", current_rooms.join(" "), drawn_rooms.join(" "))

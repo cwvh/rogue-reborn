@@ -18,6 +18,7 @@ pub mod coplanar;
 pub mod door;
 pub mod grenade;
 pub mod blastlight;
+pub mod concussion;
 pub mod demo;
 pub mod sim;
 pub mod util;
