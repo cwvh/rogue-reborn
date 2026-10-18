@@ -17,6 +17,7 @@ Rooms, portals and collision (the "impossible geometry" work)
 * [levels] The thresholds were tuned on rm05 and rm11 only: TOUCH 40, NESTED 0.6, margin 20% (max 100), level slack 60, nearest room 150, outdoors at 50% of the map, polygon offset 2, plan budget 96 and depth 8. Run floor-scan and F2 dumps on the other maps (rm01..., citystreet) before trusting them.
 * [render] When the plan hits its budget (96 portals) or depth limit (8), rooms silently do not draw. Log it, or show it in the F2 dump.
 * [render] Without a texture a face is not drawn at all, in textured and wireframe mode alike, so with only the committed bare-bones data `cargo demo` shows almost nothing. Fall back to flat color (textured) or plain lines (wireframe).
+* [render] A character seen through another player's visor (the .tga part of a character model, blended in draw_character's second pass) does not show: the visor hides it. This predates the vertex-array change (checked against the commit before it). Unchecked suspicion: the blended visor still writes depth, so whatever is drawn after it behind the glass fails the depth test; draw order of players against each other would matter too. Try glDepthMask(0) around the has_alpha pass, as with the level's soft sprites (SPRITE_MODES in main.rs). Reproduce with two characters, one behind the other's visor (first seen in an F2 dump screenshot).
 
 Game
 * [doors] OneTimeTouchplate gates are not handled: vehicle gates and sealed doors on rm09 and rm15, sliding gates on rm09 and rm19 (they open when something stands on a plate).
