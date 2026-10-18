@@ -27,7 +27,7 @@ use crate::args::parse_args;
 use crate::camera::{Camera, listener_of, apply_camera};
 use rogue_reborn::util::unit3;
 use crate::player::{PlayerMotions, is_upper_body};
-use crate::draw::{WeaponDraw, draw_weapon, draw_character, draw_glass, draw_fracture, build_mesh, Which, draw_plan, wipe_opening, room_color};
+use crate::draw::{WeaponDraw, CharacterArrays, draw_weapon, draw_character, draw_glass, draw_fracture, build_mesh, Which, draw_plan, wipe_opening, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
 use rogue_reborn::levels::{find_zone_spawn, find_mission_spawns, pick_index, list_levels, find_level, extract_map_num};
@@ -398,6 +398,8 @@ fn main() {
             })
         }).collect()
     });
+    // The model's triangle corners, laid out for glDrawArrays
+    let character_arrays = characters.as_ref().map_or_else(CharacterArrays::default, |c| CharacterArrays::new(&c.model));
     // Team members whose faces the models wear: --actor picks one, otherwise
     // they are dealt out in turn
     let mut actors = actor::read_all(Path::new("data/actor"));
@@ -1419,7 +1421,7 @@ fn main() {
                     let face = npc_actor[i].map(|a| face_textures[a]).and_then(|(main, blink)| {
                         if blinking { blink.or(main) } else { main }
                     });
-                    draw_character(c, verts, &part_textures, face, textured);
+                    draw_character(c, &character_arrays, verts, &part_textures, face, textured);
                     glPopMatrix();
                 }
                 glColor4f(1.0, 1.0, 1.0, 1.0);
@@ -1449,7 +1451,7 @@ fn main() {
                 // The body faces where the player looks (model forward is +Z)
                 glRotatef(yaw_deg, 0.0, 1.0, 0.0);
                 glScalef(scale[0], scale[1], scale[2]);
-                draw_character(&chars.model, &verts, &part_textures, face, textured);
+                draw_character(&chars.model, &character_arrays, &verts, &part_textures, face, textured);
 
                 // The MP5K in the right hand, or a grenade until it is thrown
                 if let (Some(Some(wd)), Some((hand, off))) = (hand, &weapon_attach) {
@@ -1525,7 +1527,7 @@ fn main() {
                     glPushMatrix();
                     glTranslatef(ghost.pos[0], ghost.pos[1], ghost.pos[2]);
                     glRotatef(ghost.yaw, 0.0, 1.0, 0.0);
-                    draw_character(&chars.model, verts, &part_textures, face, textured);
+                    draw_character(&chars.model, &character_arrays, verts, &part_textures, face, textured);
                     glPopMatrix();
                 }
                 glColor4f(1.0, 1.0, 1.0, 1.0);

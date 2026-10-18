@@ -1,5 +1,6 @@
 //! Drawing the level, characters, glass and weapons.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use rogue_reborn::{map, crp, glass, visibility};
 use crate::opengl::*;
@@ -55,10 +56,53 @@ pub fn draw_weapon(wd: &WeaponDraw, textured: bool, flash: bool) {
     }
 }
 
+// A character model's triangle corners laid out for glDrawArrays: one entry per corner, the
+// parts one after another
+#[derive(Default)]
+pub struct CharacterArrays {
+    // The vertex of `Crp::vertices` each corner uses
+    corner_vertex: Box<[u32]>,
+    // Texture coordinates, two per corner; they never change
+    uvs: Box<[f32]>,
+    // The first corner of each part
+    first: Box<[i32]>,
+    // Scratch space for the corners' positions, three per corner, refilled by each draw
+    positions: RefCell<Vec<f32>>,
+}
+
+impl CharacterArrays {
+    pub fn new(c: &crp::Crp) -> Self {
+        let (mut corner_vertex, mut uvs, mut first) = (Vec::new(), Vec::new(), Vec::new());
+        for part in &c.parts {
+            first.push(corner_vertex.len() as i32);
+            for (t, uv) in part.triangles.iter().zip(&part.corner_uvs) {
+                for j in 0..3 {
+                    corner_vertex.push(t[j]);
+                    uvs.extend_from_slice(&uv[j]);
+                }
+            }
+        }
+        Self {
+            corner_vertex: corner_vertex.into(),
+            uvs: uvs.into(),
+            first: first.into(),
+            positions: RefCell::new(Vec::new()),
+        }
+    }
+}
+
 // Draw one posed character: `verts` are its (possibly animated) vertex
 // positions and `face` replaces the HRT placeholder face texture.
-pub fn draw_character(c: &crp::Crp, verts: &[[f32; 3]], part_textures: &[Option<u32>], face: Option<u32>, textured: bool) {
+pub fn draw_character(c: &crp::Crp, arrays: &CharacterArrays, verts: &[[f32; 3]], part_textures: &[Option<u32>], face: Option<u32>, textured: bool) {
+    // The posed position of every corner, gathered once for all the parts
+    let mut positions = arrays.positions.borrow_mut();
+    positions.clear();
+    positions.extend(arrays.corner_vertex.iter().flat_map(|&i| verts[i as usize]));
     unsafe {
+    glEnableClientState(0x8074); // GL_VERTEX_ARRAY
+    glEnableClientState(0x8078); // GL_TEXTURE_COORD_ARRAY
+    glVertexPointer(3, 0x1406, 0, positions.as_ptr().cast()); // GL_FLOAT
+    glTexCoordPointer(2, 0x1406, 0, arrays.uvs.as_ptr().cast());
     // Opaque parts first, then the see-through ones (.tga materials) blended over them
     for alpha_pass in [false, true] {
     for (pi, part) in c.parts.iter().enumerate() {
@@ -69,7 +113,6 @@ pub fn draw_character(c: &crp::Crp, verts: &[[f32; 3]], part_textures: &[Option<
         let is_face = part.material.eq_ignore_ascii_case("hrt_face.bmp");
         let tex = if is_face { face } else { None }
             .or(part_textures.get(pi).copied().flatten());
-        let uvs = &part.corner_uvs;
         if has_alpha && textured { glEnable(0x0BE2); glBlendFunc(0x0302, 0x0303); } // GL_BLEND, SRC_ALPHA, ONE_MINUS_SRC_ALPHA
         // Solid mode shows the texture; wireframe shows flat color lines
         if let (true, Some(id)) = (textured, tex) {
@@ -88,18 +131,12 @@ pub fn draw_character(c: &crp::Crp, verts: &[[f32; 3]], part_textures: &[Option<
                 glColor4f(r, g, b, 1.0);
             }
         }
-        glBegin(0x0004); // GL_TRIANGLES
-        for (k, t) in part.triangles.iter().enumerate() {
-            for (j, &i) in t.iter().enumerate() {
-                glTexCoord2f(uvs[k][j][0], uvs[k][j][1]);
-                let v = &verts[i as usize];
-                glVertex3f(v[0], v[1], v[2]);
-            }
-        }
-        glEnd();
+        glDrawArrays(0x0004, arrays.first[pi], part.triangles.len() as i32 * 3); // GL_TRIANGLES
         if has_alpha { glDisable(0x0BE2); }
     }
     }
+    glDisableClientState(0x8078);
+    glDisableClientState(0x8074);
     }
 }
 
