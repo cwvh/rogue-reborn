@@ -453,7 +453,7 @@ fn main() {
         None if args.walk.is_some() && args.hold.as_deref().is_some_and(|h| h.to_ascii_uppercase().contains('L')) => 10,
         None => mag_size,
     };
-    let grenades = playback.as_ref().map(|p| p.header().grenades).or(joined.as_ref().map(|s| s.grenades)).unwrap_or(3);
+    let grenades = playback.as_ref().map(|p| p.header().grenades).or(joined.as_ref().map(|s| s.grenades)).or(args.grenades).unwrap_or(3);
     let mut recorder = args.record.as_ref().map(|_| Recorder::new(recording::Header {
         build: option_env!("GIT_HASH").unwrap_or("unknown").to_string(),
         map: if args.demo { "demo".to_string() } else { map_path.display().to_string() },

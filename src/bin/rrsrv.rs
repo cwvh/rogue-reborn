@@ -28,6 +28,8 @@ struct Args {
     seed: u64,
     model: PathBuf,
     no_models: bool,
+    /// Grenades each player starts with
+    grenades: u32,
     /// Stop after this many seconds and say how things stand
     duration: Option<f64>,
     quiet: bool,
@@ -45,7 +47,7 @@ struct Args {
 fn parse_args() -> Args {
     let mut a = Args {
         port: 27960, demo: false, map: None, level: None, npcs: demo::MAX_NPCS, max_players: 4, seed: 0x5eed,
-        model: PathBuf::from("data/character/team_hrt/blue_M_a.CRP"), no_models: false, duration: None, quiet: false, no_pvp: false, no_lag_compensation: false,
+        model: PathBuf::from("data/character/team_hrt/blue_M_a.CRP"), no_models: false, grenades: 3, duration: None, quiet: false, no_pvp: false, no_lag_compensation: false,
         snapshot_rate: 30.0, sim_latency: 0.0, sim_jitter: 0.0, sim_loss: 0.0,
     };
     let mut it = std::env::args().skip(1);
@@ -61,6 +63,7 @@ fn parse_args() -> Args {
             "--seed" => a.seed = value("--seed").parse().unwrap_or_else(|_| usage("--seed expects a number")),
             "--model" => a.model = PathBuf::from(value("--model")),
             "--no-models" => a.no_models = true,
+            "--grenades" => a.grenades = value("--grenades").parse().unwrap_or_else(|_| usage("--grenades expects a number")),
             "--duration" => a.duration = Some(value("--duration").parse().unwrap_or_else(|_| usage("--duration expects seconds"))),
             "--quiet" => a.quiet = true,
             "--no-pvp" => a.no_pvp = true,
@@ -81,7 +84,7 @@ fn usage(problem: &str) -> ! {
         eprintln!("rrsrv: {problem}");
     }
     eprintln!("usage: rrsrv [--demo | --level NAME | --map PATH] [--port N] [--max-players N] [--npcs N] [--seed N]");
-    eprintln!("             [--model FILE] [--no-models] [--duration SECONDS] [--quiet] [--snapshot-rate HZ] [--no-pvp] [--no-lag-compensation]");
+    eprintln!("             [--model FILE] [--no-models] [--grenades N] [--duration SECONDS] [--quiet] [--snapshot-rate HZ] [--no-pvp] [--no-lag-compensation]");
     eprintln!("             [--sim-latency MS] [--sim-jitter MS] [--sim-loss PERCENT]   (to make the connection worse)");
     std::process::exit(if problem.is_empty() { 0 } else { 2 });
 }
@@ -147,7 +150,7 @@ fn main() {
         magazine,
         ammo: magazine,
         reserve,
-        grenades: 3,
+        grenades: args.grenades,
         speed_scale: 1.0,
         seed: args.seed,
         culling: true,

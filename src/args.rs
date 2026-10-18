@@ -58,6 +58,8 @@ pub struct Args {
     pub model: Option<PathBuf>,
     pub no_models: bool,
     pub no_sound: bool,
+    /// Grenades each player starts with when playing alone (a server or a replay says for itself)
+    pub grenades: Option<u32>,
     /// Master volume, 0.0..=1.0
     pub volume: Option<f32>,
     pub actor: Option<String>,
@@ -144,6 +146,7 @@ pub fn parse_args() -> Args {
             "--model" => args.model = it.next().map(PathBuf::from),
             "--no-models" => args.no_models = true,
             "--no-sound" => args.no_sound = true,
+            "--grenades" => args.grenades = it.next().and_then(|v| v.parse().ok()),
             "--volume" => args.volume = it.next().and_then(|v| v.parse().ok()),
             "--actor" => args.actor = it.next(),
             "--model-yaw" => args.model_yaw = it.next().and_then(|v| v.parse().ok()),
