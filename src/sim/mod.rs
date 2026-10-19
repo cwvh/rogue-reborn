@@ -24,7 +24,7 @@ use crate::util::{dist3, mul3, next_rng, unit3};
 use crate::visibility::Visibility;
 
 use characters::{Characters, Npc};
-use movement::{forward, ground_speed, right};
+use movement::{Reloading, forward, ground_speed, right};
 
 type V3 = [f32; 3];
 
@@ -262,6 +262,14 @@ pub struct PlayerState {
     /// What is solid to this player (see `Sim::culling`)
     pub collision_rooms: Option<Vec<SolidRoom>>,
     last_render_rooms: Vec<u32>,
+}
+
+impl PlayerState {
+    /// The reload under way at `now`, if any. The magazine keeps its rounds until the reload
+    /// is done, so it says throughout whether it was empty.
+    pub fn reloading(&self, now: f32) -> Option<Reloading> {
+        self.reload_until.map(|t| Reloading { progress: 1.0 - (t - now) / RELOAD_SECONDS, empty: self.ammo == 0 })
+    }
 }
 
 /// The whole game

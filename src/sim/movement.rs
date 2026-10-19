@@ -59,6 +59,70 @@ pub fn movement_from_keys(forward: bool, back: bool, left: bool, right: bool, ru
     }
 }
 
+/// A reload under way: how far through it is (0 to 1), and whether the magazine was empty
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Reloading {
+    pub progress: f32,
+    pub empty: bool,
+}
+
+/// The MP5 magazine changes, as the original picks them for a weapon whose reload class is
+/// "subgun" (every primary weapon): twm_mp2 with rounds still in the magazine, twm_mp1 once it
+/// is empty. Standing; twm_mp4 and twm_mp3 are their crouched forms.
+pub const RELOAD_MOTION: &str = "twm_mp2";
+pub const EMPTY_RELOAD_MOTION: &str = "twm_mp1";
+
+/// A reload's beats: seconds into the reload, and the frame of its motion to show then. Each
+/// beat falls just before its click in C_SBMAG1.WAV (the one magazine sound the weapon has), as
+/// the sound of a hand comes a moment after it is seen. `frames` is the motion's length.
+struct Beats {
+    frames: f32,
+    beats: &'static [(f32, f32)],
+}
+
+/// twm_mp2 runs the HK manual of arms: a fresh magazine from the pouch, the cocking handle back
+/// and locked, the old magazine stripped, the new one seated, and the handle slapped down
+const RELOAD_BEATS: Beats = Beats {
+    frames: 100.0,
+    beats: &[
+        (0.0, 0.0),
+        (0.40, 27.0), // hand on the cocking handle, pulling it back
+        (0.60, 34.0), // handle locked open
+        (1.05, 44.0), // old magazine stripped from the well
+        (1.60, 60.0), // new magazine into the well
+        (1.80, 64.0), // seated
+        (2.10, 84.0), // the slap closes the bolt
+        (super::RELOAD_SECONDS, 99.0),
+    ],
+};
+
+/// twm_mp1 strips the empty magazine, takes a fresh one from the pouch, seats it and slaps the
+/// bolt release on the left of the receiver, as on an M16
+const EMPTY_RELOAD_BEATS: Beats = Beats {
+    frames: 81.0,
+    beats: &[
+        (0.0, 0.0),
+        (0.60, 12.0), // empty magazine stripped from the well
+        (1.05, 28.0), // fresh one out of the pouch
+        (1.60, 50.0), // into the well
+        (1.80, 56.0), // seated
+        (2.10, 60.0), // the bolt release, slapped
+        (super::RELOAD_SECONDS, 72.0),
+    ],
+};
+
+/// The frame of the reload motion to show for a reload, in a motion of `frames` frames. The
+/// beats are those of the original's motion for it; another motion is stretched to fit.
+pub fn reload_frame(r: Reloading, frames: f32) -> f32 {
+    let Beats { frames: length, beats } = if r.empty { EMPTY_RELOAD_BEATS } else { RELOAD_BEATS };
+    let t = r.progress.clamp(0.0, 1.0) * super::RELOAD_SECONDS;
+    let frame = beats.windows(2).find(|w| t <= w[1].0).map_or(beats[beats.len() - 1].1, |w| {
+        let ((t0, f0), (t1, f1)) = (w[0], w[1]);
+        f0 + (f1 - f0) * (t - t0) / (t1 - t0)
+    });
+    frame / (length - 1.0) * (frames - 1.0).max(0.0)
+}
+
 /// The unit vector a view with this yaw and pitch (degrees) looks along, in camera space,
 /// where Z is the opposite of the map's
 pub fn forward(yaw: f32, pitch: f32) -> [f32; 3] {
@@ -74,4 +138,28 @@ pub fn forward(yaw: f32, pitch: f32) -> [f32; 3] {
 pub fn right(yaw: f32) -> [f32; 3] {
     let yaw_rad = yaw.to_radians();
     [yaw_rad.cos(), 0.0, -yaw_rad.sin()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reload_runs_through_its_motion_on_the_beats() {
+        let at = |progress, empty| Reloading { progress, empty };
+        assert_eq!(reload_frame(at(0.0, false), 100.0), 0.0);
+        assert_eq!(reload_frame(at(1.0, false), 100.0), 99.0);
+        // The slaps land as their sound does: the cocking handle, or the bolt release once empty
+        let slap = 2.10 / super::super::RELOAD_SECONDS;
+        assert!((reload_frame(at(slap, false), 100.0) - 84.0).abs() < 1e-3);
+        assert!((reload_frame(at(slap, true), 81.0) - 60.0).abs() < 1e-3);
+        // The empty reload ends back on the grip, before its motion's last frame
+        assert_eq!(reload_frame(at(1.0, true), 81.0), 72.0);
+        // Another motion is stretched to fit
+        assert!((reload_frame(at(1.0, false), 50.0) - 49.0).abs() < 1e-3);
+        for empty in [false, true] {
+            let frames: Vec<f32> = (0..=100).map(|i| reload_frame(at(i as f32 / 100.0, empty), 100.0)).collect();
+            assert!(frames.windows(2).all(|w| w[1] >= w[0]), "{frames:?}");
+        }
+    }
 }

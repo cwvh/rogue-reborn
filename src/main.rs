@@ -19,7 +19,7 @@ use rogue_reborn::net::animation::Doing;
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
 use rogue_reborn::recording::{Playback, Recorder, Recording};
 use rogue_reborn::sim::characters::{Characters, Npc, Rig, place_npcs};
-use rogue_reborn::sim::movement::{Movement, ground_speed, movement_from_keys};
+use rogue_reborn::sim::movement::{EMPTY_RELOAD_MOTION, Movement, RELOAD_MOTION, Reloading, ground_speed, movement_from_keys, reload_frame};
 use rogue_reborn::collision::{CollisionWorld, Params};
 use rogue_reborn::impact::{self, Surface};
 use crate::opengl::*;
@@ -276,7 +276,8 @@ fn main() {
         left: slot_motion("left", "tms_l2"),
         right: slot_motion("right", "tms_r2"),
         fire: slot_motion("fire", "fire_up_mp5k"),
-        reload: slot_motion("reload", "twru_s9"),
+        reload: slot_motion("reload", RELOAD_MOTION),
+        reload_empty: slot_motion("reload_empty", EMPTY_RELOAD_MOTION),
         throw: slot_motion("throw", "gr_ov_up"),
     };
 
@@ -461,11 +462,12 @@ fn main() {
         (_, Some(s)) => (s.magazine, s.reserve),
         _ => weapon_def.as_ref().map_or((30, 900), |w| (w.magazine, w.reserve)),
     };
-    // A scripted run can hold L to start with a short magazine and reload it
+    // A scripted run can hold L to start with a short magazine and reload it, and E with it empty
+    let scripted = |key| args.walk.is_some() && args.hold.as_deref().is_some_and(|h| h.to_ascii_uppercase().contains(key));
     let ammo = match &playback {
         Some(p) => p.header().ammo,
         None if joined.is_some() => joined.as_ref().map_or(mag_size, |s| s.ammo),
-        None if args.walk.is_some() && args.hold.as_deref().is_some_and(|h| h.to_ascii_uppercase().contains('L')) => 10,
+        None if scripted('L') => if scripted('E') { 0 } else { 10 },
         None => mag_size,
     };
     let grenades = playback.as_ref().map(|p| p.header().grenades).or(joined.as_ref().map(|s| s.grenades)).or(args.grenades).unwrap_or(3);
@@ -1071,10 +1073,8 @@ fn main() {
             }
             let rate = if matches!(movement, Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw) { 1.0 } else { (moved / (ground_speed(movement) * args.speed_scale.unwrap_or(1.0))).clamp(0.5, 3.0) * args.anim_scale.unwrap_or(1.5) };
             let frames = player_motions.get(movement).map_or(1, |m| m.frames.max(1)) as f32;
-            player_frame = if let (Movement::Reload, Some(t)) = (movement, sim.players[me].reload_until) {
-                // Spread the reload animation across the whole reload time
-                (1.0 - (t - game_time) / sim::RELOAD_SECONDS).clamp(0.0, 1.0) * (frames - 1.0)
-            } else if let (Movement::Throw, Some(th)) = (movement, sim.players[me].throw) {
+            // A reload's frame follows its progress, and is picked where the body is drawn
+            player_frame = if let (Movement::Throw, Some(th)) = (movement, sim.players[me].throw) {
                 ((game_time - th.start) / sim::THROW_SECONDS).clamp(0.0, 1.0) * (frames - 1.0)
             } else {
                 (player_frame + rate * 30.0 * dt) % frames
@@ -1494,15 +1494,25 @@ fn main() {
             }
 
             // How a posed body is drawn, for the other players and for the player's own
+            // `reloading` is the reload they are in the middle of, if any: its motion and frame
+            // follow its progress, on the beats of its sound
             let draw_body = |chars: &Characters, movement: Movement, frame: f32, feet: [f32; 3], yaw_deg: f32, scale: [f32; 3],
-                             face: Option<u32>, hand: Option<&Option<WeaponDraw>>, grenade: bool, flash: bool| -> bool {
+                             face: Option<u32>, hand: Option<&Option<WeaponDraw>>, grenade: bool, flash: bool, reloading: Option<Reloading>| -> bool {
                 let Some(Rig { skeleton: skel, skin }) = &chars.rig else { return false };
-                let Some(mot) = player_motions.get(movement) else { return false };
+                let reload = reloading.and_then(|r| player_motions.reload(r).map(|m| (m, reload_frame(r, m.frames.max(1) as f32))));
+                let (mot, frame) = match (movement, reload) {
+                    (Movement::Reload, Some(shown)) => shown,
+                    _ => {
+                        let Some(mot) = player_motions.get(movement) else { return false };
+                        (mot, frame)
+                    }
+                };
                 let (root, mut rots) = mot.sample(frame.min(mot.frames.saturating_sub(1) as f32));
-                // Moving: legs from the locomotion cycle, upper body keeps the gun hold
+                // Moving: legs from the locomotion cycle, upper body keeps the gun hold or reloads
                 if matches!(movement, Movement::Walk | Movement::Run | Movement::Back | Movement::StrafeLeft | Movement::StrafeRight) {
-                    if let Some(hold) = player_motions.get(Movement::Idle) {
-                        let (_, hold_rots) = hold.sample(0.0);
+                    let upper = reload.or_else(|| player_motions.get(Movement::Idle).map(|hold| (hold, 0.0)));
+                    if let Some((upper, at)) = upper {
+                        let (_, hold_rots) = upper.sample(at);
                         for b in &skel.bones {
                             if is_upper_body(&b.name) {
                                 if let (Some(r), Some(h)) = (rots.get_mut(b.anim_index), hold_rots.get(b.anim_index)) { *r = *h; }
@@ -1549,7 +1559,7 @@ fn main() {
                     if dead.is_none() {
                         let doing = Doing {
                             throwing: p.throw.map(|t| (game_time - t.start) / sim::THROW_SECONDS),
-                            reloading: p.reload_until.map(|t| 1.0 - (t - game_time) / sim::RELOAD_SECONDS),
+                            reloading: p.reloading(game_time),
                             firing: p.gun_trigger && p.ammo > 0,
                         };
                         let frames = |m: Movement| player_motions.get(m).map_or(1, |m| m.frames.max(1)) as f32;
@@ -1558,7 +1568,7 @@ fn main() {
                         let hand = if p.equipped_grenade { p.throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
                         let flash = !p.equipped_grenade && game_time < p.flash_until;
                         // Hidden, the animation still follows them
-                        if !visible || draw_body(chars, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash) {
+                        if !visible || draw_body(chars, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, doing.reloading) {
                             continue;
                         }
                     } else {
@@ -1610,7 +1620,7 @@ fn main() {
                 let mine = &sim.players[me];
                 let hand = if mine.equipped_grenade { mine.throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
                 let flash = !mine.equipped_grenade && game_time < mine.flash_until;
-                draw_body(chars, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash);
+                draw_body(chars, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash, mine.reloading(game_time));
             }
 
             // Grenades in the air

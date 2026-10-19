@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::sim::movement::{Movement, forward, ground_speed, right};
+use crate::sim::movement::{Movement, Reloading, forward, ground_speed, right};
 
 type V3 = [f32; 3];
 
@@ -21,7 +21,7 @@ pub const TELEPORT: f32 = 250.0;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Doing {
     pub throwing: Option<f32>,
-    pub reloading: Option<f32>,
+    pub reloading: Option<Reloading>,
     pub firing: bool,
 }
 
@@ -48,7 +48,8 @@ impl Animators {
     /// Advance a player's animation by `dt` seconds, given where they are seen now and where they
     /// face (`yaw`, degrees, as a camera's). `frames` says how long each movement's animation is,
     /// `speed_scale` how fast players move compared to normal and `pace` how fast the animation
-    /// plays compared to the feet. Returns the movement and the frame of it to show.
+    /// plays compared to the feet. Returns the movement and the frame of it to show (but for a
+    /// reload, whose frame follows its progress and which motion is drawn for it).
     pub fn update(&mut self, slot: usize, pos: V3, yaw: f32, dt: f32, doing: Doing, frames: impl Fn(Movement) -> f32, speed_scale: f32, pace: f32) -> (Movement, f32) {
         let s = self.players.entry(slot).or_insert(State { last: None, velocity: [0.0; 2], movement: Movement::Idle, frame: 0.0 });
         if let (Some(last), true) = (s.last, dt > 0.0) {
@@ -78,7 +79,7 @@ impl Animators {
         }
         let n = frames(now).max(1.0);
         s.frame = match (now, doing) {
-            (Movement::Throw, Doing { throwing: Some(p), .. }) | (Movement::Reload, Doing { reloading: Some(p), .. }) => p.clamp(0.0, 1.0) * (n - 1.0),
+            (Movement::Throw, Doing { throwing: Some(p), .. }) => p.clamp(0.0, 1.0) * (n - 1.0),
             (Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw, _) => (s.frame + 30.0 * dt) % n,
             _ => {
                 let speed = s.velocity[0].hypot(s.velocity[1]) / speed_scale;
@@ -150,12 +151,11 @@ mod tests {
     #[test]
     fn standing_players_show_what_they_are_doing() {
         let mut a = Animators::default();
-        let still = |a: &mut Animators, doing| a.update(1, [5.0, 0.0, 5.0], 0.0, DT, doing, |m| if m == Movement::Reload { 91.0 } else { 30.0 }, 1.0, 1.5);
+        let still = |a: &mut Animators, doing| a.update(1, [5.0, 0.0, 5.0], 0.0, DT, doing, |_| 30.0, 1.0, 1.5);
         assert_eq!(still(&mut a, Doing { firing: true, ..Doing::default() }).0, Movement::Fire);
-        // A reload plays across the time it takes, whatever the frame rate
-        let (m, frame) = still(&mut a, Doing { reloading: Some(0.5), ..Doing::default() });
-        assert_eq!((m, frame), (Movement::Reload, 45.0));
-        assert_eq!(still(&mut a, Doing { reloading: Some(0.5), throwing: Some(1.0), firing: true }).0, Movement::Throw);
+        let reloading = Some(Reloading { progress: 0.5, empty: false });
+        assert_eq!(still(&mut a, Doing { reloading, ..Doing::default() }).0, Movement::Reload);
+        assert_eq!(still(&mut a, Doing { reloading, throwing: Some(1.0), firing: true }).0, Movement::Throw);
         assert_eq!(still(&mut a, Doing::default()).0, Movement::Idle);
     }
 

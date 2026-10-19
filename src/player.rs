@@ -1,7 +1,7 @@
 //! The player's animations.
 
 use rogue_reborn::motion;
-use rogue_reborn::sim::movement::Movement;
+use rogue_reborn::sim::movement::{Movement, Reloading};
 
 pub struct PlayerMotions {
     pub idle: Option<motion::Motion>,
@@ -11,7 +11,9 @@ pub struct PlayerMotions {
     pub left: Option<motion::Motion>,
     pub right: Option<motion::Motion>,
     pub fire: Option<motion::Motion>,
+    /// Reloading with rounds left in the magazine, and once it is empty
     pub reload: Option<motion::Motion>,
+    pub reload_empty: Option<motion::Motion>,
     pub throw: Option<motion::Motion>,
 }
 
@@ -28,6 +30,11 @@ impl PlayerMotions {
             Movement::Reload => &self.reload,
             Movement::Throw => &self.throw,
         }.as_ref()
+    }
+
+    /// The motion for a reload, as the magazine was
+    pub fn reload(&self, r: Reloading) -> Option<&motion::Motion> {
+        if r.empty { &self.reload_empty } else { &self.reload }.as_ref()
     }
 }
 
