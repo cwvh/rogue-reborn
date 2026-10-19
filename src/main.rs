@@ -26,7 +26,7 @@ use crate::opengl::*;
 use crate::args::parse_args;
 use crate::camera::{Camera, listener_of, apply_camera};
 use rogue_reborn::util::unit3;
-use crate::player::{PlayerMotions, is_upper_body};
+use crate::player::{BodyFade, PlayerMotions, is_upper_body};
 use crate::draw::{WeaponDraw, CharacterArrays, draw_weapon, draw_character, draw_glass, draw_fracture, build_mesh, Which, draw_plan, wipe_opening, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
@@ -582,6 +582,8 @@ fn main() {
     let mut was_reloading = false;
     let mut step_phase = 0i32;
     let mut remote_anim = rogue_reborn::net::animation::Animators::default();
+    // Each body's ease from one motion into the next, the player's own and the other players'
+    let mut body_fades: HashMap<usize, BodyFade> = HashMap::new();
     // The latest kills, with when they leave the screen and their color, and how this player died:
     // by whom, and where they were looking before
     let mut feed: Vec<(f32, String, [f32; 3])> = Vec::new();
@@ -1495,9 +1497,11 @@ fn main() {
 
             // How a posed body is drawn, for the other players and for the player's own
             // `reloading` is the reload they are in the middle of, if any: its motion and frame
-            // follow its progress, on the beats of its sound
+            // follow its progress, on the beats of its sound. `fade` eases the body from one
+            // motion into the next.
             let draw_body = |chars: &Characters, movement: Movement, frame: f32, feet: [f32; 3], yaw_deg: f32, scale: [f32; 3],
-                             face: Option<u32>, hand: Option<&Option<WeaponDraw>>, grenade: bool, flash: bool, reloading: Option<Reloading>| -> bool {
+                             face: Option<u32>, hand: Option<&Option<WeaponDraw>>, grenade: bool, flash: bool, reloading: Option<Reloading>,
+                             fade: &mut BodyFade| -> bool {
                 let Some(Rig { skeleton: skel, skin }) = &chars.rig else { return false };
                 let reload = reloading.and_then(|r| player_motions.reload(r).map(|m| (m, reload_frame(r, m.frames.max(1) as f32))));
                 let (mot, frame) = match (movement, reload) {
@@ -1507,7 +1511,7 @@ fn main() {
                         (mot, frame)
                     }
                 };
-                let (root, mut rots) = mot.sample(frame.min(mot.frames.saturating_sub(1) as f32));
+                let (mut root, mut rots) = mot.sample(frame.min(mot.frames.saturating_sub(1) as f32));
                 // Moving: legs from the locomotion cycle, upper body keeps the gun hold or reloads
                 if matches!(movement, Movement::Walk | Movement::Run | Movement::Back | Movement::StrafeLeft | Movement::StrafeRight) {
                     let upper = reload.or_else(|| player_motions.get(Movement::Idle).map(|hold| (hold, 0.0)));
@@ -1520,6 +1524,10 @@ fn main() {
                         }
                     }
                 }
+                // Raising the gun to fire is a cut, as in the original, so the first shots never
+                // leave a gun still on its way up
+                let ease = if movement == Movement::Fire { 0.0 } else { rogue_reborn::motion::CROSSFADE_SECONDS };
+                fade.apply((movement, reloading.map(|r| r.empty)), game_time, ease, &mut root, &mut rots);
                 let pose = skel.pose([0.0, root[1], 0.0], &rots);
                 let verts = skin.apply(&pose);
                 glPushMatrix();
@@ -1568,11 +1576,12 @@ fn main() {
                         let hand = if p.equipped_grenade { p.throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
                         let flash = !p.equipped_grenade && game_time < p.flash_until;
                         // Hidden, the animation still follows them
-                        if !visible || draw_body(chars, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, doing.reloading) {
+                        if !visible || draw_body(chars, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, doing.reloading, body_fades.entry(slot).or_default()) {
                             continue;
                         }
                     } else {
                         remote_anim.forget(slot);
+                        body_fades.remove(&slot);
                     }
                     if !visible {
                         continue;
@@ -1620,7 +1629,7 @@ fn main() {
                 let mine = &sim.players[me];
                 let hand = if mine.equipped_grenade { mine.throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
                 let flash = !mine.equipped_grenade && game_time < mine.flash_until;
-                draw_body(chars, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash, mine.reloading(game_time));
+                draw_body(chars, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash, mine.reloading(game_time), body_fades.entry(me).or_default());
             }
 
             // Grenades in the air

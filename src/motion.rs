@@ -97,6 +97,64 @@ impl Motion {
     }
 }
 
+/// How long a body usually takes to ease from one motion into the next. The original blends
+/// over 5 to 10 frames (0.17 to 0.33 s) where it names a length.
+pub const CROSSFADE_SECONDS: f32 = 0.25;
+
+/// Eases a body from the pose it was in into a new motion, instead of jumping to the new
+/// motion's pose. `K` says which motion is playing; when it changes, the pose last drawn eases
+/// into the new one over the time given for it, so a change in the middle of a fade starts
+/// from where the body is.
+pub struct Crossfade<K> {
+    key: Option<K>,
+    from: Option<([f32; 3], Vec<[f32; 4]>)>,
+    start: f32,
+    seconds: f32,
+    last: ([f32; 3], Vec<[f32; 4]>),
+    last_time: f32,
+}
+
+impl<K> Default for Crossfade<K> {
+    fn default() -> Self {
+        Crossfade { key: None, from: None, start: 0.0, seconds: CROSSFADE_SECONDS, last: ([0.0; 3], Vec::new()), last_time: f32::NEG_INFINITY }
+    }
+}
+
+impl<K: PartialEq> Crossfade<K> {
+    /// Ease the pose of `key` at time `now` (seconds), the root position and per-bone
+    /// rotations as `Motion::sample` gives them, from where the body was. `seconds` is how long
+    /// easing into `key` takes, if it is new (0 cuts to it). A body not drawn for a while
+    /// starts the new motion as it is.
+    pub fn apply(&mut self, key: K, now: f32, seconds: f32, root: &mut [f32; 3], rotations: &mut [[f32; 4]]) {
+        if self.key.as_ref() != Some(&key) {
+            let recent = now - self.last_time <= CROSSFADE_SECONDS && self.last.1.len() == rotations.len();
+            self.from = (recent && seconds > 0.0).then(|| self.last.clone());
+            self.start = now;
+            self.seconds = seconds;
+            self.key = Some(key);
+        }
+        if let Some((from_root, from)) = &self.from {
+            let t = ((now - self.start) / self.seconds).clamp(0.0, 1.0);
+            if t < 1.0 {
+                // Smoothstep: leaves and arrives at rest
+                let s = t * t * (3.0 - 2.0 * t);
+                for (r, f) in rotations.iter_mut().zip(from) {
+                    *r = slerp(*f, *r, s);
+                }
+                for k in 0..3 {
+                    root[k] = from_root[k] + (root[k] - from_root[k]) * s;
+                }
+            } else {
+                self.from = None;
+            }
+        }
+        self.last.0 = *root;
+        self.last.1.clear();
+        self.last.1.extend_from_slice(rotations);
+        self.last_time = now;
+    }
+}
+
 pub fn normalize(q: [f32; 4]) -> [f32; 4] {
     let l = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
     if l < 1e-6 { [0.0, 0.0, 0.0, 1.0] } else { [q[0] / l, q[1] / l, q[2] / l, q[3] / l] }
@@ -170,6 +228,45 @@ mod tests {
         let q = slerp([0.0, 0.0, 0.0, 1.0], [0.0, 0.0, h, h], 0.5);
         let angle = 2.0 * q[3].clamp(-1.0, 1.0).acos();
         assert!((angle - std::f32::consts::FRAC_PI_4).abs() < 1e-4, "{angle}");
+    }
+
+    /// A turn of `degrees` about Z
+    fn about_z(degrees: f32) -> [f32; 4] {
+        let h = degrees.to_radians() / 2.0;
+        [0.0, 0.0, h.sin(), h.cos()]
+    }
+
+    fn degrees_about_z(q: [f32; 4]) -> f32 {
+        2.0 * q[2].atan2(q[3]).to_degrees()
+    }
+
+    #[test]
+    fn a_crossfade_eases_from_the_last_pose_into_the_new_motion() {
+        let mut fade = Crossfade::default();
+        let step = |fade: &mut Crossfade<u8>, key, now, degrees, height| {
+            let (mut root, mut rots) = ([0.0, height, 0.0], [about_z(degrees)]);
+            fade.apply(key, now, if key == 4 { 0.0 } else { CROSSFADE_SECONDS }, &mut root, &mut rots);
+            (degrees_about_z(rots[0]), root[1])
+        };
+        // The first motion shows as it is, and so does more of the same one
+        assert_eq!(step(&mut fade, 1, 0.0, 0.0, 100.0), (0.0, 100.0));
+        assert_eq!(step(&mut fade, 1, 0.01, 0.0, 100.0), (0.0, 100.0));
+        // A new motion starts from the pose before it, is halfway there halfway through, and
+        // arrives
+        let (a, y) = step(&mut fade, 2, 0.02, 90.0, 90.0);
+        assert!(a.abs() < 1e-3 && (y - 100.0).abs() < 1e-3, "{a} {y}");
+        let (a, y) = step(&mut fade, 2, 0.02 + CROSSFADE_SECONDS / 2.0, 90.0, 90.0);
+        assert!((a - 45.0).abs() < 1e-2 && (y - 95.0).abs() < 1e-3, "{a} {y}");
+        assert_eq!(step(&mut fade, 2, 0.02 + CROSSFADE_SECONDS, 90.0, 90.0).1, 90.0);
+        // Changing again partway through starts from where the body is
+        step(&mut fade, 3, 0.5, 0.0, 90.0);
+        let (mid, _) = step(&mut fade, 3, 0.5 + CROSSFADE_SECONDS / 2.0, 0.0, 90.0);
+        let (from, _) = step(&mut fade, 1, 0.5 + CROSSFADE_SECONDS / 2.0 + 0.01, -90.0, 90.0);
+        assert!((from - mid).abs() < 2.0 && mid > 30.0, "{mid} {from}");
+        // A body not drawn for a while takes up its motion as it is
+        assert_eq!(step(&mut fade, 2, 5.0, 60.0, 90.0).0.round(), 60.0);
+        // A motion given no time to ease into is cut to at once
+        assert_eq!(step(&mut fade, 4, 5.01, -60.0, 90.0).0.round(), -60.0);
     }
 
     #[test]

@@ -38,6 +38,10 @@ impl PlayerMotions {
     }
 }
 
+/// A body's ease from one motion into the next. What it is playing is its movement, and for a
+/// reload whether the magazine was empty (the two reloads are different motions).
+pub type BodyFade = motion::Crossfade<(Movement, Option<bool>)>;
+
 // Bones driven by the weapon hold rather than the locomotion cycle
 pub fn is_upper_body(name: &str) -> bool {
     matches!(name, "Chest" | "LeftCollar" | "RightCollar" | "LeftUpArm" | "LeftLowArm" | "LeftHand"
