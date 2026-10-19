@@ -121,6 +121,11 @@ impl<K> Default for Crossfade<K> {
 }
 
 impl<K: PartialEq> Crossfade<K> {
+    /// The motion the body is playing, as last given
+    pub fn key(&self) -> Option<&K> {
+        self.key.as_ref()
+    }
+
     /// Ease the pose of `key` at time `now` (seconds), the root position and per-bone
     /// rotations as `Motion::sample` gives them, from where the body was. `seconds` is how long
     /// easing into `key` takes, if it is new (0 cuts to it). A body not drawn for a while
