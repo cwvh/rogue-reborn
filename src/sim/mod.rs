@@ -24,7 +24,7 @@ use crate::util::{dist3, mul3, next_rng, unit3};
 use crate::visibility::Visibility;
 
 use characters::{Characters, Npc};
-use movement::{Reloading, forward, ground_speed, right};
+use movement::{Reloading, crouched_speed, forward, ground_speed, right};
 
 type V3 = [f32; 3];
 
@@ -81,6 +81,8 @@ pub struct Input {
     pub right: bool,
     /// Moving at a run (the default) rather than a walk
     pub run: bool,
+    /// Wanting to be crouched. The player stands up again only where there is room.
+    pub crouch: bool,
     /// The trigger is held
     pub fire: bool,
     /// Pressed since the last tick: use (open or close a door), reload, take out the gun,
@@ -289,8 +291,9 @@ pub struct Sim {
     /// For each player, how many ticks back in time the others were when they took their shot,
     /// as that player saw them (a server sets it before each tick; none means no looking back)
     pub rewind: Vec<f32>,
-    /// Where each living player was at the end of each of the latest ticks, oldest first
-    past: VecDeque<Vec<Option<V3>>>,
+    /// Where each living player was at the end of each of the latest ticks, and whether they
+    /// were crouched, oldest first
+    past: VecDeque<Vec<Option<(V3, bool)>>>,
     eye_height: f32,
     /// What a player starts with
     pub magazine: u32,
@@ -437,8 +440,8 @@ impl Sim {
 
     /// Where a player's eyes are
     pub fn eye(&self, slot: usize) -> V3 {
-        let p = self.players[slot].player.pos;
-        [p[0], p[1] + self.eye_height, p[2]]
+        let p = &self.players[slot].player;
+        [p.pos[0], p.pos[1] + self.world.params().eye(p.crouched), p.pos[2]]
     }
 
     /// Set every door this far open (0 shut, 1 open)
@@ -467,6 +470,7 @@ impl Sim {
             h.v3(p.player.pos);
             h.f32(p.player.vel_y);
             h.u32(p.player.on_ground as u32);
+            h.u32(p.player.crouched as u32);
             h.u32(p.ammo);
             h.u32(p.reserve);
             h.opt_f32(p.reload_until);
@@ -675,7 +679,7 @@ impl Sim {
         }
         self.apply_union_rooms();
         if self.pvp {
-            self.past.push_back(self.players.iter().map(|p| (p.active && p.respawn_at.is_none()).then_some(p.player.pos)).collect());
+            self.past.push_back(self.players.iter().map(|p| (p.active && p.respawn_at.is_none()).then_some((p.player.pos, p.player.crouched))).collect());
             while self.past.len() > PAST_TICKS {
                 self.past.pop_front();
             }
@@ -684,21 +688,22 @@ impl Sim {
     }
 
     /// Where a player was `back` ticks ago (between ticks, if it is not a whole number), or
-    /// where they are if `back` is nothing. None if they were not standing then.
-    fn position_then(&self, slot: usize, back: f32) -> Option<V3> {
-        let now = self.players[slot].player.pos;
+    /// where they are if `back` is nothing, and whether they were crouched (as at the nearer
+    /// tick). None if they were not standing then.
+    fn body_then(&self, slot: usize, back: f32) -> Option<(V3, bool)> {
+        let now = &self.players[slot].player;
         if back <= 0.0 || self.past.is_empty() {
-            return Some(now);
+            return Some((now.pos, now.crouched));
         }
         // The newest tick in `past` is the one just finished, which is as good as now
         let back = back.min((self.past.len() - 1) as f32);
         let newer = self.past.len() - 1 - back.floor() as usize;
         let at = |i: usize| self.past[i].get(slot).copied().flatten();
-        let (newer_pos, older_pos) = (at(newer), newer.checked_sub(1).and_then(at));
-        match (newer_pos, older_pos) {
-            (Some(n), Some(o)) => {
+        let (newer_body, older_body) = (at(newer), newer.checked_sub(1).and_then(at));
+        match (newer_body, older_body) {
+            (Some((n, nc)), Some((o, oc))) => {
                 let f = back.fract();
-                Some([0, 1, 2].map(|k| n[k] + (o[k] - n[k]) * f))
+                Some(([0, 1, 2].map(|k| n[k] + (o[k] - n[k]) * f), if f < 0.5 { nc } else { oc }))
             }
             (Some(n), None) if back.fract() < 0.5 => Some(n),
             (None, Some(o)) if back.fract() >= 0.5 => Some(o),
@@ -748,15 +753,25 @@ impl Sim {
 
     /// Walk the player, at speeds that come from the animations so the feet do not slide
     fn move_player(&mut self, slot: usize, input: &Input, dt: f32, right_cam: V3) {
+        // Crouching is at once; standing up waits for the room to
+        let body = &mut self.players[slot].player;
+        if input.crouch {
+            body.crouched = true;
+        } else if body.crouched && self.world.room_to_stand(body) {
+            body.crouched = false;
+        }
+        let crouched = body.crouched;
+        let speed = |m| if crouched { crouched_speed(m) } else { ground_speed(m) };
+
         let yaw_rad = input.look().0.to_radians();
         let fwd_flat = [-yaw_rad.sin(), 0.0, -yaw_rad.cos()];
         let (w, a, s_, d, run) = (input.forward, input.left, input.back, input.right, input.run);
         let scale = self.speed_scale;
         let fwd_speed = scale * if w == s_ { 0.0 }
-            else if w { ground_speed(if run { movement::Movement::Run } else { movement::Movement::Walk }) }
-            else { -ground_speed(movement::Movement::Back) };
+            else if w { speed(if run { movement::Movement::Run } else { movement::Movement::Walk }) }
+            else { -speed(movement::Movement::Back) };
         let side_speed = scale * if a == d { 0.0 }
-            else if d { ground_speed(movement::Movement::StrafeRight) } else { -ground_speed(movement::Movement::StrafeLeft) };
+            else if d { speed(movement::Movement::StrafeRight) } else { -speed(movement::Movement::StrafeLeft) };
         let mut vel = [
             fwd_flat[0] * fwd_speed + right_cam[0] * side_speed,
             fwd_flat[2] * fwd_speed + right_cam[2] * side_speed,
@@ -1092,7 +1107,6 @@ impl Sim {
         if !self.pvp {
             return None;
         }
-        let height = self.world.params().height;
         let a = dir[0] * dir[0] + dir[2] * dir[2];
         if a < 1e-9 {
             return None;
@@ -1102,7 +1116,8 @@ impl Sim {
             .filter(|&i| i != shooter && self.players[i].active && self.players[i].respawn_at.is_none())
             .filter_map(|i| {
                 // The body is an upright cylinder, where the shooter saw it
-                let feet = self.position_then(i, back)?;
+                let (feet, crouched) = self.body_then(i, back)?;
+                let height = self.world.params().body_height(crouched);
                 let (ox, oz) = (eye[0] - feet[0], eye[2] - feet[2]);
                 let b = 2.0 * (ox * dir[0] + oz * dir[2]);
                 let c = ox * ox + oz * oz - HIT_RADIUS * HIT_RADIUS;
@@ -1204,10 +1219,7 @@ impl Sim {
         let pos = self.players[slot].player.pos;
         let (probe, eye) = match observer {
             Some(o) => (o, o),
-            None => {
-                let eye_y = pos[1] + self.eye_height;
-                ([pos[0], eye_y - (self.eye_height - 10.0), pos[2]], [pos[0], eye_y, pos[2]])
-            }
+            None => ([pos[0], pos[1] + 10.0, pos[2]], self.eye(slot)),
         };
         if let Some(i) = self.level.rooms.locate(probe, self.players[slot].current_room) {
             self.players[slot].current_room = Some(i);
@@ -1465,6 +1477,33 @@ mod tests {
         let mut i = Input { fire: true, ..holding() };
         i.set_look(0.0, pitch);
         i
+    }
+
+    #[test]
+    fn crouching_lowers_the_eyes_and_slows_the_player_until_they_stand() {
+        let mut sim = demo();
+        let params = *sim.world.params();
+        let crouch = Input { crouch: true, ..holding() };
+        sim.tick(&[crouch], TICK);
+        assert!(sim.players[0].player.crouched);
+        assert_eq!(sim.eye(0)[1] - sim.players[0].player.pos[1], params.crouch_eye_height);
+        // A second's crouched run covers its own pace, well short of a standing run
+        let z = sim.players[0].player.pos[2];
+        run(&mut sim, &Input { forward: true, ..crouch }, 1.0);
+        let crouched = sim.players[0].player.pos[2] - z;
+        assert!((crouched.abs() - crouched_speed(movement::Movement::Run)).abs() < 10.0, "{crouched}");
+        // Let go of crouching in the open, and they are standing again
+        sim.tick(&[holding()], TICK);
+        assert!(!sim.players[0].player.crouched);
+        assert_eq!(sim.eye(0)[1] - sim.players[0].player.pos[1], params.eye_height);
+    }
+
+    #[test]
+    fn a_level_shot_passes_over_a_crouched_player() {
+        let mut sim = duel();
+        sim.tick(&[Input::default(), Input { crouch: true, ..holding() }], TICK);
+        sim.tick(&[aim(0.0), Input { crouch: true, ..holding() }], TICK);
+        assert_eq!(sim.players[1].hp, 100.0);
     }
 
     #[test]

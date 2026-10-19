@@ -16,7 +16,7 @@ pub struct Before {
 
 /// The buttons as bits
 pub fn buttons_of(i: &Input) -> u16 {
-    [i.forward, i.back, i.left, i.right, i.run, i.fire, i.use_key, i.reload, i.gun, i.grenade, i.toggle_culling]
+    [i.forward, i.back, i.left, i.right, i.run, i.fire, i.use_key, i.reload, i.gun, i.grenade, i.toggle_culling, i.crouch]
         .iter().enumerate().fold(0, |acc, (n, &b)| acc | (b as u16) << n)
 }
 
@@ -192,7 +192,7 @@ impl<'a> Reader<'a> {
         Ok(Input {
             yaw, pitch,
             forward: on(0), back: on(1), left: on(2), right: on(3), run: on(4), fire: on(5),
-            use_key: on(6), reload: on(7), gun: on(8), grenade: on(9), toggle_culling: on(10),
+            use_key: on(6), reload: on(7), gun: on(8), grenade: on(9), toggle_culling: on(10), crouch: on(11),
             observer,
         })
     }

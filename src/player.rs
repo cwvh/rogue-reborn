@@ -15,33 +15,96 @@ pub struct PlayerMotions {
     pub reload: Option<motion::Motion>,
     pub reload_empty: Option<motion::Motion>,
     pub throw: Option<motion::Motion>,
+    /// Crouched: kneeling with the gun up, and moving crouched
+    pub crouch_idle: Option<motion::Motion>,
+    pub crouch_walk: Option<motion::Motion>,
+    pub crouch_run: Option<motion::Motion>,
+    pub crouch_back: Option<motion::Motion>,
+    pub crouch_left: Option<motion::Motion>,
+    pub crouch_right: Option<motion::Motion>,
+    /// Crouching down from standing, and standing up from crouched
+    pub crouch_down: Option<motion::Motion>,
+    pub stand_up: Option<motion::Motion>,
+    /// Reloading kneeling, with rounds left in the magazine and once it is empty
+    pub crouch_reload: Option<motion::Motion>,
+    pub crouch_reload_empty: Option<motion::Motion>,
 }
 
 impl PlayerMotions {
-    pub fn get(&self, m: Movement) -> Option<&motion::Motion> {
-        match m {
-            Movement::Idle => &self.idle,
-            Movement::Walk => &self.walk,
-            Movement::Run => &self.run,
-            Movement::Back => &self.back,
-            Movement::StrafeLeft => &self.left,
-            Movement::StrafeRight => &self.right,
-            Movement::Fire => &self.fire,
-            Movement::Reload => &self.reload,
-            Movement::Throw => &self.throw,
+    /// The motion for a movement, standing or crouched. Firing, reloading and throwing are
+    /// the same motions crouched: the body kneels and the arms play them.
+    pub fn get(&self, m: Movement, crouched: bool) -> Option<&motion::Motion> {
+        match (m, crouched) {
+            (Movement::Idle, false) => &self.idle,
+            (Movement::Walk, false) => &self.walk,
+            (Movement::Run, false) => &self.run,
+            (Movement::Back, false) => &self.back,
+            (Movement::StrafeLeft, false) => &self.left,
+            (Movement::StrafeRight, false) => &self.right,
+            (Movement::Idle, true) => &self.crouch_idle,
+            (Movement::Walk, true) => &self.crouch_walk,
+            (Movement::Run, true) => &self.crouch_run,
+            (Movement::Back, true) => &self.crouch_back,
+            (Movement::StrafeLeft, true) => &self.crouch_left,
+            (Movement::StrafeRight, true) => &self.crouch_right,
+            (Movement::Fire, _) => &self.fire,
+            (Movement::Reload, _) => &self.reload,
+            (Movement::Throw, _) => &self.throw,
         }.as_ref()
     }
 
-    /// The motion for a reload, as the magazine was
-    pub fn reload(&self, r: Reloading) -> Option<&motion::Motion> {
-        if r.empty { &self.reload_empty } else { &self.reload }.as_ref()
+    /// The motion that takes a body into a stance: crouching down, or standing up
+    pub fn stance_change(&self, crouched: bool) -> Option<&motion::Motion> {
+        if crouched { &self.crouch_down } else { &self.stand_up }.as_ref()
+    }
+
+    /// The motion for a reload, as the magazine was, standing or kneeling
+    pub fn reload(&self, r: Reloading, crouched: bool) -> Option<&motion::Motion> {
+        match (r.empty, crouched) {
+            (false, false) => &self.reload,
+            (true, false) => &self.reload_empty,
+            (false, true) => &self.crouch_reload,
+            (true, true) => &self.crouch_reload_empty,
+        }.as_ref()
     }
 }
 
-/// A body's ease from one motion into the next. What it is playing is its movement, for a
-/// reload whether the magazine was empty (the two reloads are different motions), and whether
-/// the arms are firing.
-pub type BodyFade = motion::Crossfade<(Movement, Option<bool>, bool)>;
+/// What a body is playing, as far as easing from one motion into the next goes
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct BodyKey {
+    pub movement: Movement,
+    /// Reloading, and whether the magazine was empty (the two reloads are different motions)
+    pub reload: Option<bool>,
+    /// The arms are firing
+    pub aiming: bool,
+    pub crouched: bool,
+    /// Crouching down or standing up
+    pub changing: bool,
+}
+
+/// A body's ease from one motion into the next
+pub type BodyFade = motion::Crossfade<BodyKey>;
+
+/// What drawing a body remembers from one frame to the next
+#[derive(Default)]
+pub struct BodyState {
+    pub fade: BodyFade,
+    /// The stance it was last drawn in, and when that last changed
+    stance: Option<bool>,
+    changed_at: Option<f32>,
+}
+
+impl BodyState {
+    /// Note the body's stance at `now` (seconds), and say how long ago it last changed, if it
+    /// has since the body was first drawn
+    pub fn since_stance_change(&mut self, crouched: bool, now: f32) -> Option<f32> {
+        if self.stance.is_some_and(|s| s != crouched) {
+            self.changed_at = Some(now);
+        }
+        self.stance = Some(crouched);
+        self.changed_at.map(|at| now - at)
+    }
+}
 
 // Bones driven by the weapon hold rather than the locomotion cycle
 pub fn is_upper_body(name: &str) -> bool {

@@ -19,14 +19,15 @@ use rogue_reborn::net::animation::Doing;
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
 use rogue_reborn::recording::{Playback, Recorder, Recording};
 use rogue_reborn::sim::characters::{Characters, Npc, Rig, place_npcs};
-use rogue_reborn::sim::movement::{EMPTY_RELOAD_MOTION, Movement, RELOAD_MOTION, Reloading, ground_speed, movement_from_keys, reload_frame};
+use rogue_reborn::motion::quat_mul;
+use rogue_reborn::sim::movement::{CROUCHED_EMPTY_RELOAD_MOTION, CROUCHED_RELOAD_MOTION, EMPTY_RELOAD_MOTION, Movement, RELOAD_MOTION, Reloading, crouched_speed, ground_speed, movement_from_keys, reload_frame};
 use rogue_reborn::collision::{CollisionWorld, Params};
 use rogue_reborn::impact::{self, Surface};
 use crate::opengl::*;
 use crate::args::parse_args;
 use crate::camera::{Camera, listener_of, apply_camera};
 use rogue_reborn::util::unit3;
-use crate::player::{BodyFade, PlayerMotions, is_upper_body};
+use crate::player::{BodyKey, BodyState, PlayerMotions, is_upper_body};
 use crate::draw::{WeaponDraw, CharacterArrays, draw_weapon, draw_character, draw_glass, draw_fracture, build_mesh, Which, draw_plan, wipe_opening, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
@@ -268,17 +269,39 @@ fn main() {
         let name = args.player_anims.iter().rev().find(|(k, _)| k == slot).map_or(default, |(_, m)| m.as_str());
         load_motion(name)
     };
+    // What is done in place stands on the floor, whatever height its motion was made at, so the
+    // body does not sink or rise from one into the next. Crouching down stands on its last frame,
+    // where it gives way to the kneel.
+    let planted_at = |slot: &str, default: &str, at_end: bool| slot_motion(slot, default).map(|mut m| {
+        if let Some(rig) = characters.as_ref().and_then(|c| c.rig.as_ref()) {
+            let frame = if at_end { m.frames.saturating_sub(1) as f32 } else { 0.0 };
+            rig.skeleton.plant(&mut m, frame);
+        }
+        m
+    });
+    let planted = |slot: &str, default: &str| planted_at(slot, default, false);
     let player_motions = PlayerMotions {
-        idle: slot_motion("idle", "up_cyc_mp5k"),
+        idle: planted("idle", "up_cyc_mp5k"),
         walk: slot_motion("walk", "tmu_wk1"),
         run: slot_motion("run", "tmu_rn"),
         back: slot_motion("back", "tmu_bk1"),
         left: slot_motion("left", "tms_l2"),
         right: slot_motion("right", "tms_r2"),
-        fire: slot_motion("fire", "fire_up_mp5k"),
-        reload: slot_motion("reload", RELOAD_MOTION),
-        reload_empty: slot_motion("reload_empty", EMPTY_RELOAD_MOTION),
-        throw: slot_motion("throw", "gr_ov_up"),
+        fire: planted("fire", "fire_up_mp5k"),
+        reload: planted("reload", RELOAD_MOTION),
+        reload_empty: planted("reload_empty", EMPTY_RELOAD_MOTION),
+        throw: planted("throw", "gr_ov_up"),
+        // Crouched, as the original's tables have them for a compact weapon
+        crouch_idle: planted("crouch_idle", "crouch_arms_mp5k"),
+        crouch_walk: slot_motion("crouch_walk", "tmc_fd"),
+        crouch_run: slot_motion("crouch_run", "rmc_rn"),
+        crouch_back: slot_motion("crouch_back", "tmc_bk"),
+        crouch_left: slot_motion("crouch_left", "tmc_lf"),
+        crouch_right: slot_motion("crouch_right", "tmc_rt"),
+        crouch_down: planted_at("crouch_down", "up_cr", true),
+        stand_up: planted("stand_up", "cr_up"),
+        crouch_reload: planted("crouch_reload", CROUCHED_RELOAD_MOTION),
+        crouch_reload_empty: planted("crouch_reload_empty", CROUCHED_EMPTY_RELOAD_MOTION),
     };
 
     // The MP5K: definition, model and texture
@@ -457,6 +480,11 @@ fn main() {
 
     // The game: the player stands on the floor below the camera
     let eye_height = world.params().eye_height;
+    let crouch_eye_height = world.params().crouch_eye_height;
+    // The view's height over the feet, which eases down and up as the player crouches and stands
+    let mut eye_now = eye_height;
+    // Left Ctrl switches between standing and crouched
+    let mut crouch_wanted = false;
     let (mag_size, reserve) = match (&playback, &joined) {
         (Some(p), _) => (p.header().magazine, p.header().reserve),
         (_, Some(s)) => (s.magazine, s.reserve),
@@ -582,8 +610,8 @@ fn main() {
     let mut was_reloading = false;
     let mut step_phase = 0i32;
     let mut remote_anim = rogue_reborn::net::animation::Animators::default();
-    // Each body's ease from one motion into the next, the player's own and the other players'
-    let mut body_fades: HashMap<usize, BodyFade> = HashMap::new();
+    // What each body's drawing remembers, the player's own and the other players'
+    let mut bodies: HashMap<usize, BodyState> = HashMap::new();
     // The latest kills, with when they leave the screen and their color, and how this player died:
     // by whom, and where they were looking before
     let mut feed: Vec<(f32, String, [f32; 3])> = Vec::new();
@@ -681,6 +709,9 @@ fn main() {
                         (Key::R, Action::Press) => {
                             reload_pressed = true;
                         }
+                        (Key::LeftControl, Action::Press) => {
+                            crouch_wanted = !crouch_wanted;
+                        }
                         (Key::F1, Action::Press) if playback.is_none() && net.is_none() => {
                             // Into the player's body, who drops in from wherever the view is, and out again
                             first_person = !first_person;
@@ -748,12 +779,14 @@ fn main() {
                 reload_pressed = true;
             }
             walk_held = frames_drawn < n && held.contains('R');
+            // C crouches for the whole run; K switches stance at frame 30, to see the change
+            crouch_wanted = held.contains('C') != (held.contains('K') && frames_drawn >= 30);
             for (ch, key) in [('W', Key::W), ('A', Key::A), ('S', Key::S), ('D', Key::D)] {
                 if frames_drawn < n && held.contains(ch) { keys.insert(key); } else { keys.remove(&key); }
             }
             if frames_drawn % 10 == 0 {
-                println!("frame {frames_drawn:4} feet=({:.1}, {:.1}, {:.1}) on_ground={} movement={movement:?} anim_frame={player_frame:.1}",
-                    sim.players[me].player.pos[0], sim.players[me].player.pos[1], sim.players[me].player.pos[2], sim.players[me].player.on_ground);
+                println!("frame {frames_drawn:4} crouch_wanted={crouch_wanted} crouched={} feet=({:.1}, {:.1}, {:.1}) on_ground={} movement={movement:?} anim_frame={player_frame:.1}",
+                    sim.players[me].player.crouched, sim.players[me].player.pos[0], sim.players[me].player.pos[1], sim.players[me].player.pos[2], sim.players[me].player.on_ground);
             }
         }
 
@@ -802,6 +835,7 @@ fn main() {
             left: keys.contains(&Key::A),
             right: keys.contains(&Key::D),
             run: !walk_held,
+            crouch: crouch_wanted,
             fire: trigger,
             use_key: use_pressed,
             reload: reload_pressed,
@@ -881,7 +915,9 @@ fn main() {
             let alpha = if fixed_step { 1.0 } else { (tick_budget / sim::TICK).clamp(0.0, 1.0) };
             let (a, b) = (prev_feet, sim.players[me].player.pos);
             let feet = [a[0] * (1.0 - alpha) + b[0] * alpha, a[1] * (1.0 - alpha) + b[1] * alpha, a[2] * (1.0 - alpha) + b[2] * alpha];
-            camera.position = [feet[0], feet[1] + eye_height, -feet[2]];
+            let eye_target = if sim.players[me].player.crouched { crouch_eye_height } else { eye_height };
+            eye_now += (eye_target - eye_now) * (1.0 - (-step_dt * 15.0).exp());
+            camera.position = [feet[0], feet[1] + eye_now, -feet[2]];
             feet
         } else {
             sim.players[me].player.pos
@@ -895,7 +931,7 @@ fn main() {
             Some(until) if first_person => {
                 let (yaw0, pitch0) = *alive_look.get_or_insert((camera.yaw, camera.pitch));
                 let fall = ((game_time - (until - sim::RESPAWN_SECONDS)) / 0.6).clamp(0.0, 1.0);
-                camera.position[1] -= (eye_height - 25.0) * fall * fall * (3.0 - 2.0 * fall);
+                camera.position[1] -= (eye_now - 25.0) * fall * fall * (3.0 - 2.0 * fall);
                 let (want_yaw, want_pitch) = match killed_by.flatten().filter(|&k| k != me && sim.players[k].active) {
                     Some(k) => {
                         let t = sim.players[k].player.pos;
@@ -1073,8 +1109,10 @@ fn main() {
                 movement = now;
                 player_frame = 0.0;
             }
-            let rate = if matches!(movement, Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw) { 1.0 } else { (moved / (ground_speed(movement) * args.speed_scale.unwrap_or(1.0))).clamp(0.5, 3.0) * args.anim_scale.unwrap_or(1.5) };
-            let frames = player_motions.get(movement).map_or(1, |m| m.frames.max(1)) as f32;
+            let crouched = sim.players[me].player.crouched;
+            let pace = if crouched { crouched_speed(movement) } else { ground_speed(movement) };
+            let rate = if matches!(movement, Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw) { 1.0 } else { (moved / (pace * args.speed_scale.unwrap_or(1.0))).clamp(0.5, 3.0) * args.anim_scale.unwrap_or(1.5) };
+            let frames = player_motions.get(movement, crouched).map_or(1, |m| m.frames.max(1)) as f32;
             // A reload's frame follows its progress, and is picked where the body is drawn
             player_frame = if let (Movement::Throw, Some(th)) = (movement, sim.players[me].throw) {
                 ((game_time - th.start) / sim::THROW_SECONDS).clamp(0.0, 1.0) * (frames - 1.0)
@@ -1115,7 +1153,7 @@ fn main() {
         // Ambient sound for the rooms around the player's feet
         if let (Some(snd), Some(amb)) = (sound.as_mut(), ambience.as_mut()) {
             let listener = listener_of(&camera);
-            let feet = [listener.pos[0], listener.pos[1] - eye_height, listener.pos[2]];
+            let feet = [listener.pos[0], listener.pos[1] - eye_now, listener.pos[2]];
             let rooms: Vec<&str> = level.rooms.rooms.iter()
                 .filter(|r| r.contains(feet, 50.0))
                 .map(|r| r.section_name.as_str())
@@ -1498,43 +1536,73 @@ fn main() {
             // How a posed body is drawn, for the other players and for the player's own
             // `reloading` is the reload they are in the middle of, if any: its motion and frame
             // follow its progress, on the beats of its sound. `firing` says the gun is firing,
-            // which the arms show whatever the legs do. `fade` eases the body from one motion
-            // into the next.
+            // which the arms show whatever the legs do. `crouched` kneels the body for what is
+            // done in place, and a change of stance plays crouching down or standing up. `body`
+            // is what the drawing remembers of this body from frame to frame.
             let draw_body = |chars: &Characters, movement: Movement, frame: f32, feet: [f32; 3], yaw_deg: f32, scale: [f32; 3],
                              face: Option<u32>, hand: Option<&Option<WeaponDraw>>, grenade: bool, flash: bool, reloading: Option<Reloading>,
-                             firing: bool, fade: &mut BodyFade| -> bool {
+                             firing: bool, crouched: bool, body: &mut BodyState| -> bool {
                 let Some(Rig { skeleton: skel, skin }) = &chars.rig else { return false };
-                let reload = reloading.and_then(|r| player_motions.reload(r).map(|m| (m, reload_frame(r, m.frames.max(1) as f32))));
-                let (mot, frame) = match (movement, reload) {
-                    (Movement::Reload, Some(shown)) => shown,
+                let moving = matches!(movement, Movement::Walk | Movement::Run | Movement::Back | Movement::StrafeLeft | Movement::StrafeRight);
+                // Crouching down or standing up plays in place, at its own pace; moving cuts it short
+                let since = body.since_stance_change(crouched, game_time);
+                let changing = since.filter(|_| !moving)
+                    .and_then(|t| player_motions.stance_change(crouched).map(|m| (m, t * 30.0)))
+                    .filter(|(m, f)| *f < m.frames.saturating_sub(1) as f32);
+                let reload = reloading.and_then(|r| player_motions.reload(r, crouched).map(|m| (m, reload_frame(r, crouched, m.frames.max(1) as f32))));
+                // Crouched, firing and throwing are done kneeling, by the arms, as they are while
+                // the body crouches down or stands up. A reload has a kneeling motion of its own.
+                let kneeling = crouched && !moving && movement != Movement::Idle && !(movement == Movement::Reload && reload.is_some());
+                let arms_only = kneeling || (changing.is_some() && movement != Movement::Idle);
+                // A motion that loops on its own clock, whatever the body's frame
+                let looping = |m: &'_ rogue_reborn::motion::Motion| (game_time * 30.0) % m.frames.max(1) as f32;
+                let (mot, frame) = match (changing, movement, reload) {
+                    (Some(change), ..) => change,
+                    (None, Movement::Reload, Some(shown)) => shown,
+                    _ if kneeling => {
+                        let Some(knee) = player_motions.get(Movement::Idle, true) else { return false };
+                        (knee, looping(knee))
+                    }
                     _ => {
-                        let Some(mot) = player_motions.get(movement) else { return false };
+                        let Some(mot) = player_motions.get(movement, crouched) else { return false };
                         (mot, frame)
                     }
                 };
                 let (mut root, mut rots) = mot.sample(frame.min(mot.frames.saturating_sub(1) as f32));
                 // A reload keeps the arms busy, so they fire only outside one
                 let aiming = (firing || movement == Movement::Fire) && reload.is_none();
-                // Moving: legs from the locomotion cycle, upper body reloads, fires (the fire
-                // motion looping at its own pace) or keeps the gun hold
-                if matches!(movement, Movement::Walk | Movement::Run | Movement::Back | Movement::StrafeLeft | Movement::StrafeRight) {
-                    let fire = player_motions.get(Movement::Fire).filter(|_| aiming)
-                        .map(|m| (m, (game_time * 30.0) % m.frames.max(1) as f32));
-                    let upper = reload.or(fire).or_else(|| player_motions.get(Movement::Idle).map(|hold| (hold, 0.0)));
+                // Moving or kneeling: the legs from the motion, and the upper body reloads, fires
+                // (the fire motion looping at its own pace), throws or keeps the gun hold
+                if moving || arms_only {
+                    let fire = player_motions.get(Movement::Fire, crouched).filter(|_| aiming).map(|m| (m, looping(m)));
+                    let throw = player_motions.get(Movement::Throw, crouched).filter(|_| arms_only && movement == Movement::Throw).map(|m| (m, frame));
+                    let upper = reload.or(fire).or(throw).or_else(|| player_motions.get(Movement::Idle, crouched).map(|hold| (hold, 0.0)));
                     if let Some((upper, at)) = upper {
                         let (_, hold_rots) = upper.sample(at);
+                        // The hips of a crouched move pitch well forward of the kneeling hold's, so
+                        // crouched the chest keeps the way it faces in the hold, not its turn from
+                        // the hips (which would point the gun at the floor)
+                        let hips = skel.bones.iter().find(|b| b.name == "Hips").map(|b| b.anim_index);
+                        let (from, to) = match hips.and_then(|h| Some((*hold_rots.get(h)?, *rots.get(h)?))) {
+                            Some((held, under)) if crouched || changing.is_some() => (held, under),
+                            _ => ([0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]),
+                        };
+                        let undo = [-to[0], -to[1], -to[2], to[3]];
                         for b in &skel.bones {
                             if is_upper_body(&b.name) {
-                                if let (Some(r), Some(h)) = (rots.get_mut(b.anim_index), hold_rots.get(b.anim_index)) { *r = *h; }
+                                if let (Some(r), Some(h)) = (rots.get_mut(b.anim_index), hold_rots.get(b.anim_index)) {
+                                    *r = if b.name == "Chest" { quat_mul(undo, quat_mul(from, *h)) } else { *h };
+                                }
                             }
                         }
                     }
                 }
                 // Raising the gun to fire is a cut, as in the original, so the first shots never
                 // leave a gun still on its way up. Once firing, the legs still ease.
-                let raising = aiming && !fade.key().is_some_and(|k| k.2);
+                let raising = aiming && !body.fade.key().is_some_and(|k| k.aiming);
                 let ease = if raising { 0.0 } else { rogue_reborn::motion::CROSSFADE_SECONDS };
-                fade.apply((movement, reloading.map(|r| r.empty), aiming), game_time, ease, &mut root, &mut rots);
+                let key = BodyKey { movement, reload: reloading.map(|r| r.empty), aiming, crouched, changing: changing.is_some() };
+                body.fade.apply(key, game_time, ease, &mut root, &mut rots);
                 let pose = skel.pose([0.0, root[1], 0.0], &rots);
                 let verts = skin.apply(&pose);
                 glPushMatrix();
@@ -1576,19 +1644,20 @@ fn main() {
                             throwing: p.throw.map(|t| (game_time - t.start) / sim::THROW_SECONDS),
                             reloading: p.reloading(game_time),
                             firing: p.gun_trigger && p.ammo > 0,
+                            crouched: p.player.crouched,
                         };
-                        let frames = |m: Movement| player_motions.get(m).map_or(1, |m| m.frames.max(1)) as f32;
+                        let frames = |m: Movement| player_motions.get(m, doing.crouched).map_or(1, |m| m.frames.max(1)) as f32;
                         let (movement, frame) = remote_anim.update(slot, pos, yaw, step_dt, doing, frames, args.speed_scale.unwrap_or(1.0), args.anim_scale.unwrap_or(1.5));
                         let scale = actors.get(slot % actors.len().max(1)).map_or([1.0; 3], |a| a.scale);
                         let hand = if p.equipped_grenade { p.throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
                         let flash = !p.equipped_grenade && game_time < p.flash_until;
                         // Hidden, the animation still follows them
-                        if !visible || draw_body(chars, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, doing.reloading, doing.firing, body_fades.entry(slot).or_default()) {
+                        if !visible || draw_body(chars, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, doing.reloading, doing.firing, doing.crouched, bodies.entry(slot).or_default()) {
                             continue;
                         }
                     } else {
                         remote_anim.forget(slot);
-                        body_fades.remove(&slot);
+                        bodies.remove(&slot);
                     }
                     if !visible {
                         continue;
@@ -1636,7 +1705,7 @@ fn main() {
                 let mine = &sim.players[me];
                 let hand = if mine.equipped_grenade { mine.throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
                 let flash = !mine.equipped_grenade && game_time < mine.flash_until;
-                draw_body(chars, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash, mine.reloading(game_time), sim.firing(me), body_fades.entry(me).or_default());
+                draw_body(chars, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash, mine.reloading(game_time), sim.firing(me), mine.player.crouched, bodies.entry(me).or_default());
             }
 
             // Grenades in the air
@@ -2002,7 +2071,7 @@ fn main() {
                 let material = hit.material.and_then(|m| level.materials.materials.get(m)).map_or("?", |m| m.filename.as_str());
                 (hit, point, material)
             });
-            let feet = [eye[0], eye[1] - if first_person { eye_height } else { 0.0 }, eye[2]];
+            let feet = [eye[0], eye[1] - if first_person { eye_now } else { 0.0 }, eye[2]];
             let nearby_doors: Vec<String> = sim.doors.iter().zip(&sim.door_states)
                 .filter_map(|(d, s)| {
                     let c = d.center(s.open);

@@ -4,7 +4,7 @@
 //!   rrbot --connect 127.0.0.1:27960 --keys WF --seconds 10
 //!
 //! `--keys` says what the player does, with the letters of the viewer's `--hold`: W A S D to move,
-//! F to fire, T to take out a grenade and throw it, L to reload.
+//! F to fire, T to take out a grenade and throw it, L to reload, C to crouch.
 //!
 //!   rrbot --connect 127.0.0.1:27960 --fight --skill normal
 //!
@@ -122,7 +122,7 @@ fn main() {
                 }
                 None => {
                     let mut input = Input {
-                        forward: held('W'), left: held('A'), back: held('S'), right: held('D'), run: !held('R'),
+                        forward: held('W'), left: held('A'), back: held('S'), right: held('D'), run: !held('R'), crouch: held('C'),
                         fire: held('F') || (held('T') && ticks < 30), ..Input::default()
                     };
                     // T takes out a grenade first and throws it after holding for half a second

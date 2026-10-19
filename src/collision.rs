@@ -33,6 +33,9 @@ pub struct Params {
     pub height: f32,
     /// Feet to eye
     pub eye_height: f32,
+    /// Feet to top of head and to eye, crouched
+    pub crouch_height: f32,
+    pub crouch_eye_height: f32,
     /// Largest ledge that can be walked up without jumping
     pub step_up: f32,
     /// Largest drop that is walked down (stairs) instead of fallen
@@ -49,11 +52,25 @@ impl Default for Params {
             radius: 30.0,
             height: 180.0,
             eye_height: 165.0,
+            crouch_height: 125.0,
+            crouch_eye_height: 110.0,
             step_up: 45.0,
             step_down: 45.0,
             max_slope_deg: 50.0,
             gravity: 1800.0,
         }
+    }
+}
+
+impl Params {
+    /// Feet to top of head, standing or crouched
+    pub fn body_height(&self, crouched: bool) -> f32 {
+        if crouched { self.crouch_height } else { self.height }
+    }
+
+    /// Feet to eye, standing or crouched
+    pub fn eye(&self, crouched: bool) -> f32 {
+        if crouched { self.crouch_eye_height } else { self.eye_height }
     }
 }
 
@@ -63,11 +80,13 @@ pub struct Player {
     pub pos: V3,
     pub vel_y: f32,
     pub on_ground: bool,
+    /// Crouched, which makes the body shorter
+    pub crouched: bool,
 }
 
 impl Player {
     pub fn new(pos: V3) -> Self {
-        Self { pos, vel_y: 0.0, on_ground: false }
+        Self { pos, vel_y: 0.0, on_ground: false, crouched: false }
     }
 }
 
@@ -593,6 +612,26 @@ impl CollisionWorld {
         }
     }
 
+    /// Whether a crouched player has the room to stand up: nothing solid between the top of
+    /// the crouched body and the top of a standing one
+    pub fn room_to_stand(&self, p: &Player) -> bool {
+        let prm = &self.params;
+        // A square within the body's circle, from the crouched head to the standing one
+        let half = prm.radius * 0.7;
+        let b = [p.pos[0] - half, p.pos[1] + prm.crouch_height, p.pos[2] - half, p.pos[0] + half, p.pos[1] + prm.height, p.pos[2] + half];
+        for r in self.row(b[2])..=self.row(b[5]) {
+            for c in self.col(b[0])..=self.col(b[3]) {
+                for &ti in &self.cells[r * self.cols + c] {
+                    let t = &self.tris[ti as usize];
+                    if self.solid(t) && reaches_into(t, &b) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
     /// Depenetrate the body (a stack of spheres) from wall-like triangles,
     /// moving only horizontally.
     fn push_out_of_walls(&self, p: &mut Player) {
@@ -601,7 +640,7 @@ impl CollisionWorld {
         // Spheres start above step height so ledges the player can climb are
         // not treated as walls
         let lo = prm.step_up + prm.radius;
-        let hi = (prm.height - prm.radius).max(lo);
+        let hi = (prm.body_height(p.crouched) - prm.radius).max(lo);
         let count = 3;
 
         let mut near: Vec<u32> = Vec::new();
@@ -664,7 +703,7 @@ impl CollisionWorld {
         let prm = &self.params;
         let ny_floor = self.walkable_ny();
         let lo = prm.step_up + prm.radius;
-        let hi = (prm.height - prm.radius).max(lo);
+        let hi = (prm.body_height(p.crouched) - prm.radius).max(lo);
         let mut worst = f32::INFINITY;
         for k in 0..3 {
             let h = lo + (hi - lo) * (k as f32 / 2.0);
@@ -815,6 +854,31 @@ mod tests {
             rooms.sort();
             assert_eq!(rooms, vec![100, 605], "the deck at {at:?}");
         }
+    }
+
+    #[test]
+    fn a_crouched_player_stands_only_where_there_is_head_room() {
+        // A floor, and a slab over half of it (x from 0 on) at `height`
+        let under_slab = |height: f32| {
+            let mut w = CollisionWorld::flat_floor(0.0, 1000.0);
+            let n = [0.0, -1.0, 0.0];
+            let tri = |a, b, c| Tri { a, b, c, n, off: false, hidden: false, material: usize::MAX, room: NO_ROOM };
+            let at = |x: f32, z: f32| [x, height, z];
+            w.tris.push(tri(at(0.0, -1000.0), at(1000.0, 1000.0), at(1000.0, -1000.0)));
+            w.tris.push(tri(at(0.0, -1000.0), at(0.0, 1000.0), at(1000.0, 1000.0)));
+            w.cells[0].extend([2, 3]);
+            w
+        };
+        let crouched = |x: f32| Player { pos: [x, 0.0, 0.0], vel_y: 0.0, on_ground: true, crouched: true };
+        let low = under_slab(150.0);
+        assert!(!low.room_to_stand(&crouched(500.0)));
+        assert!(low.room_to_stand(&crouched(-500.0)));
+        // Clear of the slab's edge by the body's width, there is room
+        assert!(low.room_to_stand(&crouched(-30.0)));
+        // A slab above a standing head is no bar
+        assert!(under_slab(200.0).room_to_stand(&crouched(500.0)));
+        // Nor one below the crouched head, which the crouched body already fits under
+        assert!(under_slab(100.0).room_to_stand(&crouched(500.0)));
     }
 
     #[test]

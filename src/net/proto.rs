@@ -92,6 +92,7 @@ pub struct PlayerSnap {
     pub pos: V3,
     pub vel_y: f32,
     pub on_ground: bool,
+    pub crouched: bool,
     pub look: (u16, u16),
     pub controlled: bool,
     pub moved_speed: f32,
@@ -158,6 +159,7 @@ impl Snapshot {
             pos: p.player.pos,
             vel_y: p.player.vel_y,
             on_ground: p.player.on_ground,
+            crouched: p.player.crouched,
             look: p.look,
             controlled: p.controlled,
             moved_speed: p.moved_speed,
@@ -215,6 +217,7 @@ impl Snapshot {
                 p.player.pos = s.pos;
                 p.player.vel_y = s.vel_y;
                 p.player.on_ground = s.on_ground;
+                p.player.crouched = s.crouched;
                 p.moved_speed = s.moved_speed;
                 p.look = s.look;
             }
@@ -410,7 +413,7 @@ fn read_throw(r: &mut Reader) -> Result<Option<Throw>> {
 }
 
 fn flag_byte(p: &PlayerSnap) -> u8 {
-    [p.on_ground, p.controlled, p.gun_trigger, p.equipped_grenade].iter().enumerate().fold(0, |acc, (n, &b)| acc | (b as u8) << n)
+    [p.on_ground, p.controlled, p.gun_trigger, p.equipped_grenade, p.crouched].iter().enumerate().fold(0, |acc, (n, &b)| acc | (b as u8) << n)
 }
 
 fn write_message(w: &mut Writer, m: &Option<(String, f32)>) {
@@ -467,7 +470,7 @@ fn read_player(r: &mut Reader, slot: u8) -> Result<PlayerSnap> {
     let target_hp = r.opt_f32()?;
     let (deaths, hp, respawn_at) = (r.u16()? as u32, r.f32()?, r.opt_f32()?);
     Ok(PlayerSnap {
-        slot, pos, vel_y, on_ground: on(0), look, controlled: on(1), moved_speed, ammo, reserve, reload_until,
+        slot, pos, vel_y, on_ground: on(0), crouched: on(4), look, controlled: on(1), moved_speed, ammo, reserve, reload_until,
         flash_until, gun_trigger: on(2), kills, deaths, hp, respawn_at, equipped_grenade: on(3), grenades_left, charge_from,
         throw, message, target_hp,
     })
@@ -548,7 +551,7 @@ fn read_player_delta(r: &mut Reader, mask: u32, base: &PlayerSnap) -> Result<Pla
     if on(12) {
         let flags = r.u8()?;
         let f = |n: u8| flags >> n & 1 != 0;
-        (p.on_ground, p.controlled, p.gun_trigger, p.equipped_grenade) = (f(0), f(1), f(2), f(3));
+        (p.on_ground, p.controlled, p.gun_trigger, p.equipped_grenade, p.crouched) = (f(0), f(1), f(2), f(3), f(4));
     }
     if on(13) { p.message = read_message(r)?; }
     if on(14) { p.target_hp = r.opt_f32()?; }
@@ -914,7 +917,7 @@ mod tests {
 
     fn player(slot: u8) -> PlayerSnap {
         PlayerSnap {
-            slot, pos: [1.0, 2.0, 3.0], vel_y: -4.0, on_ground: true, look: (123, 65000), controlled: true, moved_speed: 7.5,
+            slot, pos: [1.0, 2.0, 3.0], vel_y: -4.0, on_ground: true, crouched: true, look: (123, 65000), controlled: true, moved_speed: 7.5,
             ammo: 12, reserve: 400, reload_until: Some(3.5), flash_until: 1.25, gun_trigger: true, kills: 3, deaths: 1, hp: 62.5,
             respawn_at: Some(20.0),
             equipped_grenade: true, grenades_left: 2, charge_from: None,

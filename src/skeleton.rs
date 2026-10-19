@@ -16,7 +16,11 @@
 
 use anyhow::{Context, Result, ensure};
 
-use crate::motion::quat_rotate;
+use crate::motion::{Motion, quat_rotate};
+
+/// How high the ankles are over the floor when a character stands on it, as the motions made to
+/// (crouching down, standing up, the crouched idle) have them
+pub const ANKLE_HEIGHT: f32 = 13.4;
 
 const PRE_NAME: usize = 130;
 const POST_NAME: usize = 39;
@@ -179,6 +183,25 @@ impl Skeleton {
         out.into_iter().map(|t| t.unwrap()).collect()
     }
 
+    /// Raise or lower a motion done in place so that its feet stand on the floor: its lower
+    /// ankle at `ANKLE_HEIGHT` in the pose at `frame`. Some motions (the crouched arm hold and
+    /// the reloads among them) were made with their feet in the floor, so going from one motion
+    /// into another would sink or lift the body. A change of stance is planted by the frame
+    /// where it meets the other motion.
+    pub fn plant(&self, m: &mut Motion, frame: f32) {
+        let feet: Vec<usize> = ["LeftFoot", "RightFoot"].iter()
+            .filter_map(|n| self.bones.iter().position(|b| &b.name == n)).collect();
+        if feet.is_empty() || m.keys.is_empty() {
+            return;
+        }
+        let (root, rotations) = m.sample(frame);
+        let pose = self.pose([0.0, root[1], 0.0], &rotations);
+        let lowest = feet.iter().map(|&f| pose[f].pos[1]).fold(f32::MAX, f32::min);
+        for k in &mut m.keys {
+            k.root[1] += ANKLE_HEIGHT - lowest;
+        }
+    }
+
     /// The bone whose bind position is nearest `p`, with the distance
     pub fn nearest_bone(&self, p: [f32; 3]) -> Option<(usize, f32)> {
         self.bones.iter().enumerate().map(|(i, b)| {
@@ -245,6 +268,26 @@ mod tests {
                 assert!((b.bind_pos[k] - t.pos[k]).abs() < 1e-3, "{} {:?} vs {:?}", b.name, b.bind_pos, t.pos);
             }
         }
+    }
+
+    #[test]
+    fn a_planted_motion_stands_on_the_floor() {
+        let Some(s) = load() else { return };
+        let read = |name: &str| crate::motion::read(Path::new(&format!("data/motion/{name}.DAM"))).unwrap();
+        // The crouched arm hold has its feet in the floor; planted, it kneels where crouching
+        // down leaves the body, so nothing sinks when one gives way to the other
+        let mut kneel = read("crouch_arms_mp5k");
+        s.plant(&mut kneel, 0.0);
+        let mut down = read("up_cr");
+        let last = (down.frames - 1) as f32;
+        s.plant(&mut down, last);
+        let end = down.sample(last).0[1];
+        assert!((kneel.keys[0].root[1] - end).abs() < 1.5, "{} against {end}", kneel.keys[0].root[1]);
+        // A motion already on the floor barely moves
+        let before = read("cr_cyc").keys[0].root[1];
+        let mut sat = read("cr_cyc");
+        s.plant(&mut sat, 0.0);
+        assert!((sat.keys[0].root[1] - before).abs() < 0.5);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::sim::movement::{Movement, Reloading, forward, ground_speed, right};
+use crate::sim::movement::{Movement, Reloading, crouched_speed, forward, ground_speed, right};
 
 type V3 = [f32; 3];
 
@@ -23,6 +23,8 @@ pub struct Doing {
     pub throwing: Option<f32>,
     pub reloading: Option<Reloading>,
     pub firing: bool,
+    /// Crouched, which moves at other paces
+    pub crouched: bool,
 }
 
 struct State {
@@ -47,10 +49,10 @@ impl Animators {
 
     /// Advance a player's animation by `dt` seconds, given where they are seen now and where they
     /// face (`yaw`, degrees, as a camera's). `frames` says how long each movement's animation is,
-    /// `speed_scale` how fast players move compared to normal and `pace` how fast the animation
+    /// `speed_scale` how fast players move compared to normal and `anim_pace` how fast the animation
     /// plays compared to the feet. Returns the movement and the frame of it to show (but for a
     /// reload, whose frame follows its progress and which motion is drawn for it).
-    pub fn update(&mut self, slot: usize, pos: V3, yaw: f32, dt: f32, doing: Doing, frames: impl Fn(Movement) -> f32, speed_scale: f32, pace: f32) -> (Movement, f32) {
+    pub fn update(&mut self, slot: usize, pos: V3, yaw: f32, dt: f32, doing: Doing, frames: impl Fn(Movement) -> f32, speed_scale: f32, anim_pace: f32) -> (Movement, f32) {
         let s = self.players.entry(slot).or_insert(State { last: None, velocity: [0.0; 2], movement: Movement::Idle, frame: 0.0 });
         if let (Some(last), true) = (s.last, dt > 0.0) {
             let moved = [pos[0] - last[0], pos[2] - last[2]];
@@ -65,7 +67,8 @@ impl Animators {
         }
         s.last = Some(pos);
 
-        let walking = locomotion(s.velocity, yaw, speed_scale);
+        let pace = |m: Movement| if doing.crouched { crouched_speed(m) } else { ground_speed(m) };
+        let walking = locomotion(s.velocity, yaw, speed_scale, pace);
         let now = match (walking, doing) {
             (m, _) if m != Movement::Idle => m,
             (_, Doing { throwing: Some(_), .. }) => Movement::Throw,
@@ -83,15 +86,16 @@ impl Animators {
             (Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw, _) => (s.frame + 30.0 * dt) % n,
             _ => {
                 let speed = s.velocity[0].hypot(s.velocity[1]) / speed_scale;
-                (s.frame + (speed / ground_speed(now)).clamp(0.5, 3.0) * pace * 30.0 * dt) % n
+                (s.frame + (speed / pace(now)).clamp(0.5, 3.0) * anim_pace * 30.0 * dt) % n
             }
         };
         (now, s.frame)
     }
 }
 
-/// The way of walking that matches a ground velocity, for a player facing `yaw`
-fn locomotion(velocity: [f32; 2], yaw: f32, speed_scale: f32) -> Movement {
+/// The way of walking that matches a ground velocity, for a player facing `yaw` who moves at
+/// the paces `pace` gives
+fn locomotion(velocity: [f32; 2], yaw: f32, speed_scale: f32, pace: impl Fn(Movement) -> f32) -> Movement {
     let speed = velocity[0].hypot(velocity[1]) / speed_scale;
     if speed < STILL {
         return Movement::Idle;
@@ -103,7 +107,7 @@ fn locomotion(velocity: [f32; 2], yaw: f32, speed_scale: f32) -> Movement {
     if ahead.abs() >= beside.abs() {
         if ahead < 0.0 {
             Movement::Back
-        } else if speed > (ground_speed(Movement::Walk) + ground_speed(Movement::Run)) / 2.0 {
+        } else if speed > (pace(Movement::Walk) + pace(Movement::Run)) / 2.0 {
             Movement::Run
         } else {
             Movement::Walk
@@ -155,8 +159,24 @@ mod tests {
         assert_eq!(still(&mut a, Doing { firing: true, ..Doing::default() }).0, Movement::Fire);
         let reloading = Some(Reloading { progress: 0.5, empty: false });
         assert_eq!(still(&mut a, Doing { reloading, ..Doing::default() }).0, Movement::Reload);
-        assert_eq!(still(&mut a, Doing { reloading, throwing: Some(1.0), firing: true }).0, Movement::Throw);
+        assert_eq!(still(&mut a, Doing { reloading, throwing: Some(1.0), firing: true, ..Doing::default() }).0, Movement::Throw);
         assert_eq!(still(&mut a, Doing::default()).0, Movement::Idle);
+    }
+
+    #[test]
+    fn a_crouched_player_is_seen_to_run_at_a_crouched_run() {
+        let f = forward(0.0, 0.0);
+        let mut a = Animators::default();
+        let crouched = Doing { crouched: true, ..Doing::default() };
+        let mut pos = [0.0; 3];
+        let mut seen = Movement::Idle;
+        let speed = crouched_speed(Movement::Run);
+        for _ in 0..60 {
+            pos = [pos[0] + f[0] * speed * DT, 0.0, pos[2] - f[2] * speed * DT];
+            seen = a.update(0, pos, 0.0, DT, crouched, |_| 30.0, 1.0, 1.5).0;
+        }
+        // Standing, that pace would be a walk
+        assert_eq!(seen, Movement::Run);
     }
 
     #[test]

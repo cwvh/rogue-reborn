@@ -44,6 +44,18 @@ pub fn ground_speed(m: Movement) -> f32 {
     }
 }
 
+/// Ground speed crouched. The original's are not known; these keep the feet of the crouched
+/// motions about as close to the ground's pace as the standing ones are.
+pub fn crouched_speed(m: Movement) -> f32 {
+    match m {
+        Movement::Run => 300.0,
+        Movement::Walk => 120.0,
+        Movement::Back => 90.0,
+        Movement::StrafeLeft | Movement::StrafeRight => 115.0,
+        other => nominal_speed(other),
+    }
+}
+
 /// Pick the movement from the held keys
 pub fn movement_from_keys(forward: bool, back: bool, left: bool, right: bool, run: bool) -> Movement {
     if forward {
@@ -68,9 +80,11 @@ pub struct Reloading {
 
 /// The MP5 magazine changes, as the original picks them for a weapon whose reload class is
 /// "subgun" (every primary weapon): twm_mp2 with rounds still in the magazine, twm_mp1 once it
-/// is empty. Standing; twm_mp4 and twm_mp3 are their crouched forms.
+/// is empty, and kneeling twm_mp4 and twm_mp3
 pub const RELOAD_MOTION: &str = "twm_mp2";
 pub const EMPTY_RELOAD_MOTION: &str = "twm_mp1";
+pub const CROUCHED_RELOAD_MOTION: &str = "twm_mp4";
+pub const CROUCHED_EMPTY_RELOAD_MOTION: &str = "twm_mp3";
 
 /// A reload's beats: seconds into the reload, and the frame of its motion to show then. Each
 /// beat falls just before its click in C_SBMAG1.WAV (the one magazine sound the weapon has), as
@@ -111,10 +125,47 @@ const EMPTY_RELOAD_BEATS: Beats = Beats {
     ],
 };
 
-/// The frame of the reload motion to show for a reload, in a motion of `frames` frames. The
-/// beats are those of the original's motion for it; another motion is stretched to fit.
-pub fn reload_frame(r: Reloading, frames: f32) -> f32 {
-    let Beats { frames: length, beats } = if r.empty { EMPTY_RELOAD_BEATS } else { RELOAD_BEATS };
+/// twm_mp4 keeps the old magazine: a fresh one from the pouch, the old one pulled down out of
+/// the well with the same hand, the fresh one pushed up in, and the old one put away. The
+/// reload is over on the way back from the pouch, and the hand eases back to the gun.
+const CROUCHED_RELOAD_BEATS: Beats = Beats {
+    frames: 86.0,
+    beats: &[
+        (0.0, 0.0),
+        (0.45, 18.0), // at the pouch for a fresh magazine
+        (1.25, 40.0), // old magazine pulled out of the well
+        (1.60, 48.0), // fresh one into the well
+        (1.80, 52.0), // seated
+        (2.10, 66.0), // old one into the pouch
+        (super::RELOAD_SECONDS, 72.0),
+    ],
+};
+
+/// twm_mp3 strips the empty magazine, takes a fresh one from the pouch, seats it and slaps the
+/// gun, as twm_mp1 does standing
+const CROUCHED_EMPTY_RELOAD_BEATS: Beats = Beats {
+    frames: 73.0,
+    beats: &[
+        (0.0, 0.0),
+        (0.60, 13.0), // empty magazine stripped from the well
+        (1.05, 27.0), // fresh one out of the pouch
+        (1.60, 44.0), // into the well
+        (1.80, 50.0), // seated
+        (2.10, 56.0), // the slap
+        (super::RELOAD_SECONDS, 64.0),
+    ],
+};
+
+/// The frame of the reload motion to show for a reload, standing or crouched, in a motion of
+/// `frames` frames. The beats are those of the original's motion for it; another motion is
+/// stretched to fit.
+pub fn reload_frame(r: Reloading, crouched: bool, frames: f32) -> f32 {
+    let Beats { frames: length, beats } = match (r.empty, crouched) {
+        (false, false) => RELOAD_BEATS,
+        (true, false) => EMPTY_RELOAD_BEATS,
+        (false, true) => CROUCHED_RELOAD_BEATS,
+        (true, true) => CROUCHED_EMPTY_RELOAD_BEATS,
+    };
     let t = r.progress.clamp(0.0, 1.0) * super::RELOAD_SECONDS;
     let frame = beats.windows(2).find(|w| t <= w[1].0).map_or(beats[beats.len() - 1].1, |w| {
         let ((t0, f0), (t1, f1)) = (w[0], w[1]);
@@ -147,19 +198,25 @@ mod tests {
     #[test]
     fn a_reload_runs_through_its_motion_on_the_beats() {
         let at = |progress, empty| Reloading { progress, empty };
-        assert_eq!(reload_frame(at(0.0, false), 100.0), 0.0);
-        assert_eq!(reload_frame(at(1.0, false), 100.0), 99.0);
+        assert_eq!(reload_frame(at(0.0, false), false, 100.0), 0.0);
+        assert_eq!(reload_frame(at(1.0, false), false, 100.0), 99.0);
         // The slaps land as their sound does: the cocking handle, or the bolt release once empty
         let slap = 2.10 / super::super::RELOAD_SECONDS;
-        assert!((reload_frame(at(slap, false), 100.0) - 84.0).abs() < 1e-3);
-        assert!((reload_frame(at(slap, true), 81.0) - 60.0).abs() < 1e-3);
+        assert!((reload_frame(at(slap, false), false, 100.0) - 84.0).abs() < 1e-3);
+        assert!((reload_frame(at(slap, true), false, 81.0) - 60.0).abs() < 1e-3);
         // The empty reload ends back on the grip, before its motion's last frame
-        assert_eq!(reload_frame(at(1.0, true), 81.0), 72.0);
+        assert_eq!(reload_frame(at(1.0, true), false, 81.0), 72.0);
+        // Kneeling, the fresh magazine seats on the same click
+        let seated = 1.80 / super::super::RELOAD_SECONDS;
+        assert!((reload_frame(at(seated, false), true, 86.0) - 52.0).abs() < 1e-3);
+        assert!((reload_frame(at(seated, true), true, 73.0) - 50.0).abs() < 1e-3);
         // Another motion is stretched to fit
-        assert!((reload_frame(at(1.0, false), 50.0) - 49.0).abs() < 1e-3);
+        assert!((reload_frame(at(1.0, false), false, 50.0) - 49.0).abs() < 1e-3);
         for empty in [false, true] {
-            let frames: Vec<f32> = (0..=100).map(|i| reload_frame(at(i as f32 / 100.0, empty), 100.0)).collect();
-            assert!(frames.windows(2).all(|w| w[1] >= w[0]), "{frames:?}");
+            for crouched in [false, true] {
+                let frames: Vec<f32> = (0..=100).map(|i| reload_frame(at(i as f32 / 100.0, empty), crouched, 100.0)).collect();
+                assert!(frames.windows(2).all(|w| w[1] >= w[0]), "{frames:?}");
+            }
         }
     }
 }
