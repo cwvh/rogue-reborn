@@ -933,7 +933,7 @@ mod tests {
             npcs: vec![
                 NpcSnap { pos: [1.0, 0.0, 2.0], yaw: 30.0, hp: 100.0, state: NpcState::Idle },
                 NpcSnap { pos: [2.0, 0.0, 2.0], yaw: 60.0, hp: 40.0, state: NpcState::Reacting { motion: "thwu_bf", start: 14.5 } },
-                NpcSnap { pos: [3.0, 0.0, 2.0], yaw: 90.0, hp: 0.0, state: NpcState::Dead { motion: "thdh_2", start: 12.0 } },
+                NpcSnap { pos: [3.0, 0.0, 2.0], yaw: 90.0, hp: 0.0, state: NpcState::Dead { motion: "hw_bk_up2", start: 12.0 } },
             ],
             thrown: vec![ThrownSnap { owner: 1, pos: [5.0; 3], vel: [1.0, 2.0, 3.0], fuse: 1.5, spin: 40.0, at_rest: false }],
             doors: vec![(0.0, false), (0.5, true), (1.0, true)],
@@ -1063,7 +1063,7 @@ mod tests {
         next.players[1].hp = 0.0;
         next.players[1].respawn_at = None;
         next.players[0].deaths = 2;
-        next.npcs[1].state = NpcState::Dead { motion: "thdh_2", start: 15.0 };
+        next.npcs[1].state = NpcState::Dead { motion: "hw_bk_up2", start: 15.0 };
         next.npcs[1].hp = 0.0;
         next.thrown.push(ThrownSnap { owner: 0, pos: [1.0; 3], vel: [0.0; 3], fuse: 2.0, spin: 0.0, at_rest: true });
         next.doors[2] = (0.25, false);

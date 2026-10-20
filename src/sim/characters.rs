@@ -46,10 +46,12 @@ pub struct Characters {
     pub idle: String,
 }
 
-/// The motions characters play besides idling: injury reactions and deaths
-pub const REACTION_MOTIONS: [&str; 14] = [
+/// The motions characters play besides idling: flinches from wounds and the falls they die with
+pub const REACTION_MOTIONS: [&str; 29] = [
     "thwu_bf", "thwu_bl", "thwu_bb", "thwu_br", "thwu_la", "thwu_ra", "thwu_ll", "thwu_rl",
-    "thdu_1", "thdu_2", "thdu_3", "thdu_4", "thdh_1", "thdh_2",
+    "thdu_1", "thdu_2", "thdu_3", "thdu_4", "thdu_e1", "thdu_e2",
+    "hw_fr_up2_g", "hw_lf_up2_g", "hw_bk_up2_g", "hw_bk_up2", "hw_rt_up2",
+    "thiu_cf", "thiu_cl", "thiu_cb", "thiu_ab", "thiu_hf", "thiu_hb", "thiu_la", "thiu_ra", "thiu_ll", "thiu_rl",
 ];
 
 /// A motion from the game's data, by name

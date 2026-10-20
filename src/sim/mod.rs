@@ -1029,8 +1029,7 @@ impl Sim {
                 continue;
             }
             let from = place.facing_of_shot(unit3([chest[0] - c[0], chest[1] - c[1], chest[2] - c[2]]));
-            next_rng(&mut self.rng);
-            let result = self.npcs[i].health.apply_blast(100.0 * strength, from, now, (self.rng >> 33) as u32);
+            let result = self.npcs[i].health.apply_blast(100.0 * strength, from, now);
             if let Some(p) = self.players.get_mut(owner) {
                 p.target_hp = Some(self.npcs[i].health.hp);
             }
