@@ -798,8 +798,8 @@ impl Sim {
         let fwd_speed = scale * if w == s_ { 0.0 }
             else if w { speed(if run { movement::Movement::Run } else { movement::Movement::Walk }) }
             else { -speed(movement::Movement::Back) };
-        let side_speed = scale * if a == d { 0.0 }
-            else if d { speed(movement::Movement::StrafeRight) } else { -speed(movement::Movement::StrafeLeft) };
+        let side = |right: bool| speed(movement::movement_from_keys(false, false, !right, right, run));
+        let side_speed = scale * if a == d { 0.0 } else if d { side(true) } else { -side(false) };
         let mut vel = [
             fwd_flat[0] * fwd_speed + right_cam[0] * side_speed,
             fwd_flat[2] * fwd_speed + right_cam[2] * side_speed,
@@ -1530,6 +1530,17 @@ mod tests {
     }
 
     #[test]
+    fn standing_a_walk_steps_to_the_side_more_slowly_than_a_run() {
+        let mut sim = demo();
+        for (run_key, pace) in [(true, ground_speed(movement::Movement::StrafeRight)), (false, ground_speed(movement::Movement::WalkRight))] {
+            let x = sim.players[0].player.pos[0];
+            run(&mut sim, &Input { right: true, run: run_key, ..holding() }, 0.5);
+            let side = sim.players[0].player.pos[0] - x;
+            assert!((side.abs() - pace * 0.5).abs() < 10.0, "{side} against {pace}");
+        }
+    }
+
+    #[test]
     fn crouching_lowers_the_eyes_and_slows_the_player_until_they_stand() {
         let mut sim = demo();
         let params = *sim.world.params();
@@ -1542,6 +1553,13 @@ mod tests {
         run(&mut sim, &Input { forward: true, ..crouch }, 1.0);
         let crouched = sim.players[0].player.pos[2] - z;
         assert!((crouched.abs() - crouched_speed(movement::Movement::Run)).abs() < 10.0, "{crouched}");
+        // Crouched, stepping to the side goes at the one pace, walking or not
+        for run_key in [true, false] {
+            let x = sim.players[0].player.pos[0];
+            run(&mut sim, &Input { right: true, run: run_key, ..crouch }, 1.0);
+            let side = sim.players[0].player.pos[0] - x;
+            assert!((side.abs() - crouched_speed(movement::Movement::StrafeRight)).abs() < 10.0, "{side}");
+        }
         // Let go of crouching in the open, and they are standing again
         sim.tick(&[holding()], TICK);
         assert!(!sim.players[0].player.crouched);

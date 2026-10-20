@@ -287,6 +287,8 @@ fn main() {
         back: slot_motion("back", "tmu_bk1"),
         left: slot_motion("left", "tms_l2"),
         right: slot_motion("right", "tms_r2"),
+        walk_left: slot_motion("walk_left", "tms_l1"),
+        walk_right: slot_motion("walk_right", "tms_r1"),
         fire: planted("fire", "fire_up_mp5k"),
         reload: planted("reload", RELOAD_MOTION),
         reload_empty: planted("reload_empty", EMPTY_RELOAD_MOTION),
@@ -1558,7 +1560,7 @@ fn main() {
                              face: Option<u32>, hand: Option<&Option<WeaponDraw>>, grenade: bool, flash: bool, reloading: Option<Reloading>,
                              firing: bool, crouched: bool, hip_turn: f32, flinch: Option<(&rogue_reborn::motion::Motion, f32, f32)>, body: &mut BodyState| -> bool {
                 let Some(Rig { skeleton: skel, skin }) = &chars.rig else { return false };
-                let moving = matches!(movement, Movement::Walk | Movement::Run | Movement::Back | Movement::StrafeLeft | Movement::StrafeRight);
+                let moving = matches!(movement, Movement::Walk | Movement::Run | Movement::Back | Movement::StrafeLeft | Movement::StrafeRight | Movement::WalkLeft | Movement::WalkRight);
                 // Crouching down or standing up plays in place, at its own pace; moving cuts it short
                 let since = body.since_stance_change(crouched, game_time);
                 let changing = since.filter(|_| !moving)

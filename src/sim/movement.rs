@@ -8,8 +8,12 @@ pub enum Movement {
     Walk,
     Run,
     Back,
+    /// Stepping to the side running (tms_l2 / tms_r2), and walking (tms_l1 / tms_r1), as the
+    /// original picks them. Crouched there is the one pace.
     StrafeLeft,
     StrafeRight,
+    WalkLeft,
+    WalkRight,
     /// Standing and shooting, or reloading, with the weapon
     Fire,
     Reload,
@@ -29,6 +33,9 @@ pub fn nominal_speed(m: Movement) -> f32 {
         Movement::Back => 126.0,
         Movement::StrafeLeft => 139.0,
         Movement::StrafeRight => 139.0,
+        // tms_l1 takes the same stride as tms_l2 in 34 frames instead of 14 (its feet give no
+        // clear least-slip speed)
+        Movement::WalkLeft | Movement::WalkRight => 57.0,
     }
 }
 
@@ -40,6 +47,8 @@ pub fn ground_speed(m: Movement) -> f32 {
         Movement::Walk => 514.0,
         Movement::Back => 378.0,
         Movement::StrafeLeft | Movement::StrafeRight => 348.0,
+        // Not known; the running strafe slowed as its motion is to tms_l1's
+        Movement::WalkLeft | Movement::WalkRight => 143.0,
         other => nominal_speed(other),
     }
 }
@@ -51,7 +60,7 @@ pub fn crouched_speed(m: Movement) -> f32 {
         Movement::Run => 300.0,
         Movement::Walk => 120.0,
         Movement::Back => 90.0,
-        Movement::StrafeLeft | Movement::StrafeRight => 115.0,
+        Movement::StrafeLeft | Movement::StrafeRight | Movement::WalkLeft | Movement::WalkRight => 115.0,
         other => nominal_speed(other),
     }
 }
@@ -63,9 +72,9 @@ pub fn movement_from_keys(forward: bool, back: bool, left: bool, right: bool, ru
     } else if back {
         Movement::Back
     } else if left && !right {
-        Movement::StrafeLeft
+        if run { Movement::StrafeLeft } else { Movement::WalkLeft }
     } else if right && !left {
-        Movement::StrafeRight
+        if run { Movement::StrafeRight } else { Movement::WalkRight }
     } else {
         Movement::Idle
     }

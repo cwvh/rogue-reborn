@@ -131,10 +131,14 @@ fn locomotion(velocity: [f32; 2], yaw: f32, speed_scale: f32, pace: impl Fn(Move
         } else {
             Movement::Walk
         }
-    } else if beside > 0.0 {
-        Movement::StrafeRight
     } else {
-        Movement::StrafeLeft
+        let run = speed > (pace(Movement::WalkRight) + pace(Movement::StrafeRight)) / 2.0;
+        match (beside > 0.0, run) {
+            (true, true) => Movement::StrafeRight,
+            (true, false) => Movement::WalkRight,
+            (false, true) => Movement::StrafeLeft,
+            (false, false) => Movement::WalkLeft,
+        }
     }
 }
 
@@ -192,6 +196,8 @@ mod tests {
             assert_eq!(watch(yaw, back, 378.0, 1.0), Movement::Back, "yaw {yaw}");
             assert_eq!(watch(yaw, r, 348.0, 1.0), Movement::StrafeRight, "yaw {yaw}");
             assert_eq!(watch(yaw, r.map(|c| -c), 348.0, 1.0), Movement::StrafeLeft, "yaw {yaw}");
+            assert_eq!(watch(yaw, r, 143.0, 1.0), Movement::WalkRight, "yaw {yaw}");
+            assert_eq!(watch(yaw, r.map(|c| -c), 143.0, 1.0), Movement::WalkLeft, "yaw {yaw}");
             assert_eq!(watch(yaw, f, 0.0, 1.0), Movement::Idle, "yaw {yaw}");
         }
     }

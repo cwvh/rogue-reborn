@@ -76,7 +76,7 @@ pub struct Args {
     pub speed_scale: Option<f32>,
     // Multiplies the playback rate of the movement animations (default 1.5)
     pub anim_scale: Option<f32>,
-    // Overrides for the player's movement set: slot=motion (walk, run, back, left, right, idle, fire, reload, reload_empty, throw, crouch_down, stand_up, and crouch_ before idle, walk, run, back, left, right, reload, reload_empty)
+    // Overrides for the player's movement set: slot=motion (walk, run, back, left, right, walk_left, walk_right, idle, fire, reload, reload_empty, throw, turn, crouch_down, stand_up, and crouch_ before idle, walk, run, back, left, right, reload, reload_empty, turn)
     pub player_anims: Vec<(String, String)>,
     pub third_person: bool,
     // Moves the weapon in the hand, in the weapon model's axes (x right, -y forward, z up)

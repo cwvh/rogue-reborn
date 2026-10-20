@@ -15,8 +15,8 @@ use rogue_reborn::util::find_file;
 use rogue_reborn::{actor, ambience, crp, door, map, weapon};
 
 /// The motions the player plays, as main.rs loads them for `PlayerMotions`
-const PLAYER_MOTIONS: [&str; 20] = ["up_cyc_mp5k", "tmu_wk1", "tmu_rn", "tmu_bk1", "tms_l2", "tms_r2", "fire_up_mp5k", "twm_mp2", "twm_mp1", "gr_ov_up",
-    "crouch_arms_mp5k", "tmc_fd", "rmc_rn", "tmc_bk", "tmc_lf", "tmc_rt", "up_cr", "cr_up", "twm_mp4", "twm_mp3"];
+const PLAYER_MOTIONS: [&str; 24] = ["up_cyc_mp5k", "tmu_wk1", "tmu_rn", "tmu_bk1", "tms_l2", "tms_r2", "tms_l1", "tms_r1", "fire_up_mp5k", "twm_mp2", "twm_mp1", "gr_ov_up",
+    "crouch_arms_mp5k", "tmc_fd", "rmc_rn", "tmc_bk", "tmc_lf", "tmc_rt", "up_cr", "cr_up", "twm_mp4", "twm_mp3", "tmu_plf", "tmc_plf"];
 /// What other characters idle with, unless --anim says otherwise
 const IDLE_MOTION: &str = "up_none_cyc";
 /// The sprites main.rs loads from data/texture: bullet holes, dust, sparks and a blast
