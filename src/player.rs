@@ -1,7 +1,7 @@
 //! The player's animations.
 
 use rogue_reborn::motion;
-use rogue_reborn::sim::movement::{Movement, Reloading};
+use rogue_reborn::sim::movement::{HIP_TURN_RATE, Movement, Reloading};
 
 pub struct PlayerMotions {
     pub idle: Option<motion::Motion>,
@@ -94,6 +94,9 @@ pub struct BodyState {
     /// The stance it was last drawn in, and when that last changed
     stance: Option<bool>,
     changed_at: Option<f32>,
+    /// How far the hips are turned (radians, positive to the right), and when that was drawn
+    hips: f32,
+    hips_at: Option<f32>,
 }
 
 impl BodyState {
@@ -105,6 +108,19 @@ impl BodyState {
         }
         self.stance = Some(crouched);
         self.changed_at.map(|at| now - at)
+    }
+
+    /// Turn the hips toward `target` (radians) at the original's pace, from where they were when
+    /// the body was last drawn, and say how far they are turned at `now` (seconds). A body not
+    /// drawn for a while turns at once.
+    pub fn turn_hips(&mut self, target: f32, now: f32) -> f32 {
+        let step = match self.hips_at.map(|at| now - at) {
+            Some(dt) if (0.0..=motion::CROSSFADE_SECONDS).contains(&dt) => HIP_TURN_RATE * dt,
+            _ => f32::INFINITY,
+        };
+        self.hips += (target - self.hips).clamp(-step, step);
+        self.hips_at = Some(now);
+        self.hips
     }
 }
 

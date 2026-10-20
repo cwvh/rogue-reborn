@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::sim::movement::{Movement, Reloading, crouched_speed, forward, ground_speed, right};
+use crate::sim::movement::{Movement, Reloading, crouched_speed, forward, ground_speed, hip_turn, right};
 
 type V3 = [f32; 3];
 
@@ -13,6 +13,10 @@ const SMOOTHING: f32 = 12.0;
 
 /// Slower than this (units a second, at normal speed) is standing still
 const STILL: f32 = 60.0;
+
+/// Going more than this far to the side for each unit forward or back (about 11 degrees off) is
+/// going to the side as well
+const SIDEWAYS: f32 = 0.2;
 
 /// Further than this in a frame (or between two snapshots) is not walking but being put somewhere else
 pub const TELEPORT: f32 = 250.0;
@@ -91,6 +95,24 @@ impl Animators {
         };
         (now, s.frame)
     }
+
+    /// How far a player's hips turn as they are seen to move, facing `yaw` (see
+    /// `movement::hip_turn`): when walking or running forward or back, and to one side as well
+    pub fn hip_turn(&self, slot: usize, yaw: f32) -> f32 {
+        let Some(s) = self.players.get(&slot).filter(|s| matches!(s.movement, Movement::Walk | Movement::Run | Movement::Back)) else {
+            return 0.0;
+        };
+        let (ahead, beside) = along(s.velocity, yaw);
+        let aside = beside.abs() > ahead.abs() * SIDEWAYS;
+        hip_turn(ahead > 0.0, ahead < 0.0, aside && beside < 0.0, aside && beside > 0.0)
+    }
+}
+
+/// How fast a ground velocity goes ahead and to the right of a player facing `yaw`
+fn along(velocity: [f32; 2], yaw: f32) -> (f32, f32) {
+    // The camera's Z is the opposite of the map's
+    let (f, r) = (forward(yaw, 0.0), right(yaw));
+    (velocity[0] * f[0] - velocity[1] * f[2], velocity[0] * r[0] - velocity[1] * r[2])
 }
 
 /// The way of walking that matches a ground velocity, for a player facing `yaw` who moves at
@@ -100,10 +122,7 @@ fn locomotion(velocity: [f32; 2], yaw: f32, speed_scale: f32, pace: impl Fn(Move
     if speed < STILL {
         return Movement::Idle;
     }
-    // The camera's Z is the opposite of the map's
-    let (f, r) = (forward(yaw, 0.0), right(yaw));
-    let ahead = velocity[0] * f[0] - velocity[1] * f[2];
-    let beside = velocity[0] * r[0] - velocity[1] * r[2];
+    let (ahead, beside) = along(velocity, yaw);
     if ahead.abs() >= beside.abs() {
         if ahead < 0.0 {
             Movement::Back
@@ -136,6 +155,31 @@ mod tests {
             last = a.update(0, pos, yaw, DT, Doing::default(), |_| 30.0, 1.0, 1.5);
         }
         last.0
+    }
+
+    #[test]
+    fn hips_turn_toward_a_side_step_taken_going_forward_or_back() {
+        use crate::sim::movement::HIP_TURN;
+        for yaw in [0.0, 90.0, 200.0] {
+            let (f, r) = (forward(yaw, 0.0), right(yaw));
+            let turn = |ahead: f32, beside: f32, speed: f32| {
+                let dir = [f[0] * ahead + r[0] * beside, 0.0, f[2] * ahead + r[2] * beside];
+                let mut a = Animators::default();
+                let mut pos = [0.0; 3];
+                for _ in 0..60 {
+                    pos = [pos[0] + dir[0] * speed * DT, 0.0, pos[2] - dir[2] * speed * DT];
+                    a.update(0, pos, yaw, DT, Doing::default(), |_| 30.0, 1.0, 1.5);
+                }
+                a.hip_turn(0, yaw)
+            };
+            // Running forward and to the right, as the run and a side step add up
+            assert_eq!(turn(0.9, 0.43, 735.0), HIP_TURN, "yaw {yaw}");
+            assert_eq!(turn(0.9, -0.43, 735.0), -HIP_TURN, "yaw {yaw}");
+            // Backing up to the right leads with the back of the hips, so they turn left
+            assert_eq!(turn(-0.74, 0.68, 378.0), -HIP_TURN, "yaw {yaw}");
+            assert_eq!(turn(1.0, 0.0, 735.0), 0.0, "yaw {yaw}");
+            assert_eq!(turn(0.0, 1.0, 348.0), 0.0, "yaw {yaw}");
+        }
     }
 
     #[test]

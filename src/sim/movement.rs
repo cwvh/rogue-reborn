@@ -71,6 +71,29 @@ pub fn movement_from_keys(forward: bool, back: bool, left: bool, right: bool, ru
     }
 }
 
+/// How far the hips turn toward the way a player goes when they move forward or back and to the
+/// side at once, in radians: the original's pi * 0.15 (27 degrees). The legs keep the forward or
+/// back motion, and the chest turns back as far, so the gun stays on the aim.
+pub const HIP_TURN: f32 = std::f32::consts::PI * 0.15;
+
+/// How fast the hips turn there and back, in radians a second (the original's pi / 4)
+pub const HIP_TURN_RATE: f32 = std::f32::consts::FRAC_PI_4;
+
+/// How far the hips turn for the keys held (positive is to the right): toward the side when going
+/// forward, away from it when backing up (the back of the hips leads), and not at all otherwise
+pub fn hip_turn(forward: bool, back: bool, left: bool, right: bool) -> f32 {
+    let side = match (left, right) {
+        (true, false) => -1.0,
+        (false, true) => 1.0,
+        _ => return 0.0,
+    };
+    match (forward, back) {
+        (true, false) => side * HIP_TURN,
+        (false, true) => -side * HIP_TURN,
+        _ => 0.0,
+    }
+}
+
 /// A reload under way: how far through it is (0 to 1), and whether the magazine was empty
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Reloading {
