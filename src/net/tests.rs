@@ -361,10 +361,14 @@ fn a_player_shot_dead_is_dead_for_everyone_and_comes_back_where_the_server_says(
     let (a, b) = (game.peers[shooter].client.slot(), game.peers[target].client.slot());
     assert_eq!(game.server.sim.players[b].deaths, 1, "{:?}", game.server.sim.players.iter().map(|p| (p.player.pos, p.look, p.ammo, p.hp)).collect::<Vec<_>>());
     assert_eq!(game.server.sim.players[a].kills, 1, "a={a} b={b} {:?}", game.server.sim.players.iter().map(|p| (p.kills, p.deaths, p.hp)).collect::<Vec<_>>());
-    // Everyone's copy of the game says so, and the dead player did not walk on in their own
+    // Everyone's copy of the game says so, with the fall the server picked from when it began,
+    // and the dead player did not walk on in their own
+    let fall = game.server.sim.players[b].hit.expect("a fall");
     for peer in [shooter, target] {
         let seen = &game.sim_of(peer).players[b];
         assert!(seen.respawn_at.is_some() && seen.hp == 0.0, "peer {peer}: {:?} {}", seen.respawn_at, seen.hp);
+        let hit = seen.hit.expect("a fall");
+        assert!(hit.motion == fall.motion && (hit.start - fall.start).abs() < 0.001, "peer {peer}: {hit:?} against {fall:?}");
     }
     assert!(distance(game.me(target), game.server_pos(b)) < 1.0);
     // And everyone was told who killed whom

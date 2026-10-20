@@ -80,6 +80,8 @@ pub struct BodyKey {
     pub crouched: bool,
     /// Crouching down or standing up
     pub changing: bool,
+    /// Flinching from a wound, by when it began (as bits, so a new one eases in afresh)
+    pub flinch: Option<u32>,
 }
 
 /// A body's ease from one motion into the next

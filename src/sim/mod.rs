@@ -37,10 +37,12 @@ pub const RELOAD_SECONDS: f32 = 2.2;
 /// A player's health at the start
 pub const PLAYER_HP: f32 = 100.0;
 
-/// How a dead player falls, and how long they wait to come back: long enough for the fall to play
-/// out (111 frames at 30 a second), so that the body is gone before they appear somewhere else
-pub const PLAYER_DEATH_MOTION: &str = "thdu_1";
+/// How long a dead player waits to come back. The body they fell with stays where it fell.
 pub const RESPAWN_SECONDS: f32 = 3.7;
+
+/// How long a wounded player's flinch is kept: longer than any flinch plays (the longest, 51
+/// frames, is 1.7 s), and short enough to send as a tick count in a byte (see net::proto)
+pub const FLINCH_SECONDS: f32 = 2.0;
 
 /// How wide a player is to a bullet
 const HIT_RADIUS: f32 = 25.0;
@@ -126,6 +128,20 @@ impl Input {
     pub fn held(&self) -> Input {
         Input { use_key: false, reload: false, gun: false, grenade: false, toggle_culling: false, ..*self }
     }
+}
+
+/// A motion a hit set playing on a player's body from `start`
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Struck {
+    pub motion: &'static str,
+    pub start: f32,
+}
+
+/// How a player was hurt: shot in a part of the body, or caught in a blast, from a side of them
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Wound {
+    Shot(combat::BodyPart, combat::Facing),
+    Blast(combat::Facing),
 }
 
 /// What killed a player
@@ -242,6 +258,9 @@ pub struct PlayerState {
     /// When a dead player comes back, or none if they are alive
     pub respawn_at: Option<f32>,
     pub deaths: u32,
+    /// What the latest hit set the body playing: the flinch from a wound, for `FLINCH_SECONDS`,
+    /// or the fall a dead player died with, until they come back
+    pub hit: Option<Struck>,
 
     // Grenades
     pub equipped_grenade: bool,
@@ -371,6 +390,7 @@ impl Sim {
             hp: PLAYER_HP,
             respawn_at: None,
             deaths: 0,
+            hit: None,
             equipped_grenade: false,
             grenades_left: grenades,
             charge_from: None,
@@ -480,6 +500,10 @@ impl Sim {
             h.f32(p.hp);
             h.opt_f32(p.respawn_at);
             h.u32(p.deaths);
+            match p.hit {
+                None => h.u32(0),
+                Some(s) => { h.u32(1); h.bytes(s.motion.as_bytes()); h.f32(s.start); }
+            }
             h.u32(p.equipped_grenade as u32);
             h.u32(p.grenades_left);
             h.opt_f32(p.charge_from);
@@ -618,6 +642,10 @@ impl Sim {
         for &i in &slots {
             if self.players[i].respawn_at.is_some_and(|t| self.time >= t) {
                 self.respawn(i);
+            }
+            let p = &mut self.players[i];
+            if p.respawn_at.is_none() && p.hit.is_some_and(|h| self.time - h.start >= FLINCH_SECONDS) {
+                p.hit = None;
             }
         }
 
@@ -905,7 +933,9 @@ impl Sim {
         let hit_player = hit_player.filter(|h| wall.is_none_or(|w| h.1 <= w) && best.as_ref().is_none_or(|(_, b)| h.1 < b.distance));
         if let Some((victim, dist, part)) = hit_player {
             let point = [eye[0] + dir[0] * dist, eye[1] + dir[1] * dist, eye[2] + dir[2] * dist];
-            self.hurt_player(victim, Some(slot), combat::damage(part), point, if part == combat::BodyPart::Head { Cause::HeadShot } else { Cause::Shot }, ev);
+            let from = self.placement(victim).facing_of_shot(dir);
+            let cause = if part == combat::BodyPart::Head { Cause::HeadShot } else { Cause::Shot };
+            self.hurt_player(victim, Some(slot), combat::damage(part), point, Wound::Shot(part, from), cause, ev);
             ev.push(Event::Shot { player: slot, start, end: point, hit_character: true });
             return;
         }
@@ -1059,7 +1089,8 @@ impl Sim {
                 if strength < 0.02 || !(grenade::clear_between(&self.world, c, chest) || grenade::clear_between(&self.world, c, head)) {
                     continue;
                 }
-                self.hurt_player(i, Some(owner), PLAYER_HP * strength, chest, Cause::Grenade, ev);
+                let from = self.placement(i).facing_of_shot(unit3([chest[0] - c[0], chest[1] - c[1], chest[2] - c[2]]));
+                self.hurt_player(i, Some(owner), PLAYER_HP * strength, chest, Wound::Blast(from), Cause::Grenade, ev);
             }
         }
 
@@ -1129,10 +1160,15 @@ impl Sim {
                 if t <= 0.0 || !(0.0..=1.0).contains(&up) {
                     return None;
                 }
+                // Below the belly, the leg on the side of the body the bullet goes in
+                let place = self.placement(i);
+                let right = place.to_world([1.0, 0.0, 0.0]);
+                let across = (ox + dir[0] * t) * (right[0] - place.pos[0]) + (oz + dir[2] * t) * (right[2] - place.pos[2]);
                 let part = match up {
                     u if u >= 0.88 => combat::BodyPart::Head,
                     u if u >= 0.55 => combat::BodyPart::Torso,
                     u if u >= 0.40 => combat::BodyPart::Abdomen,
+                    _ if across > 0.0 => combat::BodyPart::RightLeg,
                     _ => combat::BodyPart::LeftLeg,
                 };
                 Some((i, t, part))
@@ -1140,9 +1176,16 @@ impl Sim {
             .min_by(|a, b| a.1.total_cmp(&b.1))
     }
 
-    /// Take health from a player. If it is all of it they die, and `attacker` (who is not the
-    /// victim) is credited, with the kill on their screen.
-    fn hurt_player(&mut self, victim: usize, attacker: Option<usize>, amount: f32, at: V3, cause: Cause, ev: &mut Vec<Event>) {
+    /// Where a player stands and the way they face, as their body is drawn
+    fn placement(&self, slot: usize) -> combat::Placement {
+        let p = &self.players[slot];
+        combat::Placement { pos: p.player.pos, yaw_deg: -dequantize(p.look.0), scale: [1.0; 3] }
+    }
+
+    /// Take health from a player, who flinches with the `wound`. If it is all of it they die and
+    /// fall for it instead, and `attacker` (who is not the victim) is credited, with the kill on
+    /// their screen.
+    fn hurt_player(&mut self, victim: usize, attacker: Option<usize>, amount: f32, at: V3, wound: Wound, cause: Cause, ev: &mut Vec<Event>) {
         let now = self.time;
         let p = &mut self.players[victim];
         if p.respawn_at.is_some() {
@@ -1161,10 +1204,18 @@ impl Sim {
         ev.push(Event::Sound { name: "C_BHTHT.WAV".to_string(), at: Some(at), gain: 1.0 });
         let (name, n) = if killed { ("re_ded", 2) } else { ("re_wnd", 3) };
         ev.push(Event::Sound { name: format!("English/{name}{}.wav", 1 + roll % n), at: Some(pos), gain: 1.0 });
+        let p = &mut self.players[victim];
+        let motion = match (wound, killed) {
+            (Wound::Shot(part, from), false) => combat::hit_reaction(part, from),
+            (Wound::Blast(from), false) => combat::hit_reaction(combat::BodyPart::Torso, from),
+            (Wound::Shot(part, from), true) => combat::death_motion(part, from, roll >> 8),
+            (Wound::Blast(from), true) => combat::blast_death_motion(from),
+        };
+        p.hit = Some(Struck { motion, start: now });
+        ev.push(Event::Log(format!("t={now:.2} player {victim} {} with {motion}", if killed { "falls" } else { "flinches" })));
         if !killed {
             return;
         }
-        let p = &mut self.players[victim];
         p.respawn_at = Some(now + RESPAWN_SECONDS);
         p.deaths += 1;
         p.equipped_grenade = false;
@@ -1538,13 +1589,45 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_player_falls_for_the_whole_of_the_wait() {
-        let path = std::path::Path::new("data/motion").join(format!("{PLAYER_DEATH_MOTION}.DAM"));
-        if !path.exists() {
-            return;
+    fn a_wounded_player_flinches_for_the_side_the_shot_came_from() {
+        // Player 1 faces away from the shooter, who hits them in the chest from behind
+        let mut sim = duel();
+        sim.tick(&[aim(-14.6), holding()], TICK);
+        assert_eq!(sim.players[1].hit, Some(Struck { motion: "thwu_bb", start: sim.time }));
+        run(&mut sim, &holding(), FLINCH_SECONDS + TICK);
+        assert!(sim.players[1].hit.is_none());
+    }
+
+    #[test]
+    fn a_shot_low_on_the_body_hits_the_leg_on_its_side() {
+        // Aimed at the knees a little to either side of the middle; player 1's right is +X
+        for (yaw, motion) in [(2.3, "thwu_ll"), (-2.3, "thwu_rl")] {
+            let mut sim = duel();
+            let mut shot = aim(-26.6);
+            shot.set_look(yaw, -26.6);
+            sim.tick(&[shot, holding()], TICK);
+            assert_eq!(sim.players[1].hp, 100.0 - combat::damage(combat::BodyPart::LeftLeg), "yaw {yaw}");
+            assert_eq!(sim.players[1].hit.map(|f| f.motion), Some(motion), "yaw {yaw}");
         }
-        let frames = crate::motion::read(&path).unwrap().frames;
-        assert!(frames as f32 / 30.0 <= RESPAWN_SECONDS, "{PLAYER_DEATH_MOTION} takes {frames} frames");
+    }
+
+    #[test]
+    fn a_dead_player_falls_for_where_and_from_where_the_shot_came_until_they_come_back() {
+        let mut sim = duel();
+        sim.tick(&[aim(-14.6), holding()], TICK);
+        while sim.players[1].respawn_at.is_none() {
+            sim.tick(&[aim(0.0), holding()], TICK);
+        }
+        let fall = sim.players[1].hit.expect("a fall");
+        assert_eq!(fall.start, sim.time);
+        // A head shot from behind
+        assert!(["thiu_hb", "hw_bk_up2", "hw_bk_up2_g", "thdu_3"].contains(&fall.motion), "{}", fall.motion);
+        // Kept past a flinch's time, for as long as they are dead
+        run(&mut sim, &holding(), FLINCH_SECONDS + 0.1);
+        assert_eq!(sim.players[1].hit, Some(fall));
+        run(&mut sim, &holding(), RESPAWN_SECONDS - FLINCH_SECONDS);
+        assert!(sim.players[1].respawn_at.is_none());
+        assert!(sim.players[1].hit.is_none());
     }
 
     #[test]

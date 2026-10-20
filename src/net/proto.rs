@@ -13,7 +13,7 @@ use crate::grenade::Grenade;
 use crate::impact::Surface;
 use crate::net::link::MAX_PACKET;
 use crate::sim::characters::REACTION_MOTIONS;
-use crate::sim::{Cause, Event, Input, MAX_PLAYERS, Sim, Throw};
+use crate::sim::{Cause, Event, Input, MAX_PLAYERS, Sim, Struck, TICK, Throw};
 
 type V3 = [f32; 3];
 
@@ -95,7 +95,6 @@ pub struct PlayerSnap {
     pub crouched: bool,
     pub look: (u16, u16),
     pub controlled: bool,
-    pub moved_speed: f32,
     pub ammo: u32,
     pub reserve: u32,
     pub reload_until: Option<f32>,
@@ -105,6 +104,9 @@ pub struct PlayerSnap {
     pub deaths: u32,
     pub hp: f32,
     pub respawn_at: Option<f32>,
+    /// What the latest hit set the body playing (see `PlayerState::hit`), and the low byte of
+    /// the tick it began on. Neither a flinch nor a fall is kept for 256 ticks.
+    pub hit: Option<(&'static str, u8)>,
     pub equipped_grenade: bool,
     pub grenades_left: u32,
     pub charge_from: Option<f32>,
@@ -162,7 +164,6 @@ impl Snapshot {
             crouched: p.player.crouched,
             look: p.look,
             controlled: p.controlled,
-            moved_speed: p.moved_speed,
             ammo: p.ammo,
             reserve: p.reserve,
             reload_until: p.reload_until,
@@ -172,6 +173,7 @@ impl Snapshot {
             deaths: p.deaths,
             hp: p.hp,
             respawn_at: p.respawn_at,
+            hit: p.hit.map(|h| (h.motion, tick.wrapping_sub(((sim.time - h.start) / TICK).round() as u32) as u8)),
             equipped_grenade: p.equipped_grenade,
             grenades_left: p.grenades_left,
             charge_from: p.charge_from,
@@ -218,7 +220,6 @@ impl Snapshot {
                 p.player.vel_y = s.vel_y;
                 p.player.on_ground = s.on_ground;
                 p.player.crouched = s.crouched;
-                p.moved_speed = s.moved_speed;
                 p.look = s.look;
             }
             p.controlled = s.controlled;
@@ -231,6 +232,7 @@ impl Snapshot {
             p.deaths = s.deaths;
             p.hp = s.hp;
             p.respawn_at = s.respawn_at;
+            p.hit = s.hit.map(|(motion, at)| Struck { motion, start: self.time - (self.tick as u8).wrapping_sub(at) as f32 * TICK });
             p.equipped_grenade = s.equipped_grenade;
             p.grenades_left = s.grenades_left;
             p.charge_from = s.charge_from;
@@ -428,13 +430,27 @@ fn read_message(r: &mut Reader) -> Result<Option<(String, f32)>> {
     Ok(if r.bool()? { Some((r.string()?, r.f32()?)) } else { None })
 }
 
+fn write_hit(w: &mut Writer, hit: Option<(&'static str, u8)>) {
+    match hit {
+        None => w.u8(u8::MAX),
+        Some((motion, at)) => { w.u8(motion_byte(motion)); w.u8(at); }
+    }
+}
+
+fn read_hit(r: &mut Reader) -> Result<Option<(&'static str, u8)>> {
+    Ok(match r.u8()? {
+        u8::MAX => None,
+        b => Some((motion_from(b)?, r.u8()?)),
+    })
+}
+
 /// A player in full, after their slot
 fn write_player(w: &mut Writer, p: &PlayerSnap) {
     w.v3(p.pos);
     w.f32(p.vel_y);
     w.u16(p.look.0);
     w.u16(p.look.1);
-    w.f32(p.moved_speed);
+    write_hit(w, p.hit);
     w.u16(p.ammo as u16);
     w.u16(p.reserve as u16);
     write_opt_f32(w, p.reload_until);
@@ -455,7 +471,7 @@ fn read_player(r: &mut Reader, slot: u8) -> Result<PlayerSnap> {
     let pos = r.v3()?;
     let vel_y = r.f32()?;
     let look = (r.u16()?, r.u16()?);
-    let moved_speed = r.f32()?;
+    let hit = read_hit(r)?;
     let ammo = r.u16()? as u32;
     let reserve = r.u16()? as u32;
     let reload_until = r.opt_f32()?;
@@ -470,8 +486,8 @@ fn read_player(r: &mut Reader, slot: u8) -> Result<PlayerSnap> {
     let target_hp = r.opt_f32()?;
     let (deaths, hp, respawn_at) = (r.u16()? as u32, r.f32()?, r.opt_f32()?);
     Ok(PlayerSnap {
-        slot, pos, vel_y, on_ground: on(0), crouched: on(4), look, controlled: on(1), moved_speed, ammo, reserve, reload_until,
-        flash_until, gun_trigger: on(2), kills, deaths, hp, respawn_at, equipped_grenade: on(3), grenades_left, charge_from,
+        slot, pos, vel_y, on_ground: on(0), crouched: on(4), look, controlled: on(1), ammo, reserve, reload_until,
+        flash_until, gun_trigger: on(2), kills, deaths, hp, respawn_at, hit, equipped_grenade: on(3), grenades_left, charge_from,
         throw, message, target_hp,
     })
 }
@@ -494,7 +510,7 @@ fn write_player_delta(w: &mut Writer, p: &PlayerSnap, base: &PlayerSnap) {
         p.pos.map(bits) != base.pos.map(bits),
         bits(p.vel_y) != bits(base.vel_y),
         p.look != base.look,
-        bits(p.moved_speed) != bits(base.moved_speed),
+        p.hit != base.hit,
         p.ammo as u16 != base.ammo as u16,
         p.reserve as u16 != base.reserve as u16,
         opt_bits(p.reload_until) != opt_bits(base.reload_until),
@@ -514,7 +530,7 @@ fn write_player_delta(w: &mut Writer, p: &PlayerSnap, base: &PlayerSnap) {
     if changed[0] { w.v3(p.pos); }
     if changed[1] { w.f32(p.vel_y); }
     if changed[2] { w.u16(p.look.0); w.u16(p.look.1); }
-    if changed[3] { w.f32(p.moved_speed); }
+    if changed[3] { write_hit(w, p.hit); }
     if changed[4] { w.u16(p.ammo as u16); }
     if changed[5] { w.u16(p.reserve as u16); }
     if changed[6] { write_opt_f32(w, p.reload_until); }
@@ -539,7 +555,7 @@ fn read_player_delta(r: &mut Reader, mask: u32, base: &PlayerSnap) -> Result<Pla
     if on(0) { p.pos = r.v3()?; }
     if on(1) { p.vel_y = r.f32()?; }
     if on(2) { p.look = (r.u16()?, r.u16()?); }
-    if on(3) { p.moved_speed = r.f32()?; }
+    if on(3) { p.hit = read_hit(r)?; }
     if on(4) { p.ammo = r.u16()? as u32; }
     if on(5) { p.reserve = r.u16()? as u32; }
     if on(6) { p.reload_until = r.opt_f32()?; }
@@ -917,9 +933,10 @@ mod tests {
 
     fn player(slot: u8) -> PlayerSnap {
         PlayerSnap {
-            slot, pos: [1.0, 2.0, 3.0], vel_y: -4.0, on_ground: true, crouched: true, look: (123, 65000), controlled: true, moved_speed: 7.5,
+            slot, pos: [1.0, 2.0, 3.0], vel_y: -4.0, on_ground: true, crouched: true, look: (123, 65000), controlled: true,
             ammo: 12, reserve: 400, reload_until: Some(3.5), flash_until: 1.25, gun_trigger: true, kills: 3, deaths: 1, hp: 62.5,
             respawn_at: Some(20.0),
+            hit: Some(("thiu_la", 250)),
             equipped_grenade: true, grenades_left: 2, charge_from: None,
             throw: Some(Throw { start: 1.0, charge: 0.5, thrown: false }),
             message: Some(("KILLED".to_string(), 9.0)), target_hp: Some(33.0),
@@ -1063,6 +1080,8 @@ mod tests {
         next.players[1].hp = 0.0;
         next.players[1].respawn_at = None;
         next.players[0].deaths = 2;
+        next.players[0].hit = None;
+        next.players[1].hit = Some(("thwu_ll", 3));
         next.npcs[1].state = NpcState::Dead { motion: "hw_bk_up2", start: 15.0 };
         next.npcs[1].hp = 0.0;
         next.thrown.push(ThrownSnap { owner: 0, pos: [1.0; 3], vel: [0.0; 3], fuse: 2.0, spin: 0.0, at_rest: true });

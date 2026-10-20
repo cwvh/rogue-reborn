@@ -612,6 +612,9 @@ fn main() {
     let mut remote_anim = rogue_reborn::net::animation::Animators::default();
     // What each body's drawing remembers, the player's own and the other players'
     let mut bodies: HashMap<usize, BodyState> = HashMap::new();
+    // The bodies of players who died, by slot: when the fall began, and the body falling where
+    // they died. It stays after they come back somewhere else.
+    let mut corpses: HashMap<usize, (f32, Npc)> = HashMap::new();
     // The latest kills, with when they leave the screen and their color, and how this player died:
     // by whom, and where they were looking before
     let mut feed: Vec<(f32, String, [f32; 3])> = Vec::new();
@@ -764,7 +767,8 @@ fn main() {
         if let Some(n) = args.walk {
             // --hold picks the keys to press: W A S D, and R for walk (right mouse button)
             let held = args.hold.as_deref().unwrap_or("W").to_ascii_uppercase();
-            trigger = frames_drawn < n && held.contains('F');
+            // B fires a single round at frame 60, once the others are in view, to see one hit land
+            trigger = (frames_drawn < n && held.contains('F')) || (held.contains('B') && (60..64).contains(&frames_drawn));
             // T takes out a grenade and throws it after holding for half a second
             if held.contains('T') {
                 grenade_pressed = true;
@@ -1537,11 +1541,12 @@ fn main() {
             // `reloading` is the reload they are in the middle of, if any: its motion and frame
             // follow its progress, on the beats of its sound. `firing` says the gun is firing,
             // which the arms show whatever the legs do. `crouched` kneels the body for what is
-            // done in place, and a change of stance plays crouching down or standing up. `body`
-            // is what the drawing remembers of this body from frame to frame.
+            // done in place, and a change of stance plays crouching down or standing up. `flinch`
+            // is a wound's flinch, its frame and when it began, which takes the whole body while
+            // it plays. `body` is what the drawing remembers of this body from frame to frame.
             let draw_body = |chars: &Characters, movement: Movement, frame: f32, feet: [f32; 3], yaw_deg: f32, scale: [f32; 3],
                              face: Option<u32>, hand: Option<&Option<WeaponDraw>>, grenade: bool, flash: bool, reloading: Option<Reloading>,
-                             firing: bool, crouched: bool, body: &mut BodyState| -> bool {
+                             firing: bool, crouched: bool, flinch: Option<(&rogue_reborn::motion::Motion, f32, f32)>, body: &mut BodyState| -> bool {
                 let Some(Rig { skeleton: skel, skin }) = &chars.rig else { return false };
                 let moving = matches!(movement, Movement::Walk | Movement::Run | Movement::Back | Movement::StrafeLeft | Movement::StrafeRight);
                 // Crouching down or standing up plays in place, at its own pace; moving cuts it short
@@ -1556,9 +1561,10 @@ fn main() {
                 let arms_only = kneeling || (changing.is_some() && movement != Movement::Idle);
                 // A motion that loops on its own clock, whatever the body's frame
                 let looping = |m: &'_ rogue_reborn::motion::Motion| (game_time * 30.0) % m.frames.max(1) as f32;
-                let (mot, frame) = match (changing, movement, reload) {
-                    (Some(change), ..) => change,
-                    (None, Movement::Reload, Some(shown)) => shown,
+                let (mot, frame) = match (flinch, changing, movement, reload) {
+                    (Some((m, f, _)), ..) => (m, f),
+                    (None, Some(change), ..) => change,
+                    (None, None, Movement::Reload, Some(shown)) => shown,
                     _ if kneeling => {
                         let Some(knee) = player_motions.get(Movement::Idle, true) else { return false };
                         (knee, looping(knee))
@@ -1569,11 +1575,11 @@ fn main() {
                     }
                 };
                 let (mut root, mut rots) = mot.sample(frame.min(mot.frames.saturating_sub(1) as f32));
-                // A reload keeps the arms busy, so they fire only outside one
-                let aiming = (firing || movement == Movement::Fire) && reload.is_none();
+                // A reload keeps the arms busy, so they fire only outside one, and a flinch the same
+                let aiming = (firing || movement == Movement::Fire) && reload.is_none() && flinch.is_none();
                 // Moving or kneeling: the legs from the motion, and the upper body reloads, fires
                 // (the fire motion looping at its own pace), throws or keeps the gun hold
-                if moving || arms_only {
+                if flinch.is_none() && (moving || arms_only) {
                     let fire = player_motions.get(Movement::Fire, crouched).filter(|_| aiming).map(|m| (m, looping(m)));
                     let throw = player_motions.get(Movement::Throw, crouched).filter(|_| arms_only && movement == Movement::Throw).map(|m| (m, frame));
                     let upper = reload.or(fire).or(throw).or_else(|| player_motions.get(Movement::Idle, crouched).map(|hold| (hold, 0.0)));
@@ -1601,7 +1607,7 @@ fn main() {
                 // leave a gun still on its way up. Once firing, the legs still ease.
                 let raising = aiming && !body.fade.key().is_some_and(|k| k.aiming);
                 let ease = if raising { 0.0 } else { rogue_reborn::motion::CROSSFADE_SECONDS };
-                let key = BodyKey { movement, reload: reloading.map(|r| r.empty), aiming, crouched, changing: changing.is_some() };
+                let key = BodyKey { movement, reload: reloading.map(|r| r.empty), aiming, crouched, changing: changing.is_some(), flinch: flinch.map(|f| f.2.to_bits()) };
                 body.fade.apply(key, game_time, ease, &mut root, &mut rots);
                 let pose = skel.pose([0.0, root[1], 0.0], &rots);
                 let verts = skin.apply(&pose);
@@ -1628,6 +1634,14 @@ fn main() {
                 true
             };
 
+            // The flinch a living player's latest wound plays at `now`, while it lasts
+            fn flinch_at<'a>(chars: &'a Characters, p: &rogue_reborn::sim::PlayerState, now: f32) -> Option<(&'a rogue_reborn::motion::Motion, f32, f32)> {
+                let hit = p.hit.filter(|_| p.respawn_at.is_none())?;
+                let m = chars.motions.get(hit.motion)?;
+                let frame = (now - hit.start) * 30.0;
+                (0.0..m.frames as f32).contains(&frame).then_some((m, frame, hit.start))
+            }
+
             // The other players on the server, moving and handling their weapons as they are seen to
             if let Some(chars) = &sim.characters {
                 glDisable(0x0DE1); // GL_TEXTURE_2D
@@ -1652,30 +1666,22 @@ fn main() {
                         let hand = if p.equipped_grenade { p.throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
                         let flash = !p.equipped_grenade && game_time < p.flash_until;
                         // Hidden, the animation still follows them
-                        if !visible || draw_body(chars, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, doing.reloading, doing.firing, doing.crouched, bodies.entry(slot).or_default()) {
+                        let flinch = flinch_at(chars, p, view_time);
+                        if !visible || draw_body(chars, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, doing.reloading, doing.firing, doing.crouched, flinch, bodies.entry(slot).or_default()) {
                             continue;
                         }
                     } else {
+                        // Dead, they are drawn where they fell, with the bodies
                         remote_anim.forget(slot);
                         bodies.remove(&slot);
+                        continue;
                     }
                     if !visible {
                         continue;
                     }
-                    // Without the player animations, or when dead: a character, falling where they
-                    // died. Once the fall is over the body is gone, so that nobody sees it put
-                    // where they come back.
-                    let mut health = combat::Health::new();
-                    if let Some(until) = dead {
-                        let start = until - sim::RESPAWN_SECONDS;
-                        let frames = chars.motions.get(sim::PLAYER_DEATH_MOTION).map_or(0, |m| m.frames);
-                        if (view_time - start) * 30.0 >= frames as f32 {
-                            continue;
-                        }
-                        health.state = combat::NpcState::Dead { motion: sim::PLAYER_DEATH_MOTION, start };
-                    }
+                    // Without the player animations: a character, idling where they are
                     let ghost = Npc {
-                        health,
+                        health: combat::Health::new(),
                         pos,
                         floor: pos[1],
                         yaw: -yaw,
@@ -1705,7 +1711,51 @@ fn main() {
                 let mine = &sim.players[me];
                 let hand = if mine.equipped_grenade { mine.throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
                 let flash = !mine.equipped_grenade && game_time < mine.flash_until;
-                draw_body(chars, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash, mine.reloading(game_time), sim.firing(me), mine.player.crouched, bodies.entry(me).or_default());
+                if mine.respawn_at.is_none() {
+                    let flinch = flinch_at(chars, mine, game_time);
+                    draw_body(chars, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash, mine.reloading(game_time), sim.firing(me), mine.player.crouched, flinch, bodies.entry(me).or_default());
+                }
+            }
+
+            // The bodies of the players who died, falling where they did with the motion the
+            // server picked, and lying there for as long as the fall plays or they wait to come back
+            if let Some(chars) = &sim.characters {
+                for (slot, p) in sim.players.iter().enumerate().filter(|(_, p)| p.active) {
+                    if let (Some(_), Some(hit)) = (p.respawn_at, p.hit) {
+                        if corpses.get(&slot).is_none_or(|(start, _)| (start - hit.start).abs() > 0.1) {
+                            let health = combat::Health { hp: 0.0, state: combat::NpcState::Dead { motion: hit.motion, start: hit.start } };
+                            let yaw = -sim::dequantize(p.look.0);
+                            let scale = actors.get(slot % actors.len().max(1)).map_or([1.0; 3], |a| a.scale);
+                            let pos = p.player.pos;
+                            corpses.insert(slot, (hit.start, Npc { health, pos, floor: pos[1], yaw, scale, stagger: 0.0 }));
+                        }
+                    }
+                }
+                let view_time = view.as_ref().map_or(game_time, |v| v.time);
+                // The others as the view shows them
+                let now_for = |slot: usize| if slot == me { game_time } else { view_time };
+                corpses.retain(|&slot, (start, body)| {
+                    let combat::NpcState::Dead { motion, .. } = body.health.state else { return false };
+                    now_for(slot) - *start < sim::RESPAWN_SECONDS.max(chars.frames(motion) / 30.0)
+                });
+                glDisable(0x0DE1); // GL_TEXTURE_2D
+                for (&slot, (start, body)) in &corpses {
+                    // The player's own body only from outside it
+                    let now = now_for(slot);
+                    if (slot == me && !(first_person && third_person)) || now < *start || !shown(body.pos) {
+                        continue;
+                    }
+                    let face = (!actors.is_empty()).then(|| face_textures[slot % actors.len()].0).flatten();
+                    let posed = chars.pose(body, now, 0.0);
+                    let verts: &[[f32; 3]] = if posed.is_empty() { &chars.model.vertices } else { &posed };
+                    glPushMatrix();
+                    glTranslatef(body.pos[0], body.pos[1], body.pos[2]);
+                    glRotatef(body.yaw, 0.0, 1.0, 0.0);
+                    glScalef(body.scale[0], body.scale[1], body.scale[2]);
+                    draw_character(&chars.model, &character_arrays, verts, &part_textures, face, textured, glow_on(body.pos));
+                    glPopMatrix();
+                }
+                glColor4f(1.0, 1.0, 1.0, 1.0);
             }
 
             // Grenades in the air
