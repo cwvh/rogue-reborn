@@ -29,6 +29,7 @@ Game
 * [doors] The doorway view while a door moves: the portal opens as soon as the door starts and shuts only once it has closed.
 * [game] Enemy AI; it can use the same room and portal data for sight and hearing.
 * [game] Q / E lean (the keys are free).
+* [movement] Going forward or back with a strafe key, the original moves along the forward or back direction turned a fixed 27 degrees (pi * 0.15, the quaternions at 0x8224e8 / 0x8224d8 in RogueSpear.exe), the same angle the hips turn to. Ours adds the strafe velocity to the forward one and caps the length at the faster of the two (sim::move_player), so the path is off by atan(348 / forward speed): about 25 degrees running, 34 walking and 43 backing up, and crouched it differs again. Turn the forward or back velocity by movement::HIP_TURN instead; the speed is presumably the forward or back pace, but check in the exe. It changes gameplay (how far sideways a diagonal goes) and the sim, so the build check matters, and net::animation's SIDEWAYS (11 degrees) can then sit closer to 27.
 * [game] Surface-specific footsteps; explosions that break glass (glass::Pane::distance_to is ready for it).
 
 Housekeeping
