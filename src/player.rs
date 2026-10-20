@@ -28,6 +28,9 @@ pub struct PlayerMotions {
     /// Reloading kneeling, with rounds left in the magazine and once it is empty
     pub crouch_reload: Option<motion::Motion>,
     pub crouch_reload_empty: Option<motion::Motion>,
+    /// Stepping round in place after turning, standing and crouched
+    pub turn: Option<motion::Motion>,
+    pub crouch_turn: Option<motion::Motion>,
 }
 
 impl PlayerMotions {
@@ -58,6 +61,11 @@ impl PlayerMotions {
         if crouched { &self.crouch_down } else { &self.stand_up }.as_ref()
     }
 
+    /// The motion the feet step round in after turning in place, standing or crouched
+    pub fn turn(&self, crouched: bool) -> Option<&motion::Motion> {
+        if crouched { &self.crouch_turn } else { &self.turn }.as_ref()
+    }
+
     /// The motion for a reload, as the magazine was, standing or kneeling
     pub fn reload(&self, r: Reloading, crouched: bool) -> Option<&motion::Motion> {
         match (r.empty, crouched) {
@@ -82,10 +90,16 @@ pub struct BodyKey {
     pub changing: bool,
     /// Flinching from a wound, by when it began (as bits, so a new one eases in afresh)
     pub flinch: Option<u32>,
+    /// Stepping round after a turn in place, by when it began, as for a flinch
+    pub shuffle: Option<u32>,
 }
 
 /// A body's ease from one motion into the next
 pub type BodyFade = motion::Crossfade<BodyKey>;
+
+/// How far a body standing in place turns (degrees) before its feet step round. The original
+/// keeps this in a setting the executable does not hold; this is a guess.
+pub const SHUFFLE_TURN: f32 = 45.0;
 
 /// What drawing a body remembers from one frame to the next
 #[derive(Default)]
@@ -97,6 +111,12 @@ pub struct BodyState {
     /// How far the hips are turned (radians, positive to the right), and when that was drawn
     hips: f32,
     hips_at: Option<f32>,
+    /// The way the body faced (degrees) when it was last drawn, and when
+    yaw: Option<(f32, f32)>,
+    /// How far it has turned standing since its feet last stepped round (degrees)
+    turned: f32,
+    /// When its feet last began to step round
+    shuffle_at: Option<f32>,
 }
 
 impl BodyState {
@@ -122,10 +142,69 @@ impl BodyState {
         self.hips_at = Some(now);
         self.hips
     }
+
+    /// Note the way the body faces at `now` (`yaw`, degrees) and whether it stands in place, and
+    /// say when its feet last began to step round. As in the original, the turns made standing
+    /// add up (one way takes back the other) and the feet step round once they pass
+    /// `SHUFFLE_TURN`; moving starts the count again. A body not drawn for a while has not turned.
+    pub fn shuffle(&mut self, yaw: f32, standing: bool, now: f32) -> Option<f32> {
+        let turn = match self.yaw {
+            Some((was, at)) if (0.0..=motion::CROSSFADE_SECONDS).contains(&(now - at)) => (yaw - was + 180.0).rem_euclid(360.0) - 180.0,
+            _ => 0.0,
+        };
+        self.yaw = Some((yaw, now));
+        if !standing {
+            self.turned = 0.0;
+            self.shuffle_at = None;
+        } else {
+            self.turned += turn;
+            if self.turned.abs() > SHUFFLE_TURN {
+                self.turned = 0.0;
+                self.shuffle_at = Some(now);
+            }
+        }
+        self.shuffle_at
+    }
 }
 
 // Bones driven by the weapon hold rather than the locomotion cycle
 pub fn is_upper_body(name: &str) -> bool {
     matches!(name, "Chest" | "LeftCollar" | "RightCollar" | "LeftUpArm" | "LeftLowArm" | "LeftHand"
         | "RightUpArm" | "RightLowArm" | "RightHand" | "Neck" | "Head")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_feet_step_round_once_a_body_has_turned_far_enough_in_place() {
+        const DT: f32 = 1.0 / 60.0;
+        let mut body = BodyState::default();
+        let mut now = 0.0;
+        // Turning back and forth a little never adds up, across the turn from 180 to -180
+        for i in 0..240 {
+            let yaw = 180.0 + 20.0 * (i as f32 * 0.1).sin();
+            assert_eq!(body.shuffle(if yaw > 180.0 { yaw - 360.0 } else { yaw }, true, now), None);
+            now += DT;
+        }
+        // Turning one way does, and the count starts again from each step
+        let mut yaw = 180.0;
+        let mut began = Vec::new();
+        for _ in 0..120 {
+            yaw += 1.0;
+            if let Some(at) = body.shuffle(yaw, true, now) {
+                if began.last() != Some(&at) {
+                    began.push(at);
+                }
+            }
+            now += DT;
+        }
+        assert_eq!(began.len(), 2, "{began:?}");
+        // Moving cuts it short and forgets the turn so far
+        assert_eq!(body.shuffle(yaw + 40.0, false, now), None);
+        assert_eq!(body.shuffle(yaw + 80.0, true, now + DT), None);
+        // A body not seen for a while has not turned in the meantime
+        assert_eq!(body.shuffle(yaw + 170.0, true, now + 1.0), None);
+    }
 }

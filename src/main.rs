@@ -302,6 +302,9 @@ fn main() {
         stand_up: planted("stand_up", "cr_up"),
         crouch_reload: planted("crouch_reload", CROUCHED_RELOAD_MOTION),
         crouch_reload_empty: planted("crouch_reload_empty", CROUCHED_EMPTY_RELOAD_MOTION),
+        // Stepping round after turning in place, on the legs, as the original's
+        turn: planted("turn", "tmu_plf"),
+        crouch_turn: planted("crouch_turn", "tmc_plf"),
     };
 
     // The MP5K: definition, model and texture
@@ -784,6 +787,10 @@ fn main() {
                 reload_pressed = true;
             }
             walk_held = frames_drawn < n && held.contains('R');
+            // Y turns to the right, 2 degrees a frame, to see the feet step round
+            if frames_drawn < n && held.contains('Y') {
+                camera.yaw -= 2.0;
+            }
             // C crouches for the whole run; K switches stance at frame 30, to see the change
             crouch_wanted = held.contains('C') != (held.contains('K') && frames_drawn >= 30);
             for (ch, key) in [('W', Key::W), ('A', Key::A), ('S', Key::S), ('D', Key::D)] {
@@ -1557,6 +1564,10 @@ fn main() {
                 let changing = since.filter(|_| !moving)
                     .and_then(|t| player_motions.stance_change(crouched).map(|m| (m, t * 30.0)))
                     .filter(|(m, f)| *f < m.frames.saturating_sub(1) as f32);
+                // Standing in place, the feet step round once the body has turned far enough
+                let shuffle = body.shuffle(yaw_deg, !moving && changing.is_none(), game_time)
+                    .and_then(|at| player_motions.turn(crouched).map(|m| (m, (game_time - at) * 30.0, at)))
+                    .filter(|(m, f, _)| *f < m.frames.saturating_sub(1) as f32);
                 let reload = reloading.and_then(|r| player_motions.reload(r, crouched).map(|m| (m, reload_frame(r, crouched, m.frames.max(1) as f32))));
                 // Crouched, firing and throwing are done kneeling, by the arms, as they are while
                 // the body crouches down or stands up. A reload has a kneeling motion of its own.
@@ -1564,10 +1575,11 @@ fn main() {
                 let arms_only = kneeling || (changing.is_some() && movement != Movement::Idle);
                 // A motion that loops on its own clock, whatever the body's frame
                 let looping = |m: &'_ rogue_reborn::motion::Motion| (game_time * 30.0) % m.frames.max(1) as f32;
-                let (mot, frame) = match (flinch, changing, movement, reload) {
+                let (mot, frame) = match (flinch, changing, shuffle, movement, reload) {
                     (Some((m, f, _)), ..) => (m, f),
                     (None, Some(change), ..) => change,
-                    (None, None, Movement::Reload, Some(shown)) => shown,
+                    (None, None, Some((m, f, _)), ..) => (m, f),
+                    (None, None, None, Movement::Reload, Some(shown)) => shown,
                     _ if kneeling => {
                         let Some(knee) = player_motions.get(Movement::Idle, true) else { return false };
                         (knee, looping(knee))
@@ -1580,11 +1592,12 @@ fn main() {
                 let (mut root, mut rots) = mot.sample(frame.min(mot.frames.saturating_sub(1) as f32));
                 // A reload keeps the arms busy, so they fire only outside one, and a flinch the same
                 let aiming = (firing || movement == Movement::Fire) && reload.is_none() && flinch.is_none();
-                // Moving or kneeling: the legs from the motion, and the upper body reloads, fires
-                // (the fire motion looping at its own pace), throws or keeps the gun hold
-                if flinch.is_none() && (moving || arms_only) {
+                // Moving, kneeling or stepping round: the legs from the motion, and the upper body
+                // reloads, fires (the fire motion looping at its own pace), throws or keeps the gun hold
+                let shuffling = flinch.is_none() && shuffle.is_some();
+                if flinch.is_none() && (moving || arms_only || shuffling) {
                     let fire = player_motions.get(Movement::Fire, crouched).filter(|_| aiming).map(|m| (m, looping(m)));
-                    let throw = player_motions.get(Movement::Throw, crouched).filter(|_| arms_only && movement == Movement::Throw).map(|m| (m, frame));
+                    let throw = player_motions.get(Movement::Throw, crouched).filter(|_| (arms_only || shuffling) && movement == Movement::Throw).map(|m| (m, frame));
                     let upper = reload.or(fire).or(throw).or_else(|| player_motions.get(Movement::Idle, crouched).map(|hold| (hold, 0.0)));
                     if let Some((upper, at)) = upper {
                         let (_, hold_rots) = upper.sample(at);
@@ -1623,7 +1636,7 @@ fn main() {
                 // leave a gun still on its way up. Once firing, the legs still ease.
                 let raising = aiming && !body.fade.key().is_some_and(|k| k.aiming);
                 let ease = if raising { 0.0 } else { rogue_reborn::motion::CROSSFADE_SECONDS };
-                let key = BodyKey { movement, reload: reloading.map(|r| r.empty), aiming, crouched, changing: changing.is_some(), flinch: flinch.map(|f| f.2.to_bits()) };
+                let key = BodyKey { movement, reload: reloading.map(|r| r.empty), aiming, crouched, changing: changing.is_some(), flinch: flinch.map(|f| f.2.to_bits()), shuffle: shuffle.filter(|_| shuffling).map(|s| s.2.to_bits()) };
                 body.fade.apply(key, game_time, ease, &mut root, &mut rots);
                 let pose = skel.pose([0.0, root[1], 0.0], &rots);
                 let verts = skin.apply(&pose);
