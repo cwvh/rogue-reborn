@@ -47,8 +47,8 @@ pub struct Characters {
 }
 
 /// The motions characters play besides idling: injury reactions and deaths
-pub const REACTION_MOTIONS: [&str; 17] = [
-    "thiu_ab", "thiu_cb", "thiu_cf", "thiu_cl", "thiu_cr", "thiu_hb", "thiu_hf", "thiu_la", "thiu_ll", "thiu_ra", "thiu_rl",
+pub const REACTION_MOTIONS: [&str; 14] = [
+    "thwu_bf", "thwu_bl", "thwu_bb", "thwu_br", "thwu_la", "thwu_ra", "thwu_ll", "thwu_rl",
     "thdu_1", "thdu_2", "thdu_3", "thdu_4", "thdh_1", "thdh_2",
 ];
 

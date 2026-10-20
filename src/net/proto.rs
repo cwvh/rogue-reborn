@@ -932,7 +932,7 @@ mod tests {
             players: vec![player(0), PlayerSnap { message: None, target_hp: None, ..player(3) }],
             npcs: vec![
                 NpcSnap { pos: [1.0, 0.0, 2.0], yaw: 30.0, hp: 100.0, state: NpcState::Idle },
-                NpcSnap { pos: [2.0, 0.0, 2.0], yaw: 60.0, hp: 40.0, state: NpcState::Reacting { motion: "thiu_cf", start: 14.5 } },
+                NpcSnap { pos: [2.0, 0.0, 2.0], yaw: 60.0, hp: 40.0, state: NpcState::Reacting { motion: "thwu_bf", start: 14.5 } },
                 NpcSnap { pos: [3.0, 0.0, 2.0], yaw: 90.0, hp: 0.0, state: NpcState::Dead { motion: "thdh_2", start: 12.0 } },
             ],
             thrown: vec![ThrownSnap { owner: 1, pos: [5.0; 3], vel: [1.0, 2.0, 3.0], fuse: 1.5, spin: 40.0, at_rest: false }],
@@ -1024,7 +1024,7 @@ mod tests {
         let mut snap = snapshot();
         // Only the receiver's own player carries what is on their screen
         snap.players = (0..MAX_PLAYERS as u8).map(|i| if i == 0 { player(0) } else { PlayerSnap { message: None, target_hp: None, ..player(i) } }).collect();
-        snap.npcs = (0..16).map(|_| NpcSnap { pos: [1.0; 3], yaw: 1.0, hp: 1.0, state: NpcState::Reacting { motion: "thiu_ab", start: 1.0 } }).collect();
+        snap.npcs = (0..16).map(|_| NpcSnap { pos: [1.0; 3], yaw: 1.0, hp: 1.0, state: NpcState::Reacting { motion: "thwu_bb", start: 1.0 } }).collect();
         snap.events.clear();
         let (bytes, _) = ToClient::Snapshot(snap).encode();
         assert!(bytes.len() < MAX_PACKET - 40, "{} bytes before any events", bytes.len());

@@ -87,21 +87,20 @@ pub enum Facing {
     Right,
 }
 
-/// Name of the injured-upright reaction motion for a hit
+/// Name of the motion a character flinches with when a hit wounds it, staying on its feet. As the
+/// original picks it: a hit on a limb has that limb's, and any other the one for the side the shot
+/// came from. (Its `thiu_` motions, which fall to the ground, are for being incapacitated.)
 pub fn hit_reaction(part: BodyPart, from: Facing) -> &'static str {
     use BodyPart::*;
     match (part, from) {
-        (Head, Facing::Back) => "thiu_hb",
-        (Head, _) => "thiu_hf",
-        (Torso, Facing::Front) => "thiu_cf",
-        (Torso, Facing::Back) => "thiu_cb",
-        (Torso, Facing::Left) => "thiu_cl",
-        (Torso, Facing::Right) => "thiu_cr",
-        (Abdomen, _) => "thiu_ab",
-        (LeftArm, _) => "thiu_la",
-        (RightArm, _) => "thiu_ra",
-        (LeftLeg, _) => "thiu_ll",
-        (RightLeg, _) => "thiu_rl",
+        (LeftArm, _) => "thwu_la",
+        (RightArm, _) => "thwu_ra",
+        (LeftLeg, _) => "thwu_ll",
+        (RightLeg, _) => "thwu_rl",
+        (_, Facing::Front) => "thwu_bf",
+        (_, Facing::Left) => "thwu_bl",
+        (_, Facing::Back) => "thwu_bb",
+        (_, Facing::Right) => "thwu_br",
     }
 }
 
@@ -355,7 +354,7 @@ mod tests {
     fn a_blast_that_does_enough_kills() {
         let mut h = Health::new();
         assert_eq!(h.apply_blast(40.0, Facing::Front, 1.0, 0), HitResult::Injured);
-        assert!(matches!(h.state, NpcState::Reacting { motion: "thiu_cf", .. }));
+        assert!(matches!(h.state, NpcState::Reacting { motion: "thwu_bf", .. }));
         assert_eq!(h.apply_blast(100.0, Facing::Back, 2.0, 1), HitResult::Killed);
         assert!(h.is_dead());
         assert_eq!(h.apply_blast(100.0, Facing::Back, 3.0, 1), HitResult::Ignored);
@@ -443,6 +442,26 @@ mod tests {
     }
 
     #[test]
+    fn a_wound_leaves_the_character_on_its_feet() {
+        if !Path::new("data/motion").exists() {
+            return;
+        }
+        let parts = [BodyPart::Head, BodyPart::Torso, BodyPart::Abdomen, BodyPart::LeftArm,
+            BodyPart::RightArm, BodyPart::LeftLeg, BodyPart::RightLeg];
+        for part in parts {
+            for from in [Facing::Front, Facing::Back, Facing::Left, Facing::Right] {
+                let name = hit_reaction(part, from);
+                assert!(crate::sim::characters::REACTION_MOTIONS.contains(&name), "{name} is not loaded");
+                // The hips stay near standing height, where a fall to the ground halves it
+                let m = crate::sim::characters::load_motion(name).unwrap();
+                let standing = m.keys[0].root[1];
+                let lowest = m.keys.iter().map(|k| k.root[1]).fold(f32::MAX, f32::min);
+                assert!(lowest > 0.8 * standing, "{name} lowers the hips from {standing} to {lowest}");
+            }
+        }
+    }
+
+    #[test]
     fn a_head_shot_kills_outright() {
         let mut h = Health::new();
         assert_eq!(h.apply_hit(&hit(BodyPart::Head), 1.0, 0), HitResult::Killed);
@@ -454,7 +473,7 @@ mod tests {
     fn body_shots_injure_then_kill() {
         let mut h = Health::new();
         assert_eq!(h.apply_hit(&hit(BodyPart::Torso), 1.0, 0), HitResult::Injured);
-        assert!(matches!(h.state, NpcState::Reacting { motion: "thiu_cf", .. }));
+        assert!(matches!(h.state, NpcState::Reacting { motion: "thwu_bf", .. }));
         assert_eq!(h.apply_hit(&hit(BodyPart::Torso), 2.0, 0), HitResult::Injured);
         assert_eq!(h.apply_hit(&hit(BodyPart::Torso), 3.0, 1), HitResult::Killed);
         assert_eq!(h.hp, 0.0);
