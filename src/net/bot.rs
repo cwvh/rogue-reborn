@@ -216,7 +216,8 @@ impl Bot {
                 continue;
             }
             let dir = d.map(|c| c / dist);
-            if sim.world.raycast(eye, dir, dist).is_some_and(|wall| wall < dist - 30.0) {
+            // Seen through whatever bullets go through, such as a chain fence
+            if sim.world.bullet_hit(eye, dir, dist).is_some_and(|wall| wall.dist < dist - 30.0) {
                 continue;
             }
             if best.is_none_or(|b| dist < b.0) {

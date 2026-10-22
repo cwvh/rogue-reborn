@@ -52,11 +52,12 @@ pub fn shake(distance: f32, in_the_open: bool) -> f32 {
     near * near * if in_the_open { 1.0 } else { 0.45 }
 }
 
-/// Whether nothing solid stands between `from` and `to`
+/// Whether nothing between `from` and `to` stops a blast: walls do, but not a chain fence or a
+/// door (see `CollisionWorld::blast_hit`)
 pub fn clear_between(world: &CollisionWorld, from: V3, to: V3) -> bool {
     let d = sub(to, from);
     let dist = len(d);
-    dist < 1.0 || world.raycast(from, mul(d, 1.0 / dist), dist).is_none_or(|hit| hit > dist - 6.0)
+    dist < 1.0 || world.blast_hit(from, mul(d, 1.0 / dist), dist).is_none_or(|hit| hit.dist > dist - 6.0)
 }
 
 /// A surface the grenade struck

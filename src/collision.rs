@@ -141,12 +141,18 @@ pub struct CollisionWorld {
     /// What goes through the faces of each MAP material: `BULLETS` and `GRENADES`, from the
     /// game's texture properties (`gunpass` on a railing, `grenadepass` on a catwalk)
     passes: Vec<u8>,
+    /// Where the door leaves are in `tris`, all together at the end
+    door_tris: std::ops::Range<usize>,
 }
 
 /// Faces bullets go through
 const BULLETS: u8 = 1;
 /// Faces grenades go through
 const GRENADES: u8 = 2;
+/// Faces a blast reaches through: those bullets pass (rm13's chain fence lets a blast through in
+/// the original, though not the grenade), and the leaves of swinging doors (the original blows
+/// them apart, wood and metal alike, as the blast goes through; its sliding doors do not break)
+const BLASTS: u8 = 4;
 
 /// A door's leaf in the collision world
 struct DoorBody {
@@ -217,7 +223,7 @@ impl CollisionWorld {
         let properties = crate::cxp::TextureProperties::load();
         let passes = level.materials.materials.iter().map(|m| {
             let p = properties.get(&m.filename);
-            let bullets = if p.is_some_and(|p| p.gun_pass) { BULLETS } else { 0 };
+            let bullets = if p.is_some_and(|p| p.gun_pass) { BULLETS | BLASTS } else { 0 };
             bullets | if p.is_some_and(|p| p.grenade_pass) { GRENADES } else { 0 }
         }).collect();
         for (object_index, object) in level.geometries.objects.iter().enumerate() {
@@ -271,6 +277,7 @@ impl CollisionWorld {
 
         // Doors start closed, and are solid whichever rooms are around the player
         let mut bodies = Vec::new();
+        let first_door = tris.len();
         for door in doors {
             let first = tris.len();
             let leaf = crate::door::leaf_triangles(level, &door);
@@ -280,6 +287,7 @@ impl CollisionWorld {
             let local: Vec<[V3; 3]> = leaf.into_iter().map(|(p, _)| p).collect();
             bodies.push(DoorBody { range: first..tris.len(), local, door });
         }
+        let door_tris = first_door..tris.len();
 
         let (mut min_x, mut min_z) = (f32::INFINITY, f32::INFINITY);
         let (mut max_x, mut max_z) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
@@ -310,6 +318,7 @@ impl CollisionWorld {
             params,
             doors: bodies,
             passes,
+            door_tris,
         };
 
         for ti in 0..world.tris.len() {
@@ -340,7 +349,7 @@ impl CollisionWorld {
             tri(corner(-half, -half), corner(half, half), corner(-half, half)),
         ];
         let cell = 2.0 * half;
-        let mut world = Self { tris, groups: Vec::new(), min_x: -half, min_z: -half, cell, cols: 1, rows: 1, cells: vec![vec![0, 1]], params: Params::default(), doors: Vec::new(), passes: Vec::new() };
+        let mut world = Self { tris, groups: Vec::new(), min_x: -half, min_z: -half, cell, cols: 1, rows: 1, cells: vec![vec![0, 1]], params: Params::default(), doors: Vec::new(), passes: Vec::new(), door_tris: 0..0 };
         world.cells[0] = vec![0, 1];
         world
     }
@@ -472,11 +481,13 @@ impl CollisionWorld {
     }
 
     /// The nearest face within `max_dist` along the unit vector `dir` from `origin`, solid from
-    /// both sides, leaving out those that let `through` pass (`BULLETS`, `GRENADES`, or 0)
+    /// both sides, leaving out those that let `through` pass (`BULLETS`, `GRENADES`, `BLASTS`,
+    /// or 0)
     fn nearest(&self, origin: V3, dir: V3, max_dist: f32, through: u8) -> Option<(f32, &Tri)> {
         let mut best: Option<(f32, &Tri)> = None;
-        for t in self.tris.iter().filter(|t| self.solid(t)) {
-            if self.passes.get(t.material).is_some_and(|p| p & through != 0) {
+        for (i, t) in self.tris.iter().enumerate().filter(|(_, t)| self.solid(t)) {
+            let passes = if self.door_tris.contains(&i) { self.door_passes(i) } else { self.passes.get(t.material).copied().unwrap_or(0) };
+            if passes & through != 0 {
                 continue;
             }
             if let Some(d) = crate::combat::ray_triangle(origin, dir, t.a, t.b, t.c) {
@@ -536,6 +547,18 @@ impl CollisionWorld {
     /// What a grenade strikes: as `raycast_hit`, through the faces grenades pass (a railing)
     pub fn grenade_hit(&self, origin: [f32; 3], dir: [f32; 3], max_dist: f32) -> Option<RayHit> {
         self.hit(origin, dir, max_dist, GRENADES)
+    }
+
+    /// What goes through the leaf whose triangle is `tris[i]`: a blast through a swinging door
+    fn door_passes(&self, i: usize) -> u8 {
+        let door = self.doors.iter().find(|d| d.range.contains(&i));
+        if door.is_some_and(|d| matches!(d.door.motion, crate::door::Motion::Swing { .. })) { BLASTS } else { 0 }
+    }
+
+    /// What stops a blast on its way out: as `raycast_hit`, through the faces bullets pass and
+    /// the swinging doors
+    pub fn blast_hit(&self, origin: [f32; 3], dir: [f32; 3], max_dist: f32) -> Option<RayHit> {
+        self.hit(origin, dir, max_dist, BLASTS)
     }
 
     fn hit(&self, origin: V3, dir: V3, max_dist: f32, through: u8) -> Option<RayHit> {
@@ -1005,9 +1028,9 @@ mod tests {
         p.pos[2]
     }
 
-    /// For each face of `texture` on `map_path`, whether a bullet and a grenade fired straight
-    /// at it from 50 units in front are stopped by that texture
-    fn stopped_by(map_path: &str, texture: &str) -> Option<Vec<[bool; 2]>> {
+    /// For each face of `texture` on `map_path`, whether a bullet, a grenade and a blast sent
+    /// straight at it from 50 units in front are stopped by that texture
+    fn stopped_by(map_path: &str, texture: &str) -> Option<Vec<[bool; 3]>> {
         let level = map::read(Path::new(map_path)).ok()?;
         let w = CollisionWorld::from_map(&level, Params::default());
         let is_texture = |m: Option<usize>| m.and_then(|m| level.materials.materials.get(m)).is_some_and(|m| m.filename.eq_ignore_ascii_case(texture));
@@ -1025,7 +1048,8 @@ mod tests {
                     let back = scale(n, -1.0);
                     // Only where nothing else stands in front of the face
                     if w.raycast_hit(from, back, 100.0).is_some_and(|h| is_texture(h.material)) {
-                        out.push([w.bullet_hit(from, back, 100.0), w.grenade_hit(from, back, 100.0)].map(|h| is_texture(h.and_then(|h| h.material))));
+                        let hits = [w.bullet_hit(from, back, 100.0), w.grenade_hit(from, back, 100.0), w.blast_hit(from, back, 100.0)];
+                        out.push(hits.map(|h| is_texture(h.and_then(|h| h.material))));
                     }
                 }
             }
@@ -1033,17 +1057,44 @@ mod tests {
         Some(out)
     }
 
-    // Rommel.CXP: rm13's chain fence lets bullets through but not grenades, rm06's railing both
+    // Rommel.CXP: rm13's chain fence lets bullets through but not grenades, rm06's railing both.
+    // A blast goes wherever a bullet does: through the fence, as in the original.
     #[test]
     fn bullets_and_grenades_go_through_the_faces_the_game_lets_them() {
         if let Some(fence) = stopped_by("data/map/rm13/rm13.map", "rm13_chainfence.bmp") {
             assert!(fence.len() >= 8, "{} fence faces", fence.len());
-            assert!(fence.iter().all(|&[bullet, grenade]| !bullet && grenade), "{fence:?}");
+            assert!(fence.iter().all(|&[bullet, grenade, blast]| !bullet && grenade && !blast), "{fence:?}");
         }
         if let Some(rail) = stopped_by("data/map/rm06/rm06.map", "cha_rail_01.bmp") {
             assert!(rail.len() >= 8, "{} railing faces", rail.len());
-            assert!(rail.iter().all(|&[bullet, grenade]| !bullet && !grenade), "{rail:?}");
+            assert!(rail.iter().all(|&[bullet, grenade, blast]| !bullet && !grenade && !blast), "{rail:?}");
         }
+    }
+
+    // A blast goes through a closed swinging door, which the original blows apart, wood or metal;
+    // not through a sliding door, which it does not (rm09 has both)
+    #[test]
+    fn a_blast_goes_through_a_closed_swinging_door_not_a_sliding_one() {
+        let Ok(level) = map::read(Path::new("data/map/rm09/rm09.map")) else { return };
+        let w = CollisionWorld::from_map(&level, Params::default());
+        let mut checked = [0, 0];
+        for body in &w.doors {
+            let swings = matches!(body.door.motion, crate::door::Motion::Swing { .. });
+            for t in &w.tris[body.range.clone()] {
+                let from = add(scale(add(add(t.a, t.b), t.c), 1.0 / 3.0), scale(t.n, 30.0));
+                let back = scale(t.n, -1.0);
+                // Where the leaf is the first thing in the way: not a face behind its other side,
+                // nor where a wall lies in its plane (doors belong to no room)
+                if !w.raycast_hit(from, back, 60.0).is_some_and(|h| (h.dist - 30.0).abs() < 0.5 && h.room.is_none()) {
+                    continue;
+                }
+                // Not stopped by a door (a wall can lie just behind the leaf, where it overlaps the frame)
+                let through = w.blast_hit(from, back, 60.0).is_none_or(|h| h.room.is_some() || h.dist > 30.5);
+                assert_eq!(through, swings, "a blast at {from:?}");
+                checked[usize::from(swings)] += 1;
+            }
+        }
+        assert!(checked.iter().all(|&n| n > 10), "{checked:?} sliding and swinging door faces");
     }
 
     #[test]
