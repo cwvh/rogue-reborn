@@ -101,6 +101,14 @@ pub struct Input {
     pub observer: Option<V3>,
 }
 
+/// What a Rainbow operative, player or character, cries out when hurt or killed, picked by
+/// `roll`. Dying is what the original calls being incapacitated, so there is no death cry of
+/// its own; the re_/rr_ wounds and deaths are the terrorists'.
+fn voice(killed: bool, roll: u32) -> String {
+    let (name, n) = if killed { ("tm_inc", 3) } else { ("tm_wnd", 5) };
+    format!("English/{name}{}.wav", 1 + roll % n)
+}
+
 /// An angle in degrees, in 65536ths of a turn (about 0.0055 degrees), wrapping around a full turn
 pub fn quantize(degrees: f32) -> u16 {
     ((degrees / 360.0).rem_euclid(1.0) * 65536.0).round() as u32 as u16
@@ -955,9 +963,8 @@ impl Sim {
                 self.announce(slot, &text, 1.2);
                 ev.push(Event::Sound { name: "C_BHTHT.WAV".to_string(), at: Some(hit.point), gain: 1.0 });
                 // Voices: a grunt when hurt, a cry when killed
-                let (name, n) = if matches!(result, HitResult::Killed) { ("re_ded", 2) } else { ("re_wnd", 3) };
-                let pick = 1 + (self.rng >> 40) as u32 % n;
-                ev.push(Event::Sound { name: format!("English/{name}{pick}.wav"), at: Some(self.npcs[i].pos), gain: 1.0 });
+                let name = voice(matches!(result, HitResult::Killed), (self.rng >> 40) as u32);
+                ev.push(Event::Sound { name, at: Some(self.npcs[i].pos), gain: 1.0 });
                 ev.push(Event::Shot { player: slot, start, end: hit.point, hit_character: true });
             }
             _ => {
@@ -1072,8 +1079,8 @@ impl Sim {
                     self.announce(owner, "GRENADE KILL", 1.2);
                 }
             }
-            let (name, n) = if matches!(result, HitResult::Killed) { ("re_ded", 2) } else { ("re_wnd", 3) };
-            ev.push(Event::Sound { name: format!("English/{name}{}.wav", 1 + (self.rng >> 40) as u32 % n), at: Some(self.npcs[i].pos), gain: 1.0 });
+            let name = voice(matches!(result, HitResult::Killed), (self.rng >> 40) as u32);
+            ev.push(Event::Sound { name, at: Some(self.npcs[i].pos), gain: 1.0 });
         }
 
         // Players are hurt as characters are, if they can be
@@ -1202,8 +1209,7 @@ impl Sim {
         let roll = (self.rng >> 40) as u32;
         ev.push(Event::Log(format!("t={now:.2} player {victim} hurt by {amount:.0}{}, hp now {hp:.0}", attacker.map_or(String::new(), |a| format!(" from player {a}")))));
         ev.push(Event::Sound { name: "C_BHTHT.WAV".to_string(), at: Some(at), gain: 1.0 });
-        let (name, n) = if killed { ("re_ded", 2) } else { ("re_wnd", 3) };
-        ev.push(Event::Sound { name: format!("English/{name}{}.wav", 1 + roll % n), at: Some(pos), gain: 1.0 });
+        ev.push(Event::Sound { name: voice(killed, roll), at: Some(pos), gain: 1.0 });
         let p = &mut self.players[victim];
         let motion = match (wound, killed) {
             (Wound::Shot(part, from), false) => combat::hit_reaction(part, from),
@@ -1374,6 +1380,21 @@ mod tests {
         assert_eq!(blasts, 1);
         assert_eq!(sim.players[0].grenades_left, 2);
         assert!(sim.thrown.is_empty());
+    }
+
+    #[test]
+    fn every_wound_and_death_cry_is_a_sound_in_the_game() {
+        let dir = std::path::Path::new("data/sound");
+        if !dir.exists() {
+            eprintln!("skipping: {} not found", dir.display());
+            return;
+        }
+        for killed in [false, true] {
+            for roll in 0..60 {
+                let name = voice(killed, roll);
+                assert!(dir.join(&name).exists(), "no such sound as {name}");
+            }
+        }
     }
 
     /// A sim of rm11 with the player at `feet`, or None without the game data
@@ -1580,6 +1601,9 @@ mod tests {
         let mut sim = duel();
         let events = sim.tick(&[aim(0.0), holding()], TICK);
         assert!(events.contains(&Event::Kill { killer: Some(0), victim: 1, cause: Cause::HeadShot }));
+        // With a Rainbow operative's cry, not a terrorist's
+        assert!(events.iter().any(|e| matches!(e, Event::Sound { name, .. } if name.starts_with("English/tm_inc"))));
+        assert!(!events.iter().any(|e| matches!(e, Event::Sound { name, .. } if name.starts_with("English/re_"))));
         assert_eq!(sim.players[1].hp, 0.0);
         assert!(sim.players[1].respawn_at.is_some());
         assert_eq!((sim.players[0].kills, sim.players[1].deaths), (1, 1));

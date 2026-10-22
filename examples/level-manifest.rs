@@ -22,11 +22,12 @@ const IDLE_MOTION: &str = "up_none_cyc";
 /// The sprites main.rs loads from data/texture: bullet holes, dust, sparks and a blast
 const SPRITES: [&str; 7] = ["SP_wood_hit_1", "Bullet_hole_simple_1", "TGAdirt_cloud", "Sparks1", "TGAgrenade_explosion_1", "TGAgrenade_blast_03", "TGAgrenade_smoke_ring_1"];
 /// Every sound main.rs and the sim play by name, besides the level's ambience and doors
-const SOUNDS: [&str; 24] = [
+const SOUNDS: [&str; 27] = [
     "C_SB5KB.WAV", "C_SB5KR.WAV", "C_SBMAG1.WAV", "F_HWCON1.WAV", "F_HRCON1.WAV",
     "C_BLRIC1.WAV", "C_BLRIC2.WAV", "C_BLWOD.WAV", "C_BLMTTK.WAV", "C_BLMTTN.WAV", "C_BLEAR.WAV", "C_BLCON.WAV",
     "C_GBRKMD.WAV", "C_BHTHT.WAV", "C_GRMET.WAV", "C_GRWOD.WAV", "C_GREAR.WAV", "C_GRCON.WAV", "C_GRFRAG.WAV",
-    "English/re_wnd1.wav", "English/re_wnd2.wav", "English/re_wnd3.wav", "English/re_ded1.wav", "English/re_ded2.wav",
+    "English/tm_wnd1.wav", "English/tm_wnd2.wav", "English/tm_wnd3.wav", "English/tm_wnd4.wav", "English/tm_wnd5.wav",
+    "English/tm_inc1.wav", "English/tm_inc2.wav", "English/tm_inc3.wav",
 ];
 
 struct Manifest {
