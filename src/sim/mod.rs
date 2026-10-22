@@ -858,7 +858,7 @@ impl Sim {
                     // Not through a wall that is right in front of the player
                     let to = unit3([want[0] - eye[0], want[1] - eye[1], want[2] - eye[2]]);
                     let reach = dist3(eye, want);
-                    let from = match self.world.raycast(eye, to, reach + grenade::RADIUS) {
+                    let from = match self.world.grenade_hit(eye, to, reach + grenade::RADIUS).map(|h| h.dist) {
                         Some(d) => { let d = (d - grenade::RADIUS - 1.0).max(0.0); [eye[0] + to[0] * d, eye[1] + to[1] * d, eye[2] + to[2] * d] }
                         None => want,
                     };
@@ -897,7 +897,8 @@ impl Sim {
         let eye = self.eye(slot);
         let f = forward_cam;
         let dir = [f[0], f[1], -f[2]]; // camera space to MAP space
-        let mut wall = self.world.raycast(eye, dir, 20000.0);
+        // Through the faces bullets pass, such as a chain fence
+        let mut wall = self.world.bullet_hit(eye, dir, 20000.0).map(|h| h.dist);
 
         let mut best: Option<(usize, combat::Hit)> = None;
         if let Some(chars) = &self.characters {
@@ -933,7 +934,7 @@ impl Sim {
             ev.push(Event::Glass { pane: gi, at, dir, seed: self.rng });
             ev.push(Event::Log(format!("t={now:.2} shot broke glass {}", self.panes[gi].name)));
             ev.push(Event::Sound { name: "C_GBRKMD.WAV".to_string(), at: Some(self.panes[gi].center()), gain: 1.0 });
-            wall = self.world.raycast(eye, dir, 20000.0);
+            wall = self.world.bullet_hit(eye, dir, 20000.0).map(|h| h.dist);
         }
 
         let start = [eye[0] + dir[0] * 30.0, eye[1] + dir[1] * 30.0 - 8.0, eye[2] + dir[2] * 30.0];
@@ -969,7 +970,7 @@ impl Sim {
             }
             _ => {
                 // The bullet struck the level
-                if let Some(hit) = wall.and_then(|_| self.world.raycast_hit(eye, dir, 20000.0)) {
+                if let Some(hit) = wall.and_then(|_| self.world.bullet_hit(eye, dir, 20000.0)) {
                     let point = [eye[0] + dir[0] * hit.dist, eye[1] + dir[1] * hit.dist, eye[2] + dir[2] * hit.dist];
                     let surface = self.surface_of(hit.material);
                     let material = hit.material.and_then(|m| self.level.materials.materials.get(m)).map_or("?", |m| m.filename.as_str()).to_string();

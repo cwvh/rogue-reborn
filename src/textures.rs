@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
-use rogue_reborn::{map, rsb, tga};
+use rogue_reborn::{cxp, map, rsb, tga};
 use crate::opengl::*;
 
 // Whether a material filename ends in ".tga", in any case (without allocating, as this runs
@@ -48,11 +48,22 @@ pub fn ensure_texture(
 
     // A texture that is missing or unreadable is remembered too: looking for it lists two
     // directories, and doing that for every face group every frame took 30 ms on rm12
+    let key = properties().get(filename).and_then(|p| p.color_key);
     let tex_id = resolve_texture_path(map_num, filename)
         .and_then(|resolved| rsb::read(&resolved).ok())
-        .and_then(|rsb_tex| upload_rsb_to_gl(&rsb_tex));
+        .and_then(|rsb_tex| match key {
+            // Drawn cut out, like the rest of the opaque pass
+            Some(key) => upload_rgba_to_gl(rsb_tex.width, rsb_tex.height, &rsb_tex.to_rgba8_keyed(key)),
+            None => upload_rsb_to_gl(&rsb_tex),
+        });
     cache.insert(filename.clone(), tex_id);
     tex_id
+}
+
+/// The game's texture properties (data/texture/Rommel.CXP), read once
+fn properties() -> &'static cxp::TextureProperties {
+    static PROPERTIES: std::sync::OnceLock<cxp::TextureProperties> = std::sync::OnceLock::new();
+    PROPERTIES.get_or_init(cxp::TextureProperties::load)
 }
 
 // Find an on-disk RSB path by searching map-local and shared texture dirs,

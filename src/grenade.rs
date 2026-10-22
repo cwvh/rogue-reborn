@@ -113,7 +113,8 @@ impl Grenade {
                 continue;
             }
             let dir = mul(step, 1.0 / travel);
-            let Some(hit) = world.raycast_hit(self.pos, dir, travel + RADIUS) else {
+            // Not stopped by the faces grenades pass, such as a railing
+            let Some(hit) = world.grenade_hit(self.pos, dir, travel + RADIUS) else {
                 self.pos = add(self.pos, step);
                 continue;
             };

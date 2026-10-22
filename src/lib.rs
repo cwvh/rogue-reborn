@@ -1,5 +1,6 @@
 pub mod map;
 pub mod rsb;
+pub mod cxp;
 pub mod collision;
 pub mod crp;
 pub mod png;

@@ -138,7 +138,15 @@ pub struct CollisionWorld {
     params: Params,
     /// The doors, each a leaf of triangles that moves as the door opens
     doors: Vec<DoorBody>,
+    /// What goes through the faces of each MAP material: `BULLETS` and `GRENADES`, from the
+    /// game's texture properties (`gunpass` on a railing, `grenadepass` on a catwalk)
+    passes: Vec<u8>,
 }
+
+/// Faces bullets go through
+const BULLETS: u8 = 1;
+/// Faces grenades go through
+const GRENADES: u8 = 2;
 
 /// A door's leaf in the collision world
 struct DoorBody {
@@ -206,6 +214,12 @@ impl CollisionWorld {
         let doors = crate::door::doors(level);
         let door_models: Vec<usize> = doors.iter().map(|d| d.model_index).collect();
         let room_numbers: Vec<u32> = level.rooms.rooms.iter().filter_map(|r| r.section_name.parse().ok()).collect();
+        let properties = crate::cxp::TextureProperties::load();
+        let passes = level.materials.materials.iter().map(|m| {
+            let p = properties.get(&m.filename);
+            let bullets = if p.is_some_and(|p| p.gun_pass) { BULLETS } else { 0 };
+            bullets | if p.is_some_and(|p| p.grenade_pass) { GRENADES } else { 0 }
+        }).collect();
         for (object_index, object) in level.geometries.objects.iter().enumerate() {
             // Glass panes and door leaves are stored in their own space; they are added
             // placed, below
@@ -295,6 +309,7 @@ impl CollisionWorld {
             cells: vec![Vec::new(); cols * rows],
             params,
             doors: bodies,
+            passes,
         };
 
         for ti in 0..world.tris.len() {
@@ -325,7 +340,7 @@ impl CollisionWorld {
             tri(corner(-half, -half), corner(half, half), corner(-half, half)),
         ];
         let cell = 2.0 * half;
-        let mut world = Self { tris, groups: Vec::new(), min_x: -half, min_z: -half, cell, cols: 1, rows: 1, cells: vec![vec![0, 1]], params: Params::default(), doors: Vec::new() };
+        let mut world = Self { tris, groups: Vec::new(), min_x: -half, min_z: -half, cell, cols: 1, rows: 1, cells: vec![vec![0, 1]], params: Params::default(), doors: Vec::new(), passes: Vec::new() };
         world.cells[0] = vec![0, 1];
         world
     }
@@ -456,19 +471,28 @@ impl CollisionWorld {
         !t.off && !t.hidden
     }
 
-    /// Distance along the unit vector `dir` from `origin` to the nearest
-    /// triangle in the level within `max_dist`, treating every triangle as
-    /// solid from both sides (used for bullets and line of sight).
-    pub fn raycast(&self, origin: [f32; 3], dir: [f32; 3], max_dist: f32) -> Option<f32> {
-        let mut best: Option<f32> = None;
+    /// The nearest face within `max_dist` along the unit vector `dir` from `origin`, solid from
+    /// both sides, leaving out those that let `through` pass (`BULLETS`, `GRENADES`, or 0)
+    fn nearest(&self, origin: V3, dir: V3, max_dist: f32, through: u8) -> Option<(f32, &Tri)> {
+        let mut best: Option<(f32, &Tri)> = None;
         for t in self.tris.iter().filter(|t| self.solid(t)) {
+            if self.passes.get(t.material).is_some_and(|p| p & through != 0) {
+                continue;
+            }
             if let Some(d) = crate::combat::ray_triangle(origin, dir, t.a, t.b, t.c) {
-                if d <= max_dist && best.map_or(true, |b| d < b) {
-                    best = Some(d);
+                if d <= max_dist && best.map_or(true, |(b, _)| d < b) {
+                    best = Some((d, t));
                 }
             }
         }
         best
+    }
+
+    /// Distance along the unit vector `dir` from `origin` to the nearest
+    /// triangle in the level within `max_dist`, treating every triangle as
+    /// solid from both sides (used for line of sight).
+    pub fn raycast(&self, origin: [f32; 3], dir: [f32; 3], max_dist: f32) -> Option<f32> {
+        self.nearest(origin, dir, max_dist, 0).map(|(d, _)| d)
     }
 
     /// The solid triangles in the grid cells within `radius` of `center` (a square, so some
@@ -501,15 +525,21 @@ impl CollisionWorld {
 
     /// Like `raycast`, but says what was hit: how far, which way the surface faces and its material
     pub fn raycast_hit(&self, origin: [f32; 3], dir: [f32; 3], max_dist: f32) -> Option<RayHit> {
-        let mut best: Option<(f32, &Tri)> = None;
-        for t in self.tris.iter().filter(|t| self.solid(t)) {
-            if let Some(d) = crate::combat::ray_triangle(origin, dir, t.a, t.b, t.c) {
-                if d <= max_dist && best.map_or(true, |(b, _)| d < b) {
-                    best = Some((d, t));
-                }
-            }
-        }
-        best.map(|(dist, t)| {
+        self.hit(origin, dir, max_dist, 0)
+    }
+
+    /// What a bullet strikes: as `raycast_hit`, through the faces bullets pass (a chain fence)
+    pub fn bullet_hit(&self, origin: [f32; 3], dir: [f32; 3], max_dist: f32) -> Option<RayHit> {
+        self.hit(origin, dir, max_dist, BULLETS)
+    }
+
+    /// What a grenade strikes: as `raycast_hit`, through the faces grenades pass (a railing)
+    pub fn grenade_hit(&self, origin: [f32; 3], dir: [f32; 3], max_dist: f32) -> Option<RayHit> {
+        self.hit(origin, dir, max_dist, GRENADES)
+    }
+
+    fn hit(&self, origin: V3, dir: V3, max_dist: f32, through: u8) -> Option<RayHit> {
+        self.nearest(origin, dir, max_dist, through).map(|(dist, t)| {
             // The file's normals are not reliable about which side is front
             let n = if dot(t.n, dir) > 0.0 { scale(t.n, -1.0) } else { t.n };
             RayHit { dist, normal: n, material: (t.material != usize::MAX).then_some(t.material), room: (t.room != NO_ROOM).then_some(t.room) }
@@ -973,6 +1003,47 @@ mod tests {
             w.step(&mut p, [0.0, -10.0], 1.0 / 60.0);
         }
         p.pos[2]
+    }
+
+    /// For each face of `texture` on `map_path`, whether a bullet and a grenade fired straight
+    /// at it from 50 units in front are stopped by that texture
+    fn stopped_by(map_path: &str, texture: &str) -> Option<Vec<[bool; 2]>> {
+        let level = map::read(Path::new(map_path)).ok()?;
+        let w = CollisionWorld::from_map(&level, Params::default());
+        let is_texture = |m: Option<usize>| m.and_then(|m| level.materials.materials.get(m)).is_some_and(|m| m.filename.eq_ignore_ascii_case(texture));
+        let mut out = Vec::new();
+        for object in &level.geometries.objects {
+            for od in object.object_datas.iter().filter(|od| is_texture(Some(od.mn as usize))) {
+                for &(i0, i1, i2) in &od.faces.face_indices {
+                    let [a, b, c] = [i0, i1, i2].map(|i| { let v = &object.vertices[i as usize]; [v.x, v.y, v.z] });
+                    let g = cross(sub(b, a), sub(c, a));
+                    if len(g) < 1.0 {
+                        continue;
+                    }
+                    let n = scale(g, 1.0 / len(g));
+                    let from = add(scale(add(add(a, b), c), 1.0 / 3.0), scale(n, 50.0));
+                    let back = scale(n, -1.0);
+                    // Only where nothing else stands in front of the face
+                    if w.raycast_hit(from, back, 100.0).is_some_and(|h| is_texture(h.material)) {
+                        out.push([w.bullet_hit(from, back, 100.0), w.grenade_hit(from, back, 100.0)].map(|h| is_texture(h.and_then(|h| h.material))));
+                    }
+                }
+            }
+        }
+        Some(out)
+    }
+
+    // Rommel.CXP: rm13's chain fence lets bullets through but not grenades, rm06's railing both
+    #[test]
+    fn bullets_and_grenades_go_through_the_faces_the_game_lets_them() {
+        if let Some(fence) = stopped_by("data/map/rm13/rm13.map", "rm13_chainfence.bmp") {
+            assert!(fence.len() >= 8, "{} fence faces", fence.len());
+            assert!(fence.iter().all(|&[bullet, grenade]| !bullet && grenade), "{fence:?}");
+        }
+        if let Some(rail) = stopped_by("data/map/rm06/rm06.map", "cha_rail_01.bmp") {
+            assert!(rail.len() >= 8, "{} railing faces", rail.len());
+            assert!(rail.iter().all(|&[bullet, grenade]| !bullet && !grenade), "{rail:?}");
+        }
     }
 
     #[test]

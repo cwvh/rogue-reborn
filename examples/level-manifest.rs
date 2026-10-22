@@ -72,6 +72,8 @@ fn main() {
     for mat in &level.materials.materials {
         m.add(&format!("texture {}", mat.filename), level_texture(&map_num, &mat.filename));
     }
+    // Which textures are keyed out, and which let bullets and grenades through
+    m.add("texture properties", Some(PathBuf::from(rogue_reborn::cxp::PATH)).filter(|p| p.exists()));
     let ass = map_path.with_extension("ass");
     if let Some(def) = ambience::read(&ass) {
         m.files.insert(ass);

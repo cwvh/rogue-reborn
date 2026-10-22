@@ -134,6 +134,52 @@ impl Rsb {
     pub fn to_rgba8(&self) -> Vec<u8> {
         rsb_to_rgba8(self)
     }
+
+    /// As `to_rgba8`, with the pixels of the `key` color (8-bit RGB) clear. As in the original,
+    /// the key is cut to the texture's bits per channel (184 160 104 is 0xBD0D in 5/6/5) and
+    /// matched exactly. A clear pixel takes the average color of the solid ones around it, so
+    /// that filtering does not fringe the edges with the key.
+    pub fn to_rgba8_keyed(&self, key: [u8; 3]) -> Vec<u8> {
+        let mut out = self.to_rgba8();
+        if out.is_empty() {
+            return out;
+        }
+        let bm = &self.bitmask;
+        let cut = |k: u8, bits: u32| if (1..=8).contains(&bits) { Some(u32::from(k) >> (8 - bits)) } else { None };
+        let clear: Vec<bool> = match &self.palette_colors {
+            Some(colors) => self.pixels.iter().map(|px| match px {
+                Pixel::PaletteColorIndex(i) => colors.get(*i as usize).is_some_and(|c| [c.r, c.g, c.b] == key),
+                _ => false,
+            }).collect(),
+            None => self.pixels.iter().map(|px| {
+                px.r(bm) == cut(key[0], bm.r) && px.g(bm) == cut(key[1], bm.g) && px.b(bm) == cut(key[2], bm.b)
+            }).collect(),
+        };
+        let (w, h) = (self.width as usize, self.height as usize);
+        let solid = out.clone();
+        for (i, _) in clear.iter().enumerate().filter(|(_, c)| **c) {
+            let (x, y) = (i % w, i / w);
+            let mut sum = [0u32; 3];
+            let mut n = 0;
+            // Textures tile, so the neighbors wrap round the edges
+            for (dx, dy) in [(w - 1, h - 1), (0, h - 1), (1, h - 1), (w - 1, 0), (1, 0), (w - 1, 1), (0, 1), (1, 1)] {
+                let j = (y + dy) % h * w + (x + dx) % w;
+                if !clear[j] {
+                    for c in 0..3 {
+                        sum[c] += u32::from(solid[j * 4 + c]);
+                    }
+                    n += 1;
+                }
+            }
+            if n > 0 {
+                for c in 0..3 {
+                    out[i * 4 + c] = (sum[c] / n) as u8;
+                }
+            }
+            out[i * 4 + 3] = 0;
+        }
+        out
+    }
 }
 
 fn rsb_to_rgba8(tex: &Rsb) -> Vec<u8> {
@@ -486,5 +532,18 @@ mod tests {
         assert_eq!(pixels[3].g(&bitmask), Some(8));
         assert_eq!(pixels[3].r(&bitmask), Some(4));
         assert_eq!(pixels[3].a(&bitmask), None);
+    }
+
+    // rm06's railing (cha_rail_01, keyed 184 160 104 in Rommel.CXP) is about 60% panel color,
+    // which the original shows as clear
+    #[test]
+    fn a_color_key_clears_the_railings_panels() {
+        let Ok(tex) = read(Path::new("data/map/rm06/cha_rail_01.rsb")) else { return };
+        let rgba = tex.to_rgba8_keyed([184, 160, 104]);
+        assert_eq!(rgba.len(), tex.size() * 4);
+        let clear = rgba.chunks(4).filter(|p| p[3] == 0).count() as f32 / tex.size() as f32;
+        assert!((0.5..0.7).contains(&clear), "{:.0}% clear", clear * 100.0);
+        // Any other color keys nothing out
+        assert!(tex.to_rgba8_keyed([1, 2, 3]).chunks(4).all(|p| p[3] == 255));
     }
 }
