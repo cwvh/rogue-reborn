@@ -1160,9 +1160,9 @@ mod tests {
         assert!(!net(w.bullet_hit(eye, up, 1000.0)), "the net stopped a bullet");
     }
 
-    // rm05's cargo netting is one texture, without gunpass. The original lets shots through the
-    // netting wall in room 202 and stops them at the netting cage in room 316: the wall's collision
-    // groups are flagged for bullets, the cage's are not.
+    // rm05's cargo netting is one texture, without gunpass. The original lets shots and grenades
+    // through the netting wall in room 202 and stops shots at the netting cage in room 316: the
+    // wall's collision groups are flagged 8, the cage's are not.
     #[test]
     fn bullets_go_through_the_netting_wall_and_not_the_cage() {
         let Ok(level) = map::read(Path::new("data/map/rm05/rm05.map")) else { return };
@@ -1172,6 +1172,7 @@ mod tests {
         let wall = [37657.0, 32482.0, 32649.8];
         assert!(netting(w.raycast_hit(wall, west, 400.0)), "no netting wall west of {wall:?}");
         assert!(!netting(w.bullet_hit(wall, west, 400.0)), "the netting wall stopped a bullet");
+        assert!(!netting(w.grenade_hit(wall, west, 400.0)), "the netting wall stopped a grenade");
         assert!(!netting(w.blast_hit(wall, west, 400.0)), "the netting wall stopped a blast");
         let cage = [38013.6, 32932.0, 31328.8];
         assert!(netting(w.raycast_hit(cage, west, 400.0)), "no netting cage west of {cage:?}");
