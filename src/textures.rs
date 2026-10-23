@@ -78,20 +78,24 @@ pub fn resolve_texture_path(map_num: &str, material_filename: &str) -> Option<Pa
 
     // File names differ in case from the MAP's (the data comes from a
     // case-insensitive filesystem), and .tga materials are stored as
-    // "TGA<name>.rsb"
-    let mut wanted = vec![format!("{stem}.rsb").to_lowercase()];
-    if is_tga(material_filename) {
-        wanted.push(format!("tga{stem}.rsb").to_lowercase());
-    }
+    // "TGA<name>.rsb". So is rm12's catwalk railing, a .bmp material with no
+    // "<name>.rsb" (the only one), which the original draws: for other
+    // materials the "TGA" file is looked for only once the plain one is not found.
+    let (plain, tga) = (format!("{stem}.rsb").to_lowercase(), format!("tga{stem}.rsb").to_lowercase());
+    let rounds = if is_tga(material_filename) { vec![vec![plain, tga]] } else { vec![vec![plain], vec![tga]] };
     let parent = rel.parent().unwrap_or(Path::new(""));
+    let dirs: Vec<Vec<(String, PathBuf)>> = [Path::new("data").join("map").join(map_num).join(parent), Path::new("data").join("texture").join(parent)]
+        .iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .map(|entries| entries.flatten().map(|e| (e.file_name().to_string_lossy().to_lowercase(), e.path())).collect())
+        .collect();
 
-    for dir in [Path::new("data").join("map").join(map_num).join(parent), Path::new("data").join("texture").join(parent)] {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        let names: Vec<(String, PathBuf)> = entries.flatten()
-            .map(|e| (e.file_name().to_string_lossy().to_lowercase(), e.path())).collect();
-        for want in &wanted {
-            if let Some((_, path)) = names.iter().find(|(n, _)| n == want) {
-                return Some(path.clone());
+    for wanted in &rounds {
+        for names in &dirs {
+            for want in wanted {
+                if let Some((_, path)) = names.iter().find(|(n, _)| n == want) {
+                    return Some(path.clone());
+                }
             }
         }
     }
@@ -106,4 +110,19 @@ pub fn has_soft_alpha(map_num: &str, material_filename: &str) -> bool {
     let Some(tex) = resolve_texture_path(map_num, material_filename).and_then(|p| rsb::read(&p).ok()) else { return false };
     let seen: Vec<u8> = tex.to_rgba8().into_iter().skip(3).step_by(4).filter(|&a| a > 15).collect();
     seen.iter().filter(|&&a| a < 240).count() * 2 > seen.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // rm12's catwalk railing is a .bmp material whose only texture is "TGArail_metal_opera_01.rsb"
+    #[test]
+    fn a_bmp_material_falls_back_to_its_tga_texture() {
+        if !Path::new("data/map/rm12").exists() {
+            return;
+        }
+        let path = resolve_texture_path("rm12", "rail_metal_opera_01.bmp").expect("the railing's texture");
+        assert!(path.file_name().is_some_and(|n| n.eq_ignore_ascii_case("TGArail_metal_opera_01.rsb")), "{path:?}");
+    }
 }

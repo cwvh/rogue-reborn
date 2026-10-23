@@ -1138,6 +1138,15 @@ mod tests {
         }
     }
 
+    // rm12's catwalk railing stops grenades in the original: its texture has no properties of its
+    // own (only its .tga namesake does) and its collision groups are not flagged 8
+    #[test]
+    fn grenades_stop_at_the_catwalk_railing() {
+        let Some(rail) = stopped_by("data/map/rm12/rm12.map", "rail_metal_opera_01.bmp") else { return };
+        assert!(rail.len() >= 8, "{} railing faces", rail.len());
+        assert!(rail.iter().all(|&[_, grenade, _]| grenade), "{rail:?}");
+    }
+
     // rm15's camouflage net over room 504 lets grenades through in the original, though its texture
     // is gunpass only: its collision groups are flagged 8. The exterior (room 507) has a copy that
     // is not, which does not count for someone standing under the net, as the game picks the rooms.
