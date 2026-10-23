@@ -2,7 +2,7 @@
 //! from a MAP file. The player and up to eight characters are placed in it close together.
 
 use crate::map::{
-    Collisions, Color4f, DynamicObjects, Faces, FaceNormal, Geometries, Lights, LevelHeight, Map, MapHeader,
+    Collisions, Color4f, DynamicObjects, Faces, FaceNormal, FlashSpace, Geometries, Lights, Map, MapHeader,
     Material, Materials, NormalCoord, Object, ObjectData, PlanningLevel, PlanningLevels, Portals, Room, Rooms,
     ShermanLevel, TextureAddressMode, TextureVertices, TransformationMatrix, TransformationWithAABB, Transitions,
     UvCoord, Vec3f, Vertex,
@@ -86,23 +86,19 @@ pub fn map() -> Map {
     let room = Room {
         section_id: 1,
         section_name: ROOM.to_string(),
-        unknown1: 0,
-        unknown2: 0,
-        unknown3: 0,
-        unknown4: Some(0),
-        unknown5: None,
-        unknown6: None,
+        flash_space: FlashSpace::Open,
+        unknown_flag: 0,
+        weather_bounds: None,
         sherman_levels: vec![ShermanLevel {
             name: ROOM.to_string(),
             tm_with_aabb: vec![TransformationWithAABB {
                 tm: TransformationMatrix { x_axis: at(1.0, 0.0, 0.0), y_axis: at(0.0, 1.0, 0.0), z_axis: at(0.0, 0.0, 1.0), position: at(0.0, 0.0, 0.0) },
                 aabb: [-hx, 0.0, -hz, hx, HEIGHT, hz],
             }],
-            unknown1: Vec::new(),
-            unknown2: 0,
+            floors: vec![1.0],
         }],
-        unknown7: 0.0,
-        level_heights: vec![LevelHeight { height: HEIGHT, unknown: 0.0 }],
+        floors: vec![(1.0, 0.0)],
+        unknown_list: Vec::new(),
     };
 
     Map {

@@ -1475,21 +1475,33 @@ pub struct Room {
     pub section_id: u32,
     pub section_name: String,
 
-    pub unknown1: u8,
-    pub unknown2: u8,
-    pub unknown3: u8,
-    // Optionals below are influenced by the unknown values above
-    /// Set when `unknown1 == 0`
-    pub unknown4: Option<u8>,
-    /// Set when `unknown3 == 1`
-    pub unknown5: Option<[f32; 6]>,
-    /// Set when `unknown4 == 1`
-    pub unknown6: Option<[f32; 6]>,
+    pub flash_space: FlashSpace,
+    /// Read by the original's damage code. The mission's RoomFlags bit 0x10 also sets it.
+    pub unknown_flag: u8,
+    /// Where rain or snow starts, as the min and max corners of a flat rectangle. Where there
+    /// is none, the original works one out from the levels.
+    pub weather_bounds: Option<[Vec3f; 2]>,
 
     pub sherman_levels: Vec<ShermanLevel>,
 
-    pub unknown7: f32,
-    pub level_heights: Vec<LevelHeight>,
+    /// The planning levels the room is on, as (level number, floor height)
+    pub floors: Vec<(f32, f32)>,
+    /// Empty in every RS map. Perhaps the "extra 4 bytes between the Room list and
+    /// Transition list" of BT and CL maps, such as BT03.
+    pub unknown_list: Vec<u32>,
+}
+
+/// How a flashbang going off in a room affects those in it, from the original's flash code
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "get-size", derive(GetSize))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlashSpace {
+    /// Only those facing it, as outdoors
+    Open,
+    /// Those within its range even facing away, as indoors or between high walls
+    Enclosed,
+    /// Everyone in the room, as in a tight entryway
+    Small,
 }
 
 impl Room {
@@ -1539,42 +1551,27 @@ impl Room {
     }
 
     fn read(buf: &mut Cursor<Vec<u8>>) -> Result<Self> {
-        let (section_id, section_name) = section_header_short(buf)
+        let (section_id, section_name, version) = section_header_short(buf)
             .context("room section header short")?;
 
-        let unknown1 = buf.read_u8().context("room unknown1")?;
-        let unknown2 = buf.read_u8().context("room unknown2")?;
-        let unknown3 = buf.read_u8().context("room unknown3")?;
-
-        let unknown4 = if unknown1 == 0 {
-            Some(buf.read_u8().context("room unknown4")?)
-        } else {
-            None
+        // A small room is only marked as such when it is not enclosed
+        let flash_space = match buf.read_u8().context("room enclosed")? {
+            0 => match buf.read_u8().context("room small")? {
+                0 => FlashSpace::Open,
+                1 => FlashSpace::Small,
+                e => bail!("unknown room small value: {e}"),
+            },
+            1 => FlashSpace::Enclosed,
+            e => bail!("unknown room enclosed value: {e}"),
         };
+        let unknown_flag = buf.read_u8().context("room unknown flag")?;
 
-        let unknown5 = if unknown3 == 1 {
-            let mut array = [0f32; 6];
-            for (i, x) in array.iter_mut().enumerate() {
-                *x = buf.read_f32::<LE>().with_context(|| {
-                    format!("room unknown5 {i}")
-                })?;
-            }
-            Some(array)
-        } else {
-            None
-        };
-
-        let unknown6 = if unknown4.is_some_and(|x| x == 1) {
-            let mut array = [0f32; 6];
-            for (i, x) in array.iter_mut().enumerate() {
-                *x = buf.read_f32::<LE>().with_context(|| {
-                    format!("room unknown6 {i}")
-                })?;
-            }
-            Some(array)
-        } else {
-            None
-        };
+        let mut weather_bounds = None;
+        if version > 1 && buf.read_u8().context("room has weather bounds")? != 0 {
+            let min = Vec3f::read(buf).context("room weather bounds min")?;
+            let max = Vec3f::read(buf).context("room weather bounds max")?;
+            weather_bounds = Some([min, max]);
+        }
 
         let n = buf.read_u32::<LE>().context("room level count")?;
         let mut levels = buf.vec_for(n);
@@ -1584,27 +1581,30 @@ impl Room {
             })?);
         }
 
-        let n = buf.read_u32::<LE>().context("room level heights count")?;
-        let unknown7 = buf.read_f32::<LE>().context("room unknown7")?;
-        let mut heights = buf.vec_for(n);
+        let n = buf.read_u32::<LE>().context("room floor count")?;
+        let mut floors = buf.vec_for(n);
         for i in 0..n {
-            heights.push(LevelHeight::read(buf).with_context(|| {
-                format!("room sherman level heights {i} of {n}")
-            })?);
+            let floor = || format!("room floor {i} of {n}");
+            let number = buf.read_f32::<LE>().context("number").with_context(floor)?;
+            let height = buf.read_f32::<LE>().context("height").with_context(floor)?;
+            floors.push((number, height));
+        }
+
+        let n = buf.read_u32::<LE>().context("room unknown count")?;
+        let mut unknown_list = buf.vec_for(n);
+        for i in 0..n {
+            unknown_list.push(buf.read_u32::<LE>().with_context(|| format!("room unknown {i}"))?);
         }
 
         Ok(Self {
             section_id,
             section_name,
-            unknown1,
-            unknown2,
-            unknown3,
-            unknown4,
-            unknown5,
-            unknown6,
+            flash_space,
+            unknown_flag,
+            weather_bounds,
             sherman_levels: levels,
-            unknown7,
-            level_heights: heights,
+            floors,
+            unknown_list,
         })
     }
 }
@@ -1615,10 +1615,8 @@ impl Room {
 pub struct ShermanLevel {
     pub name: String,
     pub tm_with_aabb: Vec<TransformationWithAABB>,
-    // TODO: always 1?
-    pub unknown1: Vec<f32>,
-    // TODO: has sherman level plan area?
-    pub unknown2: u8,
+    /// The planning level numbers the level is on: a ramp from 0.5 to 1 is on both
+    pub floors: Vec<f32>,
 }
 
 impl ShermanLevel {
@@ -1634,18 +1632,16 @@ impl ShermanLevel {
             tm_with_aabb.push(tm);
         }
 
-        let n = buf.read_u32::<LE>().context("unknown count")?;
-        let mut unknown1 = buf.vec_for(n);
+        let n = buf.read_u32::<LE>().context("level floor count")?;
+        let mut floors = buf.vec_for(n);
         for i in 0..n {
-            let value = buf.read_f32::<LE>().with_context(|| {
-                format!("level unknown1 {i}")
-            })?;
-            unknown1.push(value);
+            floors.push(buf.read_f32::<LE>().with_context(|| format!("level floor {i}"))?);
         }
 
-        let unknown2 = buf.read_u8().context("level unknown2")?;
+        // The original reads a model next where this is set. No RS map has one.
+        ensure!(buf.read_u8().context("level has model")? == 0, "a level with a model, which is not read");
 
-        Ok(Self { name, tm_with_aabb, unknown1, unknown2 })
+        Ok(Self { name, tm_with_aabb, floors })
     }
 }
 
@@ -1732,25 +1728,6 @@ impl TransformationWithAABB {
             })?;
         }
         Ok(Self { tm, aabb })
-    }
-}
-
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "get-size", derive(GetSize))]
-#[derive(Clone, Debug)]
-pub struct LevelHeight {
-    pub height: f32,
-    pub unknown: f32,
-    // TODO: there is an extra 4 bytes between the Room list and Transition list
-    // with BT and CL maps. Figure out the conditional logic here. All RS, CO,
-    // UT maps are fine. BT03 is an example of a broken map.
-}
-
-impl LevelHeight {
-    fn read(buf: &mut Cursor<Vec<u8>>) -> Result<Self> {
-        let height = buf.read_f32::<LE>().context("level height")?;
-        let unknown = buf.read_f32::<LE>().context("level height unknown")?;
-        Ok(Self { height, unknown })
     }
 }
 
@@ -1889,11 +1866,12 @@ impl PlanningLevel {
 fn section_header(buf: &mut Cursor<Vec<u8>>) -> Result<(u32, String)> {
     let _section_size = buf.read_u32::<LE>()
         .context("failed to read section size")?;
-    section_header_short(buf)
+    let (id, name, _version) = section_header_short(buf)?;
+    Ok((id, name))
 }
 
-/// Read the id and return the non-Version name
-fn section_header_short(buf: &mut Cursor<Vec<u8>>) -> Result<(u32, String)> {
+/// Read the id, the non-Version name, and the version (0 where there is none)
+fn section_header_short(buf: &mut Cursor<Vec<u8>>) -> Result<(u32, String, u32)> {
     let id = buf.read_u32::<LE>()
         .context("failed to read material id")?;
 
@@ -1901,12 +1879,13 @@ fn section_header_short(buf: &mut Cursor<Vec<u8>>) -> Result<(u32, String)> {
     // additional name, which is the in-game map texture short name. This
     // appears to be a convention.
     let mut name = buf.read_cstring().context("section header name")?;
+    let mut version = 0;
     if name == b"Version" {
-        let _version = buf.read_u32::<LE>().context("version number")?;
+        version = buf.read_u32::<LE>().context("version number")?;
         name = buf.read_cstring().context("texture short name")?;
     }
 
-    Ok((id, latin1_to_utf8(&name)))
+    Ok((id, latin1_to_utf8(&name), version))
 }
 
 /// Read primitive data types that are common in the MAP format
