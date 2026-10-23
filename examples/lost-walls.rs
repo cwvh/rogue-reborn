@@ -12,17 +12,17 @@ fn main() -> Result<()> {
         let mut faces: Vec<([[f32; 3]; 3], bool, String, String)> = Vec::new();
         for o in &level.geometries.objects {
             let mut wall: HashMap<usize, bool> = HashMap::new();
-            for g in &o.ind {
+            for g in &o.collision_groups {
                 for &i in &g.indices {
-                    *wall.entry(i as usize).or_insert(false) |= g.mn & 2 == 0;
+                    *wall.entry(i as usize).or_insert(false) |= g.flags & 2 == 0;
                 }
             }
             for (ti, t) in o.tags.iter().enumerate() {
                 let (verts, material) = if t.coord2.2 == u16::MAX {
                     (&o.collisions.vertices, "(not drawn)".to_string())
                 } else {
-                    let mn = o.object_datas[t.coord2.2 as usize].mn as usize;
-                    (&o.vertices, level.materials.materials.get(mn).map_or("?".into(), |m| m.filename.clone()))
+                    let material = o.object_datas[t.coord2.2 as usize].material as usize;
+                    (&o.vertices, level.materials.materials.get(material).map_or("?".into(), |m| m.filename.clone()))
                 };
                 let p = [t.coord1.0, t.coord1.1, t.coord1.2].map(|k| { let v = &verts[k as usize]; [v.x, v.y, v.z] });
                 faces.push((p, wall.get(&ti).copied().unwrap_or(true), o.name.clone(), material));

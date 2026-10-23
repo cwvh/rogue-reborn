@@ -148,7 +148,7 @@ impl Scene {
             let room = map::object_room(&o.name).filter(|r| rooms.contains(r)).unwrap_or(NO_ROOM);
             let v = |k: u16| o.vertices.get(k as usize).map(|v| [v.x, v.y, v.z]);
             for od in &o.object_datas {
-                let material = level.materials.materials.get(od.mn as usize);
+                let material = level.materials.materials.get(od.material as usize);
                 let alpha = material.is_some_and(|m| m.filename.to_ascii_lowercase().ends_with(".tga"));
                 let two_sided = material.is_some_and(|m| m.two_sided);
                 for &(a, b, c) in &od.faces.face_indices {
@@ -156,7 +156,7 @@ impl Scene {
                     let lo = [0, 1, 2].map(|k| a[k].min(b[k]).min(c[k]));
                     let hi = [0, 1, 2].map(|k| a[k].max(b[k]).max(c[k]));
                     let normal = plane(&[a, b, c]).map_or([0.0; 3], |p| p.0);
-                    tris.push(Tri { room, object: i, alpha, material: od.mn as usize, two_sided, normal, p: [a, b, c], lo, hi });
+                    tris.push(Tri { room, object: i, alpha, material: od.material as usize, two_sided, normal, p: [a, b, c], lo, hi });
                 }
             }
         }

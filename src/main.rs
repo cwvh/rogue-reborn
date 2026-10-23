@@ -1320,7 +1320,7 @@ fn main() {
                                 continue;
                             }
                         }
-                        let mat_index = od.mn as usize;
+                        let mat_index = od.material as usize;
                         let blend = if textured { sprite_blends.get(mat_index).copied().flatten() } else { None };
                         if blend.is_some() != (pass == 1) {
                             continue;

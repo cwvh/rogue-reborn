@@ -195,7 +195,7 @@ pub fn leaf_triangles(level: &Map, door: &Door) -> Vec<([V3; 3], usize)> {
     for od in &object.object_datas {
         for &(i0, i1, i2) in &od.faces.face_indices {
             let (Some(a), Some(b), Some(c)) = (object.vertices.get(i0 as usize), object.vertices.get(i1 as usize), object.vertices.get(i2 as usize)) else { continue };
-            out.push(([[a.x, a.y, a.z], [b.x, b.y, b.z], [c.x, c.y, c.z]], od.mn as usize));
+            out.push(([[a.x, a.y, a.z], [b.x, b.y, b.z], [c.x, c.y, c.z]], od.material as usize));
         }
     }
     out

@@ -15,7 +15,7 @@ fn main() -> Result<()> {
     let mut hits = Vec::new();
     for object in &level.geometries.objects {
         for (k, od) in object.object_datas.iter().enumerate() {
-            let material = level.materials.materials.get(od.mn as usize).map_or("?", |m| m.filename.as_str());
+            let material = level.materials.materials.get(od.material as usize).map_or("?", |m| m.filename.as_str());
             for (f, &(i0, i1, i2)) in od.faces.face_indices.iter().enumerate() {
                 let p = [i0, i1, i2].map(|k| object.vertices.get(k as usize).map(|v| [v.x, v.y, v.z]));
                 let [Some(p0), Some(p1), Some(p2)] = p else { continue };

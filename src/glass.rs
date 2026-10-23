@@ -76,7 +76,7 @@ pub fn panes(level: &map::Map) -> Vec<Pane> {
         let mut seen: Vec<[u16; 3]> = Vec::new();
         let mut material = 0;
         for od in &object.object_datas {
-            material = od.mn as usize;
+            material = od.material as usize;
             let n = od.faces.face_indices.len().min(od.faces.texture_indices.len());
             for k in 0..n {
                 let (i0, i1, i2) = od.faces.face_indices[k];

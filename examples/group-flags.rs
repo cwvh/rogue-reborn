@@ -3,7 +3,7 @@ use rogue_reborn::map;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-/// Survey the `ind` groups' names and flags over maps: per flag value, faces and top materials
+/// Survey the collision groups' names and flags over maps: per flag value, faces and top materials
 fn main() -> Result<()> {
     let mut per: BTreeMap<u32, (usize, usize, BTreeMap<String, usize>)> = BTreeMap::new();
     let mut names: BTreeMap<String, usize> = BTreeMap::new();
@@ -14,15 +14,15 @@ fn main() -> Result<()> {
             let key = |a: u16, b: u16, c: u16| { let mut k = [a, b, c]; k.sort(); k };
             let mut mat: HashMap<[u16; 3], String> = HashMap::new();
             for d in &o.object_datas {
-                let name = level.materials.materials.get(d.mn as usize).map(|m| m.filename.clone()).unwrap_or("?".into());
+                let name = level.materials.materials.get(d.material as usize).map(|m| m.filename.clone()).unwrap_or("?".into());
                 for &(a, b, c) in &d.faces.face_indices { mat.insert(key(a, b, c), name.clone()); }
             }
             tags_vs_faces.0 += o.tags.len();
             tags_vs_faces.1 += mat.len();
-            tags_vs_faces.2 += o.ind.iter().map(|e| e.indices.len()).sum::<usize>();
-            for e in &o.ind {
-                *names.entry(e.text.clone()).or_default() += 1;
-                let s = per.entry(e.mn).or_default();
+            tags_vs_faces.2 += o.collision_groups.iter().map(|e| e.indices.len()).sum::<usize>();
+            for e in &o.collision_groups {
+                *names.entry(e.name.clone()).or_default() += 1;
+                let s = per.entry(e.flags).or_default();
                 s.0 += 1;
                 for &i in &e.indices {
                     s.1 += 1;

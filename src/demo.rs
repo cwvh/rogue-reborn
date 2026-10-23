@@ -73,13 +73,13 @@ pub fn map() -> Map {
         object_name: ROOM.to_string(),
         vertices,
         object_datas: vec![ObjectData {
-            mn: 0,
+            material: 0,
             faces: Faces { normals: face_normals, face_indices, texture_indices },
             texture_vertices: TextureVertices { normals, uv_coords: uvs, face_colors },
         }],
         collisions: Collisions { vertices: Vec::new(), faces: Vec::new() },
         tags: Vec::new(),
-        ind: Vec::new(),
+        collision_groups: Vec::new(),
     };
 
     let at = |x: f32, y: f32, z: f32| Vec3f { x, y, z };

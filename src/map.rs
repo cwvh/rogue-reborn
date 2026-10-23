@@ -160,7 +160,7 @@ impl Materials {
             .context("material list section header")?;
 
         let n = buf.read_u32::<LE>().context("missing number of materials")?;
-        let mut materials = Vec::with_capacity(n as usize);
+        let mut materials = buf.vec_for(n);
         for i in 0..n {
             materials.push(Material::read(buf)
                 .with_context(|| format!("material section header {i}"))?);
@@ -284,7 +284,7 @@ impl Geometries {
             .context("geometry list section header")?;
 
         let n = buf.read_u32::<LE>().context("missing number of objects")?;
-        let mut objects = Vec::with_capacity(n as usize);
+        let mut objects = buf.vec_for(n);
         for _ in 0..n {
             objects.push(Object::read(buf)?);
         }
@@ -302,7 +302,7 @@ impl Geometries {
             .context("geometry list section header")?;
 
         let n = buf.read_u32::<LE>().context("missing number of objects")?;
-        let mut objects = Vec::with_capacity(n as usize);
+        let mut objects = buf.vec_for(n);
         for _ in 0..n {
             objects.push(Object::read_in_model(buf)?);
         }
@@ -326,7 +326,7 @@ pub struct Object {
     /// The collision faces, drawn or not
     pub tags: Vec<Tag>,
     /// The collision faces in groups, each with flags
-    pub ind: Vec<EIndices>,
+    pub collision_groups: Vec<CollisionGroup>,
 }
 
 impl Object {
@@ -352,13 +352,13 @@ impl Object {
         let (id, name) = section_header(buf).context("model object section header")?;
 
         let n = buf.read_u32::<LE>().context("vertex count")?;
-        let mut vertices = Vec::with_capacity(n as usize);
+        let mut vertices = buf.vec_for(n);
         for _ in 0..n {
             vertices.push(Vertex::read(buf)?);
         }
 
         let n = buf.read_u32::<LE>().context("objects data count")?;
-        let mut object_datas = Vec::with_capacity(n as usize);
+        let mut object_datas = buf.vec_for(n);
         for _ in 0..n {
             object_datas.push(ObjectData::read(buf)?);
         }
@@ -373,7 +373,7 @@ impl Object {
             object_datas,
             collisions: Collisions { vertices: Vec::new(), faces: Vec::new() },
             tags: Vec::new(),
-            ind: Vec::new(),
+            collision_groups: Vec::new(),
         })
     }
 
@@ -385,13 +385,13 @@ impl Object {
         object_name: String,
     ) -> Result<Self> {
         let n = buf.read_u32::<LE>().context("vertex count")?;
-        let mut vertices = Vec::with_capacity(n as usize);
+        let mut vertices = buf.vec_for(n);
         for _ in 0..n {
             vertices.push(Vertex::read(buf)?);
         }
 
         let n = buf.read_u32::<LE>().context("objects data count")?;
-        let mut object_datas = Vec::with_capacity(n as usize);
+        let mut object_datas = buf.vec_for(n);
         for _ in 0..n {
             object_datas.push(ObjectData::read(buf)?);
         }
@@ -399,18 +399,16 @@ impl Object {
         let collisions = Collisions::read(buf)?;
 
         let n = buf.read_u32::<LE>().context("object tag count")?;
-        let mut tags = Vec::with_capacity(n as usize);
+        let mut tags = buf.vec_for(n);
         for _ in 0..n {
             tags.push(Tag::read(buf)?);
         }
 
-        // TODO: these field names are wonky
-        let ff_count = buf.read_u32::<LE>().context("FF count")?;
-        let mut ind = Vec::with_capacity(ff_count as usize);
-        for i in 0..ff_count {
-            let index = EIndices::read(buf)
-                .with_context(|| format!("EIndices {i}"))?;
-            ind.push(index);
+        let n = buf.read_u32::<LE>().context("collision group count")?;
+        let mut collision_groups = buf.vec_for(n);
+        for i in 0..n {
+            collision_groups.push(CollisionGroup::read(buf)
+                .with_context(|| format!("collision group {i}"))?);
         }
 
         Ok(Self {
@@ -422,7 +420,7 @@ impl Object {
             object_datas,
             collisions,
             tags,
-            ind,
+            collision_groups,
         })
     }
 }
@@ -447,19 +445,19 @@ impl Vertex {
 #[cfg_attr(feature = "get-size", derive(GetSize))]
 #[derive(Clone, Debug)]
 pub struct ObjectData {
-    // TODO: what is this?
-    pub mn: u32,
+    /// The faces' material, as an index into the map's materials
+    pub material: u32,
     pub faces: Faces,
     pub texture_vertices: TextureVertices,
 }
 
 impl ObjectData {
     fn read(buf: &mut Cursor<Vec<u8>>) -> Result<Self> {
-        let mn = buf.read_u32::<LE>().context("MN")?;
+        let material = buf.read_u32::<LE>().context("material")?;
         let faces = Faces::read(buf)?;
         let texture_vertices = TextureVertices::read(buf)?;
         Ok(Self {
-            mn,
+            material,
             faces,
             texture_vertices,
         })
@@ -477,16 +475,16 @@ pub struct Faces {
 
 impl Faces {
     fn read(buf: &mut Cursor<Vec<u8>>) -> Result<Self> {
-        let n = buf.read_u32::<LE>().context("face count")? as usize;
+        let n = buf.read_u32::<LE>().context("face count")?;
 
-        let mut normals = Vec::with_capacity(n);
+        let mut normals = buf.vec_for(n);
         for i in 0..n {
             let normal = FaceNormal::read(buf)
                 .with_context(|| format!("face normal {i}"))?;
             normals.push(normal);
         }
 
-        let mut face_indices = Vec::with_capacity(n);
+        let mut face_indices = buf.vec_for(n);
         for i in 0..n {
             let p1 = buf.read_u16::<LE>()
                 .with_context(|| format!("p1 of face index {i}"))?;
@@ -497,7 +495,7 @@ impl Faces {
             face_indices.push((p1, p2, p3));
         }
 
-        let mut texture_indices = Vec::with_capacity(n);
+        let mut texture_indices = buf.vec_for(n);
         for i in 0..n {
             let p1 = buf.read_u16::<LE>()
                 .with_context(|| format!("p1 of face index {i}"))?;
@@ -547,21 +545,21 @@ pub struct TextureVertices {
 
 impl TextureVertices {
     fn read(buf: &mut Cursor<Vec<u8>>) -> Result<Self> {
-        let n = buf.read_u32::<LE>().context("vertices count")? as usize;
+        let n = buf.read_u32::<LE>().context("vertices count")?;
 
-        let mut normals = Vec::with_capacity(n);
+        let mut normals = buf.vec_for(n);
         for i in 0..n {
             normals.push(NormalCoord::read(buf)
                 .with_context(|| format!("normal coordinate {i} of {n}"))?);
         }
 
-        let mut uv_coords = Vec::with_capacity(n);
+        let mut uv_coords = buf.vec_for(n);
         for i in 0..n {
             uv_coords.push(UvCoord::read(buf)
                 .with_context(|| format!("UV texture coordinate {i} of {n}"))?);
         }
 
-        let mut face_colors = Vec::with_capacity(n);
+        let mut face_colors = buf.vec_for(n);
         for i in 0..n {
             face_colors.push(Color4f::read(buf)
                 .with_context(|| format!("face color {i} of {n}"))?);
@@ -618,14 +616,14 @@ pub struct Collisions {
 impl Collisions {
     fn read(buf: &mut Cursor<Vec<u8>>) -> Result<Self> {
         let n = buf.read_u32::<LE>().context("collision vertices count")?;
-        let mut vertices = Vec::with_capacity(n as usize);
+        let mut vertices = buf.vec_for(n);
         for i in 0..n {
             vertices.push(Vertex::read(buf)
                 .with_context(|| format!("collision vertex {i}"))?);
         }
 
         let n = buf.read_u32::<LE>().context("collision faces count")?;
-        let mut faces = Vec::with_capacity(n as usize);
+        let mut faces = buf.vec_for(n);
         for i in 0..n {
             faces.push(FaceNormal::read(buf)
                 .with_context(|| format!("collision face normal {i}"))?);
@@ -674,27 +672,26 @@ impl Tag {
 #[cfg_attr(feature = "get-size", derive(GetSize))]
 #[derive(Clone, Debug)]
 /// A group of an object's collision faces: "NONE", or a name such as "staticcaptainschair_02"
-pub struct EIndices {
-    pub text: String,
-    /// Flags; 2 leaves the group out of the walls (see collision.rs)
-    pub mn: u32,
+pub struct CollisionGroup {
+    pub name: String,
+    /// 2 leaves the group out of the walls (see collision.rs)
+    pub flags: u32,
     /// Indices into the object's `tags`
     pub indices: Vec<u16>,
 }
 
-impl EIndices {
+impl CollisionGroup {
     fn read(buf: &mut Cursor<Vec<u8>>) -> Result<Self> {
-        let text = buf.read_cstring().context("EIndex text")?;
-        let mn = buf.read_u32::<LE>().context("EIndex MN")?;
-        let n = buf.read_u32::<LE>().context("EIndex indices count")?;
-        let mut indices = Vec::with_capacity(n as usize);
+        let name = buf.read_cstring().context("collision group name")?;
+        let flags = buf.read_u32::<LE>().context("collision group flags")?;
+        let n = buf.read_u32::<LE>().context("collision group indices count")?;
+        let mut indices = buf.vec_for(n);
         for _ in 0..n {
-            let p1 = buf.read_u16::<LE>()?;
-            indices.push(p1);
+            indices.push(buf.read_u16::<LE>()?);
         }
         Ok(Self {
-            text: String::from_utf8(text)?,
-            mn,
+            name: String::from_utf8(name)?,
+            flags,
             indices,
         })
     }
@@ -713,7 +710,7 @@ impl Portals {
     fn read(buf: &mut Cursor<Vec<u8>>) -> Result<Self> {
         let (id, name) = section_header(buf).context("portals")?;
         let n = buf.read_u32::<LE>().context("portal count")?;
-        let mut portals = Vec::with_capacity(n as usize);
+        let mut portals = buf.vec_for(n);
         for i in 0..n {
             portals.push(Portal::read(buf)
                 .with_context(|| format!("portal {i}"))?);
@@ -741,7 +738,7 @@ impl Portal {
     fn read(buf: &mut Cursor<Vec<u8>>) -> Result<Self> {
         let (id, name) = section_header(buf).context("portal")?;
         let n = buf.read_u32::<LE>().context("coordinates count")?;
-        let mut coordinates = Vec::with_capacity(n as usize);
+        let mut coordinates = buf.vec_for(n);
         for i in 0..n {
             coordinates.push(Vertex::read(buf)
                 .with_context(|| format!("coordinate vertex {i}"))?);
@@ -792,7 +789,7 @@ impl DynamicObjects {
         let (id, name) = section_header(buf)
             .context("dynamic objects section header")?;
         let n = buf.read_u32::<LE>().context("dynamic object count")?;
-        let mut dynamic_objects = Vec::with_capacity(n as usize);
+        let mut dynamic_objects = buf.vec_for(n);
         for i in 0..n {
             dynamic_objects.push(DynamicObject::read(buf)
                 .with_context(|| format!("dynamic object {i} of {n}"))?);
@@ -993,7 +990,7 @@ impl KindDynamicParams {
     fn read(buf: &mut Cursor<Vec<u8>>) -> Result<Self> {
         let count = buf.read_u32::<LE>().context("dynamic object kind count")?;
         Ok(if count > 0 {
-            let mut structs = Vec::with_capacity(count as usize);
+            let mut structs = buf.vec_for(count);
             for i in 0..count {
                 structs.push(KindDynamicParamStruct::read(buf).with_context(|| {
                     format!("dynamic object kind struct {i} of {count}")
@@ -1004,7 +1001,7 @@ impl KindDynamicParams {
             // Yes, another count that shadows the previous one. MAP quirk.
             let count = buf.read_u32::<LE>()
                 .context("dynamic object flat count")?;
-            let mut names = Vec::with_capacity(count as usize);
+            let mut names = buf.vec_for(count);
             for i in 0..count {
                 let cstring = buf.read_cstring().with_context(|| {
                     format!("dynamic object kind flat name {i} of {count}")
@@ -1243,7 +1240,7 @@ impl DynamicObjectKind {
         let unknown2 = buf.read_u32::<LE>().context("unknown2")?;
 
         let n = buf.read_u32::<LE>().context("name count")?;
-        let mut names = Vec::with_capacity(n as usize);
+        let mut names = buf.vec_for(n);
         for i in 0..n {
             let name = buf.read_cstring()
                 .with_context(|| format!("animation name {i}"))?;
@@ -1291,7 +1288,7 @@ impl DynamicObjectKind {
         let common = DynamicObjectKindCommon::read(buf)?;
         let unknown1 = buf.read_u32::<LE>().context("ADT unknown1")?;
         let n = buf.read_u32::<LE>().context("ADT attachment count")?;
-        let mut attachments = Vec::with_capacity(n as usize);
+        let mut attachments = buf.vec_for(n);
         for i in 0..n {
             let attachment = buf.read_cstring()
                 .with_context(|| format!("ADT attachment {i}"))?;
@@ -1308,7 +1305,7 @@ impl DynamicObjectKind {
             .expect("ADT unknown2 is 3 elements");
 
         let n = buf.read_u32::<LE>().context("name count")?;
-        let mut names = Vec::with_capacity(n as usize);
+        let mut names = buf.vec_for(n);
         for i in 0..n {
             let name = buf.read_cstring()
                 .with_context(|| format!("ADT name {i}"))?;
@@ -1358,7 +1355,7 @@ impl DynamicObjectKind {
 
         let n = buf.read_u32::<LE>()
             .context("one-time touchplate attachment count")?;
-        let mut attachments = Vec::with_capacity(n as usize);
+        let mut attachments = buf.vec_for(n);
         for i in 0..n {
             let cstring = buf.read_cstring().with_context(|| {
                 format!("one-time touchplate attachment name {i} of {n}")
@@ -1377,7 +1374,7 @@ impl DynamicObjectKind {
     /// Halo
     fn halo(buf: &mut Cursor<Vec<u8>>) -> Result<Self> {
         let count = buf.read_u32::<LE>().context("halo count")?;
-        let mut halos = Vec::with_capacity(count as usize);
+        let mut halos = buf.vec_for(count);
         for i in 0..count {
             let name = latin1_to_utf8(&buf.read_cstring().with_context(|| {
                 format!("halo name {i} of {count}")
@@ -1462,7 +1459,7 @@ impl Rooms {
             .context("room list")?;
 
         let n = buf.read_u32::<LE>().context("room count")?;
-        let mut rooms = Vec::with_capacity(n as usize);
+        let mut rooms = buf.vec_for(n);
         for i in 0..n {
             rooms.push(Room::read(buf).with_context(|| format!("room {i}"))?);
         }
@@ -1580,7 +1577,7 @@ impl Room {
         };
 
         let n = buf.read_u32::<LE>().context("room level count")?;
-        let mut levels = Vec::with_capacity(n as usize);
+        let mut levels = buf.vec_for(n);
         for i in 0..n {
             levels.push(ShermanLevel::read(buf).with_context(|| {
                 format!("room sherman level {i} of {n}")
@@ -1589,7 +1586,7 @@ impl Room {
 
         let n = buf.read_u32::<LE>().context("room level heights count")?;
         let unknown7 = buf.read_f32::<LE>().context("room unknown7")?;
-        let mut heights = Vec::with_capacity(n as usize);
+        let mut heights = buf.vec_for(n);
         for i in 0..n {
             heights.push(LevelHeight::read(buf).with_context(|| {
                 format!("room sherman level heights {i} of {n}")
@@ -1629,7 +1626,7 @@ impl ShermanLevel {
         let name = latin1_to_utf8(&buf.read_cstring().context("level name")?);
 
         let n = buf.read_u32::<LE>().context("level TM + AABB count")?;
-        let mut tm_with_aabb = Vec::with_capacity(n as usize);
+        let mut tm_with_aabb = buf.vec_for(n);
         for i in 0..n {
             let tm = TransformationWithAABB::read(buf).with_context(|| {
                 format!("level TM + AABBB {i}")
@@ -1638,7 +1635,7 @@ impl ShermanLevel {
         }
 
         let n = buf.read_u32::<LE>().context("unknown count")?;
-        let mut unknown1 = Vec::with_capacity(n as usize);
+        let mut unknown1 = buf.vec_for(n);
         for i in 0..n {
             let value = buf.read_f32::<LE>().with_context(|| {
                 format!("level unknown1 {i}")
@@ -1772,7 +1769,7 @@ impl Transitions {
             .context("transitions")?;
 
         let n = buf.read_u32::<LE>().context("transitions count")?;
-        let mut transitions = Vec::with_capacity(n as usize);
+        let mut transitions = buf.vec_for(n);
         for i in 0..n {
             transitions.push(Transition::read(buf).with_context(|| {
                 format!("transition {i} of {n}")
@@ -1847,7 +1844,7 @@ impl PlanningLevels {
         let (section_id, section_name) = section_header(buf)
             .context("planning levels")?;
         let n = buf.read_u32::<LE>().context("planning levels count")?;
-        let mut levels = Vec::with_capacity(n as usize);
+        let mut levels = buf.vec_for(n);
         for i in 0..n {
             levels.push(PlanningLevel::read(buf).with_context(|| {
                 format!("planning level {i} of {n}")
@@ -1874,7 +1871,7 @@ impl PlanningLevel {
             .context("planning level floor height")?;
 
         let n = buf.read_u32::<LE>().context("planning level room count")?;
-        let mut room_names = Vec::with_capacity(n as usize);
+        let mut room_names = buf.vec_for(n);
         for i in 0..n {
             let room_name = latin1_to_utf8(&buf.read_cstring().with_context(|| {
                 format!("planning level room name {i} of {n}")
@@ -1914,6 +1911,7 @@ fn section_header_short(buf: &mut Cursor<Vec<u8>>) -> Result<(u32, String)> {
 
 /// Read primitive data types that are common in the MAP format
 trait ReadMapBytes: ReadBytesExt {
+    fn vec_for<U>(&self, n: u32) -> Vec<U>;
     fn read_cstring(&mut self) -> Result<Vec<u8>>;
     fn read_bool(&mut self) -> Result<bool>;
     fn read_f32_xy(&mut self) -> Result<(f32, f32)>;
@@ -1924,16 +1922,25 @@ impl<T> ReadMapBytes for Cursor<T>
 where
     T: AsRef<[u8]>
 {
+    fn vec_for<U>(&self, n: u32) -> Vec<U> {
+        let left = (self.get_ref().as_ref().len() as u64).saturating_sub(self.position()) as usize;
+        Vec::with_capacity((n as usize).min(left / std::mem::size_of::<U>().max(1)))
+    }
+
     fn read_cstring(&mut self) -> Result<Vec<u8>> {
         let len = self.read_u32::<LE>()
             .context("could not read length")? as usize;
         anyhow::ensure!(len >= 1, "empty string");
-        let mut buf = vec![0; len];
-        self.read_exact(&mut buf)
-            .with_context(|| format!("could not read {len} bytes"))?;
+        // Taken from the file's bytes rather than read into a buffer of that length, which
+        // obstacletest.map gives as 1.9 GB
+        let data = self.get_ref().as_ref();
+        let start = (self.position() as usize).min(data.len());
+        let bytes = data[start..].get(..len)
+            .with_context(|| format!("could not read {len} bytes, only {} left", data.len() - start))?;
         // Do not need the null terminator
-        buf.truncate(len - 1);
-        Ok(buf)
+        let s = bytes[..len - 1].to_vec();
+        self.set_position((start + len) as u64);
+        Ok(s)
     }
 
     fn read_bool(&mut self) -> Result<bool> {
@@ -1958,6 +1965,39 @@ where
 /// this is 0xC3 0xA9 byte sequence in UTF-8.
 fn latin1_to_utf8(s: &[u8]) -> String {
     s.iter().map(|&c| c as char).collect()
+}
+
+#[cfg(test)]
+mod damaged_tests {
+    use super::*;
+
+    fn string(out: &mut Vec<u8>, s: &str) {
+        out.extend((s.len() as u32 + 1).to_le_bytes());
+        out.extend(s.as_bytes());
+        out.push(0);
+    }
+
+    // Reserving room for four billion materials aborted the process
+    #[test]
+    fn a_count_of_billions_fails_to_read_instead_of_aborting() {
+        let mut bytes = Vec::new();
+        string(&mut bytes, "BeginMapv2.1");
+        bytes.extend(0u32.to_le_bytes()); // timestamp
+        bytes.extend(0u32.to_le_bytes()); // section size
+        bytes.extend(1u32.to_le_bytes()); // section id
+        string(&mut bytes, "MaterialList");
+        bytes.extend(u32::MAX.to_le_bytes());
+        let err = Map::read(&mut Cursor::new(bytes)).expect_err("the materials are not there");
+        assert!(format!("{err:#}").starts_with("Materials List: material section header 0: "), "{err:#}");
+    }
+
+    #[test]
+    fn a_string_longer_than_the_file_fails_to_read() {
+        let mut bytes = Vec::new();
+        bytes.extend(1_919_090_688u32.to_le_bytes());
+        let err = Cursor::new(bytes).read_cstring().expect_err("the string is not there");
+        assert_eq!(format!("{err:#}"), "could not read 1919090688 bytes, only 0 left");
+    }
 }
 
 #[cfg(test)]

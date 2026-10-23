@@ -12,7 +12,7 @@ fn main() -> Result<()> {
     let (c, r) = ([num(2), num(3), num(4)], num(5));
     for object in &level.geometries.objects {
         for od in &object.object_datas {
-            let material = level.materials.materials.get(od.mn as usize).map_or("?", |m| m.filename.as_str());
+            let material = level.materials.materials.get(od.material as usize).map_or("?", |m| m.filename.as_str());
             for (i, &(i0, i1, i2)) in od.faces.face_indices.iter().enumerate() {
                 let v = [i0, i1, i2].map(|k| &object.vertices[k as usize]);
                 let near = v.iter().any(|p| (p.x - c[0]).abs() < r && (p.y - c[1]).abs() < r && (p.z - c[2]).abs() < r);

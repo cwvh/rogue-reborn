@@ -118,7 +118,7 @@ struct Tri {
 
 /// Marks faces that are solid whichever rooms are active
 const NO_ROOM: u32 = u32::MAX;
-/// The flag on a group of an object's collision faces (`map::EIndices::mn`) that leaves them
+/// The flag on a group of an object's collision faces (`map::CollisionGroup::flags`) that leaves them
 /// out of the walls: the original's loader skips such a group when it reads a room's walls
 /// (RogueSpear.exe 0x55eeb0)
 const NO_WALLS: u32 = 2;
@@ -215,11 +215,11 @@ fn unit_normal(file: V3, a: V3, b: V3, c: V3) -> Option<V3> {
 /// has none, and is a wall that stops everything, as the level was before the groups were read.
 fn drawn_face_flags(object: &map::Object) -> Vec<Vec<u32>> {
     let mut listed = object.object_datas.iter().map(|d| vec![None; d.faces.face_indices.len()]).collect::<Vec<Vec<Option<u32>>>>();
-    for group in &object.ind {
+    for group in &object.collision_groups {
         for tag in group.indices.iter().filter_map(|&i| object.tags.get(i as usize)) {
             let face = listed.get_mut(tag.coord2.2 as usize).and_then(|g| g.get_mut(tag.face_index_1 as usize));
             if let Some(face) = face {
-                *face = Some(face.unwrap_or(u32::MAX) & group.mn);
+                *face = Some(face.unwrap_or(u32::MAX) & group.flags);
             }
         }
     }
@@ -297,12 +297,12 @@ impl CollisionWorld {
                     let Some(n) = unit_normal([fnorm.x, fnorm.y, fnorm.z], a, b, c) else { continue };
                     let wall = flags[g][i] & NO_WALLS == 0;
                     let passes = if flags[g][i] & SHOT_THROUGH != 0 { BULLETS | GRENADES | BLASTS } else { 0 };
-                    tris.push(Tri { a, b, c, n, off: false, hidden: false, material: od.mn as usize, room, wall, ray: true, passes });
+                    tris.push(Tri { a, b, c, n, off: false, hidden: false, material: od.material as usize, room, wall, ray: true, passes });
                 }
             }
             // The collision faces that are never drawn: boxes round tree trunks, posts, and walls
             // where what is drawn lets the body through
-            for group in object.ind.iter().filter(|g| g.mn & NO_WALLS == 0) {
+            for group in object.collision_groups.iter().filter(|g| g.flags & NO_WALLS == 0) {
                 for tag in group.indices.iter().filter_map(|&i| object.tags.get(i as usize)) {
                     if tag.coord2.2 != NOT_DRAWN {
                         continue;
@@ -1103,7 +1103,7 @@ mod tests {
         let is_texture = |m: Option<usize>| m.and_then(|m| level.materials.materials.get(m)).is_some_and(|m| m.filename.eq_ignore_ascii_case(texture));
         let mut out = Vec::new();
         for object in &level.geometries.objects {
-            for od in object.object_datas.iter().filter(|od| is_texture(Some(od.mn as usize))) {
+            for od in object.object_datas.iter().filter(|od| is_texture(Some(od.material as usize))) {
                 for &(i0, i1, i2) in &od.faces.face_indices {
                     let [a, b, c] = [i0, i1, i2].map(|i| { let v = &object.vertices[i as usize]; [v.x, v.y, v.z] });
                     let g = cross(sub(b, a), sub(c, a));

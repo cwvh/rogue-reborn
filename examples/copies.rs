@@ -11,14 +11,14 @@ fn main() -> Result<()> {
     let key = |p: [[f32; 3]; 3]| { let mut k = p.map(|v| v.map(|c| c.round() as i32)); k.sort(); k };
     let mut faces: HashMap<[[i32; 3]; 3], Vec<(String, u32)>> = HashMap::new();
     for o in &level.geometries.objects {
-        for g in &o.ind {
+        for g in &o.collision_groups {
             for &i in &g.indices {
                 let t = &o.tags[i as usize];
                 if t.coord2.2 == u16::MAX { continue; }
                 let d = &o.object_datas[t.coord2.2 as usize];
-                if level.materials.materials.get(d.mn as usize).is_none_or(|m| m.filename != a[3]) { continue; }
+                if level.materials.materials.get(d.material as usize).is_none_or(|m| m.filename != a[3]) { continue; }
                 let p = [t.coord1.0, t.coord1.1, t.coord1.2].map(|k| { let v = &o.vertices[k as usize]; [v.x, v.y, v.z] });
-                faces.entry(key(p)).or_default().push((o.name.clone(), g.mn));
+                faces.entry(key(p)).or_default().push((o.name.clone(), g.flags));
             }
         }
     }

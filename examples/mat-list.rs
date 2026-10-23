@@ -11,7 +11,7 @@ fn main() -> Result<()> {
         let level = map::read(Path::new(&path))?;
         for o in &level.geometries.objects {
             for od in &o.object_datas {
-                if let Some(m) = level.materials.materials.get(od.mn as usize) {
+                if let Some(m) = level.materials.materials.get(od.material as usize) {
                     let e = counts.entry(m.filename.to_lowercase()).or_default();
                     e.0 += od.faces.face_indices.len();
                     e.1 |= m.two_sided;

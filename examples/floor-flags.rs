@@ -19,12 +19,12 @@ fn main() -> Result<()> {
     };
     for o in &level.geometries.objects {
         for (ti, t) in o.tags.iter().enumerate() {
-            let flags: Vec<String> = o.ind.iter().filter(|g| g.indices.contains(&(ti as u16))).map(|g| format!("{:#x}", g.mn)).collect();
+            let flags: Vec<String> = o.collision_groups.iter().filter(|g| g.indices.contains(&(ti as u16))).map(|g| format!("{:#x}", g.flags)).collect();
             let (verts, material) = if t.coord2.2 == u16::MAX {
                 (&o.collisions.vertices, "(not drawn)".to_string())
             } else {
-                let mn = o.object_datas[t.coord2.2 as usize].mn as usize;
-                (&o.vertices, level.materials.materials.get(mn).map_or("?".into(), |m| m.filename.clone()))
+                let material = o.object_datas[t.coord2.2 as usize].material as usize;
+                (&o.vertices, level.materials.materials.get(material).map_or("?".into(), |m| m.filename.clone()))
             };
             let p = [t.coord1.0, t.coord1.1, t.coord1.2].map(|k| { let v = &verts[k as usize]; [v.x, v.y, v.z] });
             if let Some(y) = over(p) {

@@ -163,7 +163,7 @@ mod tests {
         let mut jamb = 0;
         let mut wall = 0;
         for (od_index, od) in object.object_datas.iter().enumerate() {
-            let material = &level.materials.materials[od.mn as usize].filename;
+            let material = &level.materials.materials[od.material as usize].filename;
             for (index, &(i0, i1, i2)) in od.faces.face_indices.iter().enumerate() {
                 let v = [i0, i1, i2].map(|i| &object.vertices[i as usize]);
                 if v.iter().any(|p| p.z != 34737.0) || !v.iter().any(|p| p.x == 32867.0 && p.y == 33167.0) {

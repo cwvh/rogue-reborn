@@ -10,11 +10,11 @@ fn main() -> Result<()> {
     let level = map::read(Path::new(&a[1]))?;
     let o = level.geometries.objects.iter().find(|o| o.name == a[2]).expect("no such room");
     let mut per: BTreeMap<(String, u32), (usize, [f32; 3], [f32; 3])> = BTreeMap::new();
-    for g in &o.ind {
+    for g in &o.collision_groups {
         for &i in &g.indices {
             let t = &o.tags[i as usize];
             let (m, verts) = if t.coord2.2 == u16::MAX { ("(not drawn)".to_string(), &o.collisions.vertices) } else {
-                (level.materials.materials.get(o.object_datas[t.coord2.2 as usize].mn as usize).map_or("?".into(), |m| m.filename.clone()), &o.vertices)
+                (level.materials.materials.get(o.object_datas[t.coord2.2 as usize].material as usize).map_or("?".into(), |m| m.filename.clone()), &o.vertices)
             };
             if a.get(3).is_none_or(|want| *want == m) {
                 let p = [t.coord1.0, t.coord1.1, t.coord1.2].map(|k| { let v = &verts[k as usize]; [v.x, v.y, v.z] });
@@ -22,7 +22,7 @@ fn main() -> Result<()> {
                 let (u, v) = ([0, 1, 2].map(|k| p[1][k] - p[0][k]), [0, 1, 2].map(|k| p[2][k] - p[0][k]));
                 let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
                 let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-6);
-                per.entry((m, g.mn)).or_insert((0, middle, n.map(|c| c / l))).0 += 1;
+                per.entry((m, g.flags)).or_insert((0, middle, n.map(|c| c / l))).0 += 1;
             }
         }
     }
