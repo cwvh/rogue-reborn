@@ -17,7 +17,8 @@ fn main() -> Result<()> {
         let Some(h) = world.raycast_hit(from, d, max - gone) else { break };
         gone += h.dist;
         let p = [o[0] + d[0] * gone, o[1] + d[1] * gone, o[2] + d[2] * gone];
-        println!("{gone:7.1}  at ({:.1}, {:.1}, {:.1})  room {:?}", p[0], p[1], p[2], h.room);
+        let material = h.material.and_then(|m| level.materials.materials.get(m)).map_or("-", |m| m.filename.as_str());
+        println!("{gone:7.1}  at ({:.1}, {:.1}, {:.1})  room {:?}  {material}", p[0], p[1], p[2], h.room);
         gone += 0.05;
         from = [o[0] + d[0] * gone, o[1] + d[1] * gone, o[2] + d[2] * gone];
     }

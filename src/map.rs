@@ -321,8 +321,11 @@ pub struct Object {
     pub vertices: Vec<Vertex>,
     // TODO: bad name
     pub object_datas: Vec<ObjectData>,
+    /// Vertices and planes of the collision faces that are not drawn
     pub collisions: Collisions,
+    /// The collision faces, drawn or not
     pub tags: Vec<Tag>,
+    /// The collision faces in groups, each with flags
     pub ind: Vec<EIndices>,
 }
 
@@ -635,9 +638,13 @@ impl Collisions {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "get-size", derive(GetSize))]
 #[derive(Clone, Debug)]
+/// One collision face. A drawn one is face `face_index_1` of group `coord2.2` of the object's
+/// `object_datas`, and `coord1` its corners in the object's vertices. Where `coord2.2` is 0xffff
+/// it is not drawn: `coord1` indexes the `collisions` vertices and `face_index_1` its planes.
 pub struct Tag {
     pub coord1: (u16, u16, u16),
     pub face_index_1: u16,
+    // TODO: coord2.0 runs 0..12; coord2.1 and face_index_2 are 0, or 0xffff where not drawn
     pub coord2: (u16, u16, u16),
     pub face_index_2: u16,
 }
@@ -666,10 +673,12 @@ impl Tag {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "get-size", derive(GetSize))]
 #[derive(Clone, Debug)]
+/// A group of an object's collision faces: "NONE", or a name such as "staticcaptainschair_02"
 pub struct EIndices {
-    // TODO: what is this?
     pub text: String,
+    /// Flags; 2 leaves the group out of the walls (see collision.rs)
     pub mn: u32,
+    /// Indices into the object's `tags`
     pub indices: Vec<u16>,
 }
 

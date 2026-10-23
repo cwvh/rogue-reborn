@@ -105,10 +105,29 @@ struct Tri {
     material: usize,
     /// The room this face belongs to (`NO_ROOM` when its object is not a room's)
     room: u32,
+    /// Stops the body from the side: one of the game's walls. Trees, grass and most
+    /// furniture are drawn but are no walls (their faces still hold the body up, as the
+    /// ground outdoors is in a group with them), and some walls are never drawn.
+    wall: bool,
+    /// Stops rays (bullets, grenades, sight): a face that is drawn
+    ray: bool,
+    /// What goes through it besides what its material lets: `BULLETS` and `BLASTS` where its
+    /// collision groups say so
+    passes: u8,
 }
 
 /// Marks faces that are solid whichever rooms are active
 const NO_ROOM: u32 = u32::MAX;
+/// The flag on a group of an object's collision faces (`map::EIndices::mn`) that leaves them
+/// out of the walls: the original's loader skips such a group when it reads a room's walls
+/// (RogueSpear.exe 0x55eeb0)
+const NO_WALLS: u32 = 2;
+/// The flag on a group of collision faces that bullets go through, whatever their material:
+/// rm05's netting wall in room 202 (its netting cage in room 316, the same texture, stops them)
+const SHOT_THROUGH: u32 = 8;
+/// Where a collision face (`map::Tag`) names its group of drawn faces, for one that is not
+/// drawn: then its corners are the object's collision vertices and its plane a collision plane
+const NOT_DRAWN: u16 = u16::MAX;
 /// How close two floors' heights must be to count as the same floor
 const SAME_FLOOR: f32 = 0.5;
 
@@ -169,7 +188,41 @@ fn placed_tri(door: &crate::door::Door, p: [V3; 3], open: f32, material: usize) 
     let g = cross(sub(b, a), sub(c, a));
     let l = len(g);
     let n = if l > 1e-6 { scale(g, 1.0 / l) } else { [0.0, 1.0, 0.0] };
-    Tri { a, b, c, n, off: false, hidden: false, material, room: NO_ROOM }
+    Tri { a, b, c, n, off: false, hidden: false, material, room: NO_ROOM, wall: true, ray: true, passes: 0 }
+}
+
+/// The corners of a face from an object's vertices, if the indices are in range
+fn corners(vertices: &[map::Vertex], i: [u16; 3]) -> Option<[V3; 3]> {
+    let v = |k: u16| vertices.get(k as usize).map(|v| [v.x, v.y, v.z]);
+    Some([v(i[0])?, v(i[1])?, v(i[2])?])
+}
+
+/// The unit normal of a face from the file's normal, or from the winding where that is empty;
+/// None for a face with no area
+fn unit_normal(file: V3, a: V3, b: V3, c: V3) -> Option<V3> {
+    let l = len(file);
+    if l > 1e-6 {
+        return Some(scale(file, 1.0 / l));
+    }
+    let gn = cross(sub(b, a), sub(c, a));
+    let gl = len(gn);
+    (gl > 1e-6).then(|| scale(gn, 1.0 / gl))
+}
+
+/// The collision flags of each of an object's drawn faces (by group, then face): those every
+/// group listing it has, so a face is no wall only if all its groups say so. A face in no group
+/// has none, and is a wall that stops everything, as the level was before the groups were read.
+fn drawn_face_flags(object: &map::Object) -> Vec<Vec<u32>> {
+    let mut listed = object.object_datas.iter().map(|d| vec![None; d.faces.face_indices.len()]).collect::<Vec<Vec<Option<u32>>>>();
+    for group in &object.ind {
+        for tag in group.indices.iter().filter_map(|&i| object.tags.get(i as usize)) {
+            let face = listed.get_mut(tag.coord2.2 as usize).and_then(|g| g.get_mut(tag.face_index_1 as usize));
+            if let Some(face) = face {
+                *face = Some(face.unwrap_or(u32::MAX) & group.mn);
+            }
+        }
+    }
+    listed.into_iter().map(|g| g.into_iter().map(|f| f.unwrap_or(0)).collect()).collect()
 }
 
 /// A room that is solid around the player, and how much of it
@@ -233,30 +286,31 @@ impl CollisionWorld {
                 continue;
             }
             let room = map::object_room(&object.name).filter(|n| room_numbers.contains(n)).unwrap_or(NO_ROOM);
-            for od in &object.object_datas {
+            let flags = drawn_face_flags(object);
+            for (g, od) in object.object_datas.iter().enumerate() {
                 let n = od.faces.face_indices.len().min(od.faces.normals.len());
                 for i in 0..n {
                     let (i0, i1, i2) = od.faces.face_indices[i];
-                    let (Some(a), Some(b), Some(c)) = (
-                        object.vertices.get(i0 as usize),
-                        object.vertices.get(i1 as usize),
-                        object.vertices.get(i2 as usize),
-                    ) else { continue };
-                    let (a, b, c) = ([a.x, a.y, a.z], [b.x, b.y, b.z], [c.x, c.y, c.z]);
-
+                    let Some([a, b, c]) = corners(&object.vertices, [i0, i1, i2]) else { continue };
                     let fnorm = &od.faces.normals[i];
-                    let mut n = [fnorm.x, fnorm.y, fnorm.z];
-                    let l = len(n);
-                    if l > 1e-6 {
-                        n = scale(n, 1.0 / l);
-                    } else {
-                        // Fall back to the winding if the file normal is empty
-                        let gn = cross(sub(b, a), sub(c, a));
-                        let gl = len(gn);
-                        if gl <= 1e-6 { continue; }
-                        n = scale(gn, 1.0 / gl);
+                    let Some(n) = unit_normal([fnorm.x, fnorm.y, fnorm.z], a, b, c) else { continue };
+                    let wall = flags[g][i] & NO_WALLS == 0;
+                    let passes = if flags[g][i] & SHOT_THROUGH != 0 { BULLETS | BLASTS } else { 0 };
+                    tris.push(Tri { a, b, c, n, off: false, hidden: false, material: od.mn as usize, room, wall, ray: true, passes });
+                }
+            }
+            // The collision faces that are never drawn: boxes round tree trunks, posts, and walls
+            // where what is drawn lets the body through
+            for group in object.ind.iter().filter(|g| g.mn & NO_WALLS == 0) {
+                for tag in group.indices.iter().filter_map(|&i| object.tags.get(i as usize)) {
+                    if tag.coord2.2 != NOT_DRAWN {
+                        continue;
                     }
-                    tris.push(Tri { a, b, c, n, off: false, hidden: false, material: od.mn as usize, room });
+                    let (i0, i1, i2) = tag.coord1;
+                    let Some([a, b, c]) = corners(&object.collisions.vertices, [i0, i1, i2]) else { continue };
+                    let plane = object.collisions.faces.get(tag.face_index_1 as usize).map_or([0.0; 3], |p| [p.x, p.y, p.z]);
+                    let Some(n) = unit_normal(plane, a, b, c) else { continue };
+                    tris.push(Tri { a, b, c, n, off: false, hidden: false, material: usize::MAX, room, wall: true, ray: false, passes: 0 });
                 }
             }
         }
@@ -270,7 +324,7 @@ impl CollisionWorld {
                 let gn = cross(sub(b, a), sub(c, a));
                 let gl = len(gn);
                 if gl <= 1e-6 { continue; }
-                tris.push(Tri { a, b, c, n: scale(gn, 1.0 / gl), off: false, hidden: false, material: usize::MAX, room: NO_ROOM });
+                tris.push(Tri { a, b, c, n: scale(gn, 1.0 / gl), off: false, hidden: false, material: usize::MAX, room: NO_ROOM, wall: true, ray: true, passes: 0 });
             }
             groups.push((pane.name.clone(), first..tris.len()));
         }
@@ -343,7 +397,7 @@ impl CollisionWorld {
     pub fn flat_floor(y: f32, half: f32) -> Self {
         let n = [0.0, 1.0, 0.0];
         let corner = |x: f32, z: f32| [x, y, z];
-        let tri = |a, b, c| Tri { a, b, c, n, off: false, hidden: false, material: usize::MAX, room: NO_ROOM };
+        let tri = |a, b, c| Tri { a, b, c, n, off: false, hidden: false, material: usize::MAX, room: NO_ROOM, wall: true, ray: true, passes: 0 };
         let tris = vec![
             tri(corner(-half, -half), corner(half, -half), corner(half, half)),
             tri(corner(-half, -half), corner(half, half), corner(-half, half)),
@@ -475,18 +529,23 @@ impl CollisionWorld {
         rooms
     }
 
-    /// Whether a face can currently stop anything
-    fn solid(&self, t: &Tri) -> bool {
-        !t.off && !t.hidden
+    /// Whether a face can currently stop the body from the side
+    fn stops_body(&self, t: &Tri) -> bool {
+        t.wall && !t.off && !t.hidden
+    }
+
+    /// Whether a face can currently stop a ray
+    fn stops_rays(&self, t: &Tri) -> bool {
+        t.ray && !t.off && !t.hidden
     }
 
     /// The nearest face within `max_dist` along the unit vector `dir` from `origin`, solid from
     /// both sides, leaving out those that let `through` pass (`BULLETS`, `GRENADES`, `BLASTS`,
-    /// or 0)
-    fn nearest(&self, origin: V3, dir: V3, max_dist: f32, through: u8) -> Option<(f32, &Tri)> {
+    /// or 0). With `body` it is the walls instead of the faces that stop rays.
+    fn nearest(&self, origin: V3, dir: V3, max_dist: f32, through: u8, body: bool) -> Option<(f32, &Tri)> {
         let mut best: Option<(f32, &Tri)> = None;
-        for (i, t) in self.tris.iter().enumerate().filter(|(_, t)| self.solid(t)) {
-            let passes = if self.door_tris.contains(&i) { self.door_passes(i) } else { self.passes.get(t.material).copied().unwrap_or(0) };
+        for (i, t) in self.tris.iter().enumerate().filter(|(_, t)| if body { self.stops_body(t) } else { self.stops_rays(t) }) {
+            let passes = if self.door_tris.contains(&i) { self.door_passes(i) } else { t.passes | self.passes.get(t.material).copied().unwrap_or(0) };
             if passes & through != 0 {
                 continue;
             }
@@ -503,7 +562,13 @@ impl CollisionWorld {
     /// triangle in the level within `max_dist`, treating every triangle as
     /// solid from both sides (used for line of sight).
     pub fn raycast(&self, origin: [f32; 3], dir: [f32; 3], max_dist: f32) -> Option<f32> {
-        self.nearest(origin, dir, max_dist, 0).map(|(d, _)| d)
+        self.nearest(origin, dir, max_dist, 0, false).map(|(d, _)| d)
+    }
+
+    /// Like `raycast`, against the walls instead: for feeling the way, where a tree is no wall
+    /// and an unseen post is
+    pub fn body_raycast(&self, origin: [f32; 3], dir: [f32; 3], max_dist: f32) -> Option<f32> {
+        self.nearest(origin, dir, max_dist, 0, true).map(|(d, _)| d)
     }
 
     /// The solid triangles in the grid cells within `radius` of `center` (a square, so some
@@ -517,7 +582,7 @@ impl CollisionWorld {
         }
         near.sort_unstable();
         near.dedup();
-        near.into_iter().map(|i| &self.tris[i]).filter(|t| self.solid(t)).map(|t| [t.a, t.b, t.c]).collect()
+        near.into_iter().map(|i| &self.tris[i]).filter(|t| self.stops_rays(t)).map(|t| [t.a, t.b, t.c]).collect()
     }
 
     /// A ray caster for many rays near one spot: only the solid triangles within `radius` of
@@ -562,7 +627,7 @@ impl CollisionWorld {
     }
 
     fn hit(&self, origin: V3, dir: V3, max_dist: f32, through: u8) -> Option<RayHit> {
-        self.nearest(origin, dir, max_dist, through).map(|(dist, t)| {
+        self.nearest(origin, dir, max_dist, through, false).map(|(dist, t)| {
             // The file's normals are not reliable about which side is front
             let n = if dot(t.n, dir) > 0.0 { scale(t.n, -1.0) } else { t.n };
             RayHit { dist, normal: n, material: (t.material != usize::MAX).then_some(t.material), room: (t.room != NO_ROOM).then_some(t.room) }
@@ -676,7 +741,7 @@ impl CollisionWorld {
             for c in self.col(b[0])..=self.col(b[3]) {
                 for &ti in &self.cells[r * self.cols + c] {
                     let t = &self.tris[ti as usize];
-                    if self.solid(t) && reaches_into(t, &b) {
+                    if self.stops_body(t) && reaches_into(t, &b) {
                         return false;
                     }
                 }
@@ -715,7 +780,7 @@ impl CollisionWorld {
                 let h = lo + (hi - lo) * (k as f32 / (count - 1) as f32);
                 for &ti in &near {
                     let t = &self.tris[ti as usize];
-                    if !self.solid(t) || t.n[1].abs() >= ny_floor {
+                    if !self.stops_body(t) || t.n[1].abs() >= ny_floor {
                         continue;
                     }
                     // Recomputed per triangle: earlier pushes move the body
@@ -768,7 +833,7 @@ impl CollisionWorld {
                 for c in c0..=c1 {
                     for &ti in &self.cells[r * self.cols + c] {
                         let t = &self.tris[ti as usize];
-                        if !self.solid(t) || t.n[1].abs() >= ny_floor {
+                        if !self.stops_body(t) || t.n[1].abs() >= ny_floor {
                             continue;
                         }
                         let d = len(sub(center, closest_on_triangle(center, t))) - prm.radius;
@@ -915,7 +980,7 @@ mod tests {
         let under_slab = |height: f32| {
             let mut w = CollisionWorld::flat_floor(0.0, 1000.0);
             let n = [0.0, -1.0, 0.0];
-            let tri = |a, b, c| Tri { a, b, c, n, off: false, hidden: false, material: usize::MAX, room: NO_ROOM };
+            let tri = |a, b, c| Tri { a, b, c, n, off: false, hidden: false, material: usize::MAX, room: NO_ROOM, wall: true, ray: true, passes: 0 };
             let at = |x: f32, z: f32| [x, height, z];
             w.tris.push(tri(at(0.0, -1000.0), at(1000.0, 1000.0), at(1000.0, -1000.0)));
             w.tris.push(tri(at(0.0, -1000.0), at(0.0, 1000.0), at(1000.0, 1000.0)));
@@ -937,7 +1002,7 @@ mod tests {
     #[test]
     fn a_triangle_reaches_into_a_box_only_where_it_crosses_it() {
         let (a, b, c) = ([0.0, 0.0, 10.0], [100.0, 0.0, 10.0], [0.0, 100.0, 10.0]);
-        let wall = Tri { a, b, c, n: [0.0, 0.0, 1.0], off: false, hidden: false, material: usize::MAX, room: NO_ROOM };
+        let wall = Tri { a, b, c, n: [0.0, 0.0, 1.0], off: false, hidden: false, material: usize::MAX, room: NO_ROOM, wall: true, ray: true, passes: 0 };
         // The triangle's middle is outside, but its corner is in the box
         assert!(reaches_into(&wall, &[-5.0, -5.0, 5.0, 5.0, 5.0, 15.0]));
         // Beside the plane, and past the slanted edge
@@ -1071,6 +1136,24 @@ mod tests {
         }
     }
 
+    // rm05's cargo netting is one texture, without gunpass. The original lets shots through the
+    // netting wall in room 202 and stops them at the netting cage in room 316: the wall's collision
+    // groups are flagged for bullets, the cage's are not.
+    #[test]
+    fn bullets_go_through_the_netting_wall_and_not_the_cage() {
+        let Ok(level) = map::read(Path::new("data/map/rm05/rm05.map")) else { return };
+        let w = CollisionWorld::from_map(&level, Params::default());
+        let netting = |h: Option<RayHit>| h.and_then(|h| h.material).and_then(|m| level.materials.materials.get(m)).is_some_and(|m| m.filename == "05_cargonetting_48_24_24.bmp");
+        let west = [-1.0, 0.0, 0.0];
+        let wall = [37657.0, 32482.0, 32649.8];
+        assert!(netting(w.raycast_hit(wall, west, 400.0)), "no netting wall west of {wall:?}");
+        assert!(!netting(w.bullet_hit(wall, west, 400.0)), "the netting wall stopped a bullet");
+        assert!(!netting(w.blast_hit(wall, west, 400.0)), "the netting wall stopped a blast");
+        let cage = [38013.6, 32932.0, 31328.8];
+        assert!(netting(w.raycast_hit(cage, west, 400.0)), "no netting cage west of {cage:?}");
+        assert!(netting(w.bullet_hit(cage, west, 400.0)), "a bullet went through the netting cage");
+    }
+
     // A blast goes through a closed swinging door, which the original blows apart, wood or metal;
     // not through a sliding door, which it does not (rm09 has both)
     #[test]
@@ -1200,14 +1283,47 @@ mod tests {
         assert!(xz_dist(&start, &end) > 4000.0, "only moved {}", xz_dist(&start, &end));
     }
 
+    fn load_rm06() -> Option<CollisionWorld> {
+        let path = Path::new("data/map/rm06/rm06.map");
+        if !path.exists() {
+            eprintln!("skipping: {} not found", path.display());
+            return None;
+        }
+        Some(CollisionWorld::from_map(&map::read(path).expect("rm06 loads"), Params::default()))
+    }
+
+    /// Standing on rm06's garden path (room 34), by a tree, with a fence 1400 to the north
+    fn on_the_garden_path(w: &CollisionWorld, x: f32, z: f32) -> Player {
+        let mut p = Player::new([x, 32800.0, z]);
+        for _ in 0..240 {
+            w.step(&mut p, [0.0, 0.0], 1.0 / 60.0);
+        }
+        assert!(p.on_ground);
+        p
+    }
+
     #[test]
     fn solid_wall_stops_the_player_standing() {
-        let Some(w) = load() else { return };
-        let start = grounded(&w);
-        let end = walk(&w, start, [0.707, -0.707], 600);
+        let Some(w) = load_rm06() else { return };
+        let start = on_the_garden_path(&w, 32407.6, 32823.8);
+        let end = walk(&w, start, [0.0, 1.0], 600);
         assert!(end.on_ground, "fell: feet at {:?}", end.pos);
-        // 600 frames at 7.5 per frame would cover 4500 units if unobstructed
-        assert!(xz_dist(&start, &end) < 600.0, "moved {}", xz_dist(&start, &end));
+        // 600 frames at 7.5 per frame would cover 4500 units if unobstructed; the fence is at z 34207
+        assert!(end.pos[2] < 34207.0 - 15.0 && end.pos[2] > 34207.0 - 40.0, "stopped at {:?}", end.pos);
+    }
+
+    // The original lets the player through a tree's leaves and branches, which are in a group of
+    // faces flagged as no walls, and stops them at the trunk's box, which is never drawn
+    #[test]
+    fn a_tree_lets_the_player_through_but_not_its_trunk() {
+        let Some(w) = load_rm06() else { return };
+        let start = on_the_garden_path(&w, 32407.6, 32823.8);
+        let end = walk(&w, start, [-1.0, 0.0], 60);
+        assert!((xz_dist(&start, &end) - 450.0).abs() < 1.0, "the leaves held the player at {:?}", end.pos);
+        // The trunk's box spans x 32285..32309 and z 32733..32761
+        let start = on_the_garden_path(&w, 32420.0, 32747.0);
+        let end = walk(&w, start, [-1.0, 0.0], 60);
+        assert!(end.pos[0] > 32309.0 + 25.0 && end.pos[0] < 32309.0 + 35.0, "stopped at {:?}", end.pos);
     }
 
     #[test]

@@ -336,7 +336,7 @@ impl Bot {
             if !ground_ahead(sim, feet, yaw, drop) {
                 return 0.0;
             }
-            sim.world.raycast(waist, horizontal(yaw), 2000.0).unwrap_or(2000.0)
+            sim.world.body_raycast(waist, horizontal(yaw), 2000.0).unwrap_or(2000.0)
         };
         // (not walking up to a door: the door is the wall ahead)
         if to_door.is_none() && room(self.heading) < TOO_CLOSE {
