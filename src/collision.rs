@@ -111,8 +111,8 @@ struct Tri {
     wall: bool,
     /// Stops rays (bullets, grenades, sight): a face that is drawn
     ray: bool,
-    /// What goes through it besides what its material lets: `BULLETS` and `BLASTS` where its
-    /// collision groups say so
+    /// What goes through it besides what its material lets: `BULLETS`, `GRENADES` and `BLASTS`
+    /// where its collision groups say so
     passes: u8,
 }
 
@@ -122,8 +122,9 @@ const NO_ROOM: u32 = u32::MAX;
 /// out of the walls: the original's loader skips such a group when it reads a room's walls
 /// (RogueSpear.exe 0x55eeb0)
 const NO_WALLS: u32 = 2;
-/// The flag on a group of collision faces that bullets go through, whatever their material:
-/// rm05's netting wall in room 202 (its netting cage in room 316, the same texture, stops them)
+/// The flag on a group of collision faces that bullets and grenades go through, whatever their
+/// material: rm05's netting wall in room 202 (its netting cage in room 316, the same texture,
+/// stops shots), and rm15's camouflage net, whose texture lets only bullets through
 const SHOT_THROUGH: u32 = 8;
 /// Where a collision face (`map::Tag`) names its group of drawn faces, for one that is not
 /// drawn: then its corners are the object's collision vertices and its plane a collision plane
@@ -295,7 +296,7 @@ impl CollisionWorld {
                     let fnorm = &od.faces.normals[i];
                     let Some(n) = unit_normal([fnorm.x, fnorm.y, fnorm.z], a, b, c) else { continue };
                     let wall = flags[g][i] & NO_WALLS == 0;
-                    let passes = if flags[g][i] & SHOT_THROUGH != 0 { BULLETS | BLASTS } else { 0 };
+                    let passes = if flags[g][i] & SHOT_THROUGH != 0 { BULLETS | GRENADES | BLASTS } else { 0 };
                     tris.push(Tri { a, b, c, n, off: false, hidden: false, material: od.mn as usize, room, wall, ray: true, passes });
                 }
             }
@@ -543,19 +544,20 @@ impl CollisionWorld {
     /// both sides, leaving out those that let `through` pass (`BULLETS`, `GRENADES`, `BLASTS`,
     /// or 0). With `body` it is the walls instead of the faces that stop rays.
     fn nearest(&self, origin: V3, dir: V3, max_dist: f32, through: u8, body: bool) -> Option<(f32, &Tri)> {
-        let mut best: Option<(f32, &Tri)> = None;
+        let mut stops: Vec<(f32, &Tri)> = Vec::new();
+        let mut passed: Vec<(f32, &Tri)> = Vec::new();
         for (i, t) in self.tris.iter().enumerate().filter(|(_, t)| if body { self.stops_body(t) } else { self.stops_rays(t) }) {
+            let Some(d) = crate::combat::ray_triangle(origin, dir, t.a, t.b, t.c).filter(|&d| d <= max_dist) else { continue };
             let passes = if self.door_tris.contains(&i) { self.door_passes(i) } else { t.passes | self.passes.get(t.material).copied().unwrap_or(0) };
-            if passes & through != 0 {
-                continue;
-            }
-            if let Some(d) = crate::combat::ray_triangle(origin, dir, t.a, t.b, t.c) {
-                if d <= max_dist && best.map_or(true, |(b, _)| d < b) {
-                    best = Some((d, t));
-                }
-            }
+            if passes & through != 0 { passed.push((d, t)) } else { stops.push((d, t)) }
         }
-        best
+        // The exterior repeats faces of the rooms inside it without their flags (rm15's room 507
+        // has room 504's camouflage net, triangulated in part another way). The original meets
+        // only the room a shot is in, but here every room around the player counts, so a face
+        // lets through what another room's face of the same material, where the shot crosses
+        // both, does. A different surface laid over one (the rail on rm06's railing) still stops it.
+        let copy = |(d, t): &(f32, &Tri)| passed.iter().any(|(e, p)| (d - e).abs() < 1.0 && p.material == t.material && p.room != t.room);
+        stops.into_iter().filter(|h| !copy(h)).min_by(|a, b| a.0.total_cmp(&b.0))
     }
 
     /// Distance along the unit vector `dir` from `origin` to the nearest
@@ -1134,6 +1136,28 @@ mod tests {
             assert!(rail.len() >= 8, "{} railing faces", rail.len());
             assert!(rail.iter().all(|&[bullet, grenade, blast]| !bullet && !grenade && !blast), "{rail:?}");
         }
+    }
+
+    // rm15's camouflage net over room 504 lets grenades through in the original, though its texture
+    // is gunpass only: its collision groups are flagged 8. The exterior (room 507) has a copy that
+    // is not, which does not count for someone standing under the net, as the game picks the rooms.
+    #[test]
+    fn grenades_go_through_the_camouflage_net() {
+        let Ok(level) = map::read(Path::new("data/map/rm15/rm15.map")) else { return };
+        let mut w = CollisionWorld::from_map(&level, Params::default());
+        let vis = crate::visibility::Visibility::new(&level);
+        let (x, z) = (27264.0, 32037.0);
+        let ground = w.ground_at(x, z, 29200.0).expect("ground under the net");
+        let (feet, eye) = ([x, ground, z], [x, ground + 165.0, z]);
+        let around = vis.player_rooms(&level, feet, None);
+        let floors: Vec<u32> = w.floor_rooms([x, ground - 10.0, z]).into_iter().filter(|&n| vis.is_room(n)).collect();
+        assert!(floors.contains(&504), "standing in {floors:?}, not under the net");
+        w.set_solid_rooms(Some(&vis.solid_rooms(&level, &floors, &around, &[feet, eye])));
+        let net = |h: Option<RayHit>| h.and_then(|h| h.material).and_then(|m| level.materials.materials.get(m)).is_some_and(|m| m.filename == "15_net_camo.tga");
+        let up = [0.0, 1.0, 0.0];
+        assert!(net(w.raycast_hit(eye, up, 1000.0)), "no net over {eye:?}");
+        assert!(!net(w.grenade_hit(eye, up, 1000.0)), "the net stopped a grenade");
+        assert!(!net(w.bullet_hit(eye, up, 1000.0)), "the net stopped a bullet");
     }
 
     // rm05's cargo netting is one texture, without gunpass. The original lets shots through the
