@@ -276,7 +276,7 @@ impl CollisionWorld {
         let room_numbers: Vec<u32> = level.rooms.rooms.iter().filter_map(|r| r.section_name.parse().ok()).collect();
         let properties = crate::cxp::TextureProperties::load();
         let passes = level.materials.materials.iter().map(|m| {
-            let p = properties.get(&m.filename);
+            let p = properties.of_material(&m.filename);
             let bullets = if p.is_some_and(|p| p.gun_pass) { BULLETS | BLASTS } else { 0 };
             bullets | if p.is_some_and(|p| p.grenade_pass) { GRENADES } else { 0 }
         }).collect();
@@ -1138,13 +1138,14 @@ mod tests {
         }
     }
 
-    // rm12's catwalk railing stops grenades in the original: its texture has no properties of its
-    // own (only its .tga namesake does) and its collision groups are not flagged 8
+    // rm12's catwalk railing lets bullets through in the original and stops grenades: its .bmp has
+    // no properties of its own, and its .tga namesake's are gunpass only. Its collision groups
+    // are not flagged 8.
     #[test]
-    fn grenades_stop_at_the_catwalk_railing() {
+    fn bullets_go_through_the_catwalk_railing_and_grenades_do_not() {
         let Some(rail) = stopped_by("data/map/rm12/rm12.map", "rail_metal_opera_01.bmp") else { return };
         assert!(rail.len() >= 8, "{} railing faces", rail.len());
-        assert!(rail.iter().all(|&[_, grenade, _]| grenade), "{rail:?}");
+        assert!(rail.iter().all(|&[bullet, grenade, blast]| !bullet && grenade && !blast), "{rail:?}");
     }
 
     // rm15's camouflage net over room 504 lets grenades through in the original, though its texture

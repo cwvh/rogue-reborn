@@ -116,6 +116,17 @@ impl TextureProperties {
         self.entries.get(&name.to_ascii_lowercase())
     }
 
+    /// The properties of a map material: its texture's, or for a .bmp listed under no entry of
+    /// its own, those of the .tga of the same name. rm12's catwalk railing
+    /// (rail_metal_opera_01.bmp, drawn from its .tga's texture) lets bullets through in the
+    /// original, as only the .tga's entry says.
+    pub fn of_material(&self, material: &str) -> Option<&Properties> {
+        self.get(material).or_else(|| {
+            let stem = material.len().checked_sub(4).filter(|&n| material.get(n..).is_some_and(|e| e.eq_ignore_ascii_case(".bmp")))?;
+            self.get(&format!("{}.tga", &material[..stem]))
+        })
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -158,6 +169,15 @@ Surface  raindrop.tga \t\t\t\t\talphablend\t\t\t End
         assert_eq!(drum.animated, Some(Animated { kind: 0, interval: 0.4, frames: vec!["sp_drum_flicker_2.tga".into()] }));
         assert!(t.get("raindrop.tga").unwrap().alpha_blend);
         assert!(t.get("wall_house_wood_01.bmp").is_none());
+    }
+
+    #[test]
+    fn a_bmp_material_with_no_entry_takes_its_tgas() {
+        let t = TextureProperties::parse(SAMPLE);
+        assert!(t.of_material("Raindrop.BMP").is_some_and(|p| p.alpha_blend));
+        assert!(t.of_material("cha_rail_01.bmp").is_some_and(|p| p.color_key.is_some()));
+        assert!(t.of_material("cha_rail_01.tga").is_none(), "only a .bmp falls back");
+        assert!(t.of_material("wall_house_wood_01.bmp").is_none());
     }
 
     #[test]
