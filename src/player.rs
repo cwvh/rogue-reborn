@@ -1,101 +1,7 @@
 //! The player's animations.
 
 use rogue_reborn::motion;
-use rogue_reborn::sim::movement::{HIP_TURN_RATE, Movement, Reloading};
-
-pub struct PlayerMotions {
-    pub idle: Option<motion::Motion>,
-    pub walk: Option<motion::Motion>,
-    pub run: Option<motion::Motion>,
-    pub back: Option<motion::Motion>,
-    pub left: Option<motion::Motion>,
-    pub right: Option<motion::Motion>,
-    /// Stepping to the side at a walk
-    pub walk_left: Option<motion::Motion>,
-    pub walk_right: Option<motion::Motion>,
-    pub fire: Option<motion::Motion>,
-    /// Reloading with rounds left in the magazine, and once it is empty
-    pub reload: Option<motion::Motion>,
-    pub reload_empty: Option<motion::Motion>,
-    pub throw: Option<motion::Motion>,
-    /// Crouched: kneeling with the gun up, and moving crouched
-    pub crouch_idle: Option<motion::Motion>,
-    pub crouch_walk: Option<motion::Motion>,
-    pub crouch_run: Option<motion::Motion>,
-    pub crouch_back: Option<motion::Motion>,
-    pub crouch_left: Option<motion::Motion>,
-    pub crouch_right: Option<motion::Motion>,
-    /// Crouching down from standing, and standing up from crouched
-    pub crouch_down: Option<motion::Motion>,
-    pub stand_up: Option<motion::Motion>,
-    /// Reloading kneeling, with rounds left in the magazine and once it is empty
-    pub crouch_reload: Option<motion::Motion>,
-    pub crouch_reload_empty: Option<motion::Motion>,
-    /// Stepping round in place after turning, standing and crouched
-    pub turn: Option<motion::Motion>,
-    pub crouch_turn: Option<motion::Motion>,
-    /// Peeking round a corner to the left and right (see `sim::peek`), standing and crouched
-    pub peek_left: Option<motion::Motion>,
-    pub peek_right: Option<motion::Motion>,
-    pub crouch_peek_left: Option<motion::Motion>,
-    pub crouch_peek_right: Option<motion::Motion>,
-}
-
-impl PlayerMotions {
-    /// The motion for a movement, standing or crouched. Firing, reloading and throwing are
-    /// the same motions crouched: the body kneels and the arms play them.
-    pub fn get(&self, m: Movement, crouched: bool) -> Option<&motion::Motion> {
-        match (m, crouched) {
-            (Movement::Idle, false) => &self.idle,
-            (Movement::Walk, false) => &self.walk,
-            (Movement::Run, false) => &self.run,
-            (Movement::Back, false) => &self.back,
-            (Movement::StrafeLeft, false) => &self.left,
-            (Movement::StrafeRight, false) => &self.right,
-            (Movement::WalkLeft, false) => &self.walk_left,
-            (Movement::WalkRight, false) => &self.walk_right,
-            (Movement::Idle, true) => &self.crouch_idle,
-            (Movement::Walk, true) => &self.crouch_walk,
-            (Movement::Run, true) => &self.crouch_run,
-            (Movement::Back, true) => &self.crouch_back,
-            (Movement::StrafeLeft | Movement::WalkLeft, true) => &self.crouch_left,
-            (Movement::StrafeRight | Movement::WalkRight, true) => &self.crouch_right,
-            (Movement::Fire, _) => &self.fire,
-            (Movement::Reload, _) => &self.reload,
-            (Movement::Throw, _) => &self.throw,
-        }.as_ref()
-    }
-
-    /// The motion that takes a body into a stance: crouching down, or standing up
-    pub fn stance_change(&self, crouched: bool) -> Option<&motion::Motion> {
-        if crouched { &self.crouch_down } else { &self.stand_up }.as_ref()
-    }
-
-    /// The motion the feet step round in after turning in place, standing or crouched
-    pub fn turn(&self, crouched: bool) -> Option<&motion::Motion> {
-        if crouched { &self.crouch_turn } else { &self.turn }.as_ref()
-    }
-
-    /// The motion a peek plays, to the right or left, standing or crouched
-    pub fn peek(&self, right: bool, crouched: bool) -> Option<&motion::Motion> {
-        match (right, crouched) {
-            (false, false) => &self.peek_left,
-            (true, false) => &self.peek_right,
-            (false, true) => &self.crouch_peek_left,
-            (true, true) => &self.crouch_peek_right,
-        }.as_ref()
-    }
-
-    /// The motion for a reload, as the magazine was, standing or kneeling
-    pub fn reload(&self, r: Reloading, crouched: bool) -> Option<&motion::Motion> {
-        match (r.empty, crouched) {
-            (false, false) => &self.reload,
-            (true, false) => &self.reload_empty,
-            (false, true) => &self.crouch_reload,
-            (true, true) => &self.crouch_reload_empty,
-        }.as_ref()
-    }
-}
+use rogue_reborn::sim::movement::{HIP_TURN_RATE, Movement};
 
 /// What a body is playing, as far as easing from one motion into the next goes
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -187,16 +93,6 @@ impl BodyState {
         }
         self.shuffle_at
     }
-}
-
-// Bones driven by the weapon hold rather than the locomotion cycle
-pub fn is_arm(name: &str) -> bool {
-    matches!(name, "LeftCollar" | "RightCollar" | "LeftUpArm" | "LeftLowArm" | "LeftHand" | "RightUpArm" | "RightLowArm" | "RightHand")
-}
-
-pub fn is_upper_body(name: &str) -> bool {
-    matches!(name, "Chest" | "LeftCollar" | "RightCollar" | "LeftUpArm" | "LeftLowArm" | "LeftHand"
-        | "RightUpArm" | "RightLowArm" | "RightHand" | "Neck" | "Head")
 }
 
 #[cfg(test)]

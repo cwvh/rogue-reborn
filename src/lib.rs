@@ -9,6 +9,7 @@ pub mod tga;
 pub mod motion;
 pub mod skeleton;
 pub mod combat;
+pub mod body;
 pub mod weapon;
 pub mod sound;
 pub mod ambience;

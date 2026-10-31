@@ -38,8 +38,37 @@ pub const RELOAD_SECONDS: f32 = 2.2;
 /// A player's health at the start
 pub const PLAYER_HP: f32 = 100.0;
 
+/// How far from the feet, across the floor, a posed body can reach (a peek, an arm out)
+const POSED_REACH: f32 = 120.0;
+
 /// The radius of each part of a player's body that bullets hit (see `Sim::hit_parts`)
 pub const HIT_RADIUS: f32 = 25.0;
+
+/// How players' bodies are animated as others see them: as fast against their feet as the
+/// viewer's default (its --anim-scale)
+const ANIM_PACE: f32 = 1.5;
+
+/// What a living player's body was doing at the end of a tick, to shoot at it as the shooter
+/// saw it then
+#[derive(Clone, Copy, Debug)]
+struct Seen {
+    feet: V3,
+    crouched: bool,
+    /// How far a peek leaned them (see `Sim::peek_offset`)
+    lean: V3,
+    /// Which way they faced, as a camera's yaw in degrees
+    yaw: f32,
+    /// What their body played, as others are shown it (see `net::animation`)
+    movement: movement::Movement,
+    frame: f32,
+    hip_turn: f32,
+    reloading: Option<Reloading>,
+    firing: bool,
+    /// A wound's flinch, and how far through it
+    flinch: Option<(&'static str, f32)>,
+    peek: Option<peek::Peek>,
+    time: f32,
+}
 
 /// One of the parts of a player's body that bullets hit: an upright cylinder of `HIT_RADIUS`
 /// from the middle of its bottom up to the height `top`. The legs are no part (`None`): which
@@ -333,9 +362,10 @@ pub struct Sim {
     /// For each player, how many ticks back in time the others were when they took their shot,
     /// as that player saw them (a server sets it before each tick; none means no looking back)
     pub rewind: Vec<f32>,
-    /// Where each living player was at the end of each of the latest ticks, whether they were
-    /// crouched and how far a peek leaned them (`peek_offset`), oldest first
-    past: VecDeque<Vec<Option<(V3, bool, V3)>>>,
+    /// What each living player's body was doing at the end of each of the latest ticks, oldest first
+    past: VecDeque<Vec<Option<Seen>>>,
+    /// How each player's body is animated as the others see it, kept when players can be hit
+    animators: crate::net::animation::Animators,
     eye_height: f32,
     /// What a player starts with
     pub magazine: u32,
@@ -381,6 +411,7 @@ impl Sim {
             pvp: false,
             rewind: Vec::new(),
             past: VecDeque::new(),
+            animators: Default::default(),
             spawns: Vec::new(),
             eye_height,
             magazine: config.magazine,
@@ -747,10 +778,7 @@ impl Sim {
         }
         self.apply_union_rooms();
         if self.pvp {
-            let past = (0..self.players.len()).map(|i| {
-                let p = &self.players[i];
-                (p.active && p.respawn_at.is_none()).then(|| (p.player.pos, p.player.crouched, self.peek_offset(i)))
-            }).collect();
+            let past = (0..self.players.len()).map(|i| self.seen(i, dt)).collect();
             self.past.push_back(past);
             while self.past.len() > PAST_TICKS {
                 self.past.pop_front();
@@ -759,13 +787,42 @@ impl Sim {
         ev
     }
 
-    /// Where a player was `back` ticks ago (between ticks, if it is not a whole number), or
-    /// where they are if `back` is nothing, whether they were crouched (as at the nearer tick)
-    /// and how far a peek leaned them. None if they were not standing then.
-    fn body_then(&self, slot: usize, back: f32) -> Option<(V3, bool, V3)> {
-        let now = &self.players[slot].player;
+    /// What a living player's body is doing now, advancing its animation by `dt`. The
+    /// animation is the one the others are shown (`net::animation`), from how the body moves.
+    fn seen(&mut self, slot: usize, dt: f32) -> Option<Seen> {
+        let now = self.time;
+        let p = &self.players[slot];
+        if !p.active || p.respawn_at.is_some() {
+            self.animators.forget(slot);
+            return None;
+        }
+        let (pos, crouched, yaw) = (p.player.pos, p.player.crouched, dequantize(p.look.0));
+        let doing = crate::net::animation::Doing {
+            throwing: p.throw.map(|t| (now - t.start) / THROW_SECONDS),
+            reloading: p.reloading(now),
+            firing: p.gun_trigger && p.ammo > 0,
+            crouched,
+        };
+        let flinch = p.hit.map(|h| (h.motion, (now - h.start) * 30.0));
+        let peek = p.peek;
+        let lean = self.peek_offset(slot);
+        let player = self.characters.as_ref().map(|c| &c.player);
+        let frames = |m: movement::Movement| player.and_then(|pm| pm.get(m, crouched)).map_or(1, |m| m.frames.max(1)) as f32;
+        let (movement, frame) = self.animators.update(slot, pos, yaw, dt, doing, frames, self.speed_scale, ANIM_PACE);
+        let hip_turn = self.animators.hip_turn(slot, yaw);
+        let flinch = flinch.filter(|&(m, f)| f < self.characters.as_ref().map_or(0.0, |c| c.frames(m)));
+        Some(Seen { feet: pos, crouched, lean, yaw, movement, frame, hip_turn, reloading: doing.reloading, firing: doing.firing, flinch, peek, time: now })
+    }
+
+    /// What a player's body was doing `back` ticks ago (between ticks, if it is not a whole
+    /// number: where they were and how far they leaned, between the two, and the rest as at the
+    /// nearer tick), or what it does now if `back` is nothing. None if they were not standing then.
+    fn seen_then(&self, slot: usize, back: f32) -> Option<Seen> {
         if back <= 0.0 || self.past.is_empty() {
-            return Some((now.pos, now.crouched, self.peek_offset(slot)));
+            // Where they are now, animated as at the end of the last tick
+            let now = self.seen_now(slot)?;
+            let last = self.past.back().and_then(|t| t.get(slot).copied().flatten());
+            return Some(last.map_or(now, |a| Seen { movement: a.movement, frame: a.frame, hip_turn: a.hip_turn, flinch: a.flinch, ..now }));
         }
         // The newest tick in `past` is the one just finished, which is as good as now
         let back = back.min((self.past.len() - 1) as f32);
@@ -773,10 +830,10 @@ impl Sim {
         let at = |i: usize| self.past[i].get(slot).copied().flatten();
         let (newer_body, older_body) = (at(newer), newer.checked_sub(1).and_then(at));
         match (newer_body, older_body) {
-            (Some((n, nc, nl)), Some((o, oc, ol))) => {
+            (Some(n), Some(o)) => {
                 let f = back.fract();
                 let mix = |a: V3, b: V3| [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * f);
-                Some((mix(n, o), if f < 0.5 { nc } else { oc }, mix(nl, ol)))
+                Some(Seen { feet: mix(n.feet, o.feet), lean: mix(n.lean, o.lean), ..if f < 0.5 { n } else { o } })
             }
             (Some(n), None) if back.fract() < 0.5 => Some(n),
             (None, Some(o)) if back.fract() >= 0.5 => Some(o),
@@ -1199,10 +1256,13 @@ impl Sim {
             .filter(|&i| i != shooter && self.players[i].active && self.players[i].respawn_at.is_none())
             .filter_map(|i| {
                 // Where the shooter saw the body
-                let (feet, crouched, lean) = self.body_then(i, back)?;
-                let place = self.placement(i);
+                let seen = self.seen_then(i, back)?;
+                let place = combat::Placement { pos: seen.feet, yaw_deg: -seen.yaw, scale: [1.0; 3] };
+                if let Some(posed) = self.posed_hit(&seen, &place, eye, dir) {
+                    return posed.map(|h| (i, h.distance, h.part));
+                }
                 let right = place.to_world([1.0, 0.0, 0.0]);
-                self.hit_parts(feet, crouched, lean).into_iter().filter_map(|HitPart { bottom: at, top, part }| {
+                self.hit_parts(seen.feet, seen.crouched, seen.lean).into_iter().filter_map(|HitPart { bottom: at, top, part }| {
                     let (ox, oz) = (eye[0] - at[0], eye[2] - at[2]);
                     let b = 2.0 * (ox * dir[0] + oz * dir[2]);
                     let c = ox * ox + oz * oz - HIT_RADIUS * HIT_RADIUS;
@@ -1222,6 +1282,39 @@ impl Sim {
                 }).min_by(|a, b| a.1.total_cmp(&b.1))
             })
             .min_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
+    /// A living player's body as it is now, without moving its animation on
+    fn seen_now(&self, slot: usize) -> Option<Seen> {
+        let p = &self.players[slot];
+        (p.active && p.respawn_at.is_none()).then(|| Seen {
+            feet: p.player.pos, crouched: p.player.crouched, lean: self.peek_offset(slot), yaw: dequantize(p.look.0),
+            movement: movement::Movement::Idle, frame: 0.0, hip_turn: 0.0, reloading: p.reloading(self.time),
+            firing: p.gun_trigger && p.ammo > 0, flinch: None, peek: p.peek, time: self.time,
+        })
+    }
+
+    /// The body posed as it was `seen`, and where on it a bullet from `eye` along the unit vector
+    /// `dir` strikes it: Some(None) where it goes past, None without the model to pose
+    fn posed_hit(&self, seen: &Seen, place: &combat::Placement, eye: V3, dir: V3) -> Option<Option<combat::Hit>> {
+        let chars = self.characters.as_ref()?;
+        let rig = chars.rig.as_ref()?;
+        // Nowhere near the body is a miss, without posing it
+        let reach = POSED_REACH;
+        let (ox, oz) = (seen.feet[0] - eye[0], seen.feet[2] - eye[2]);
+        let along = (ox * dir[0] + oz * dir[2]) / (dir[0] * dir[0] + dir[2] * dir[2]).max(1e-9);
+        let (cx, cz) = (eye[0] + dir[0] * along - seen.feet[0], eye[2] + dir[2] * along - seen.feet[2]);
+        if along < -reach || cx * cx + cz * cz > reach * reach {
+            return Some(None);
+        }
+        let flinch = seen.flinch.and_then(|(m, f)| chars.motions.get(m).map(|m| (m, f)));
+        let doing = crate::body::Doing {
+            movement: seen.movement, frame: seen.frame, crouched: seen.crouched, reloading: seen.reloading, firing: seen.firing,
+            flinch, peek: seen.peek, hip_turn: seen.hip_turn, changing: None, shuffle: None, clock: seen.time,
+        };
+        let pose = crate::body::pose(&chars.player, &rig.skeleton, &doing)?;
+        let verts = rig.skin.apply(&rig.skeleton.pose([0.0, pose.root[1], 0.0], &pose.rotations));
+        Some(combat::raycast_character(&chars.model, &rig.skeleton, &rig.skin, &verts, place, eye, dir))
     }
 
     /// What bullets hit of a player standing at `feet`: an upright cylinder of `HIT_RADIUS`, cut
@@ -1747,6 +1840,58 @@ mod tests {
         let pitch = (target[1] - from[1]).atan2((target[2] - from[2]).abs()).to_degrees();
         let events = sim.tick(&[aim(pitch), peeking], TICK);
         assert!(events.contains(&Event::Kill { killer: Some(0), victim: 1, cause: Cause::HeadShot }), "{events:?}");
+    }
+
+    /// A duel between two players with the game's model, to be hit where the posed body is.
+    /// None without the game's data.
+    fn posed_duel() -> Option<Sim> {
+        let mut sim = duel();
+        sim.characters = Some(Characters::load(std::path::Path::new("data/character/team_hrt/blue_M_a.CRP"), "up_none_cyc")?);
+        sim.characters.as_ref()?.rig.as_ref()?;
+        Some(sim)
+    }
+
+    /// What a level shot from player 0 at `height` above player 1's feet, `aside` to the
+    /// shooter's right of their middle, hits of them
+    fn level_shot(sim: &Sim, height: f32, aside: f32) -> Option<combat::BodyPart> {
+        let target = sim.players[1].player.pos;
+        let from = [target[0] + aside, target[1] + height, sim.players[0].player.pos[2]];
+        let dir = unit3([0.0, 0.0, target[2] - from[2]]);
+        sim.player_hit(0, from, dir).map(|h| h.2)
+    }
+
+    #[test]
+    fn a_player_with_a_model_is_hit_where_their_posed_body_is() {
+        let Some(mut sim) = posed_duel() else { return };
+        run_both(&mut sim, &holding(), &holding(), 0.5);
+        let standing = *sim.world.params();
+        assert_eq!(level_shot(&sim, standing.eye_height, 0.0), Some(combat::BodyPart::Head));
+        assert_eq!(level_shot(&sim, 130.0, 0.0), Some(combat::BodyPart::Torso));
+        // Facing away from the shooter, their right leg is on the shooter's right, and a shot
+        // between the legs goes through
+        assert_eq!(level_shot(&sim, 40.0, 20.0), Some(combat::BodyPart::RightLeg));
+        assert_eq!(level_shot(&sim, 40.0, -20.0), Some(combat::BodyPart::LeftLeg));
+        assert_eq!(level_shot(&sim, 40.0, 0.0), None);
+        // Between the body and the shooter's side, somewhere an arm holds the gun
+        let arms = (-60..=60).step_by(4).flat_map(|x| (80..=160).step_by(8).map(move |y| (x, y)))
+            .filter_map(|(x, y)| level_shot(&sim, y as f32, x as f32))
+            .filter(|p| matches!(p, combat::BodyPart::LeftArm | combat::BodyPart::RightArm)).count();
+        assert!(arms > 0, "no arm anywhere");
+        // Past the body's side, nothing
+        assert_eq!(level_shot(&sim, 130.0, 70.0), None);
+    }
+
+    #[test]
+    fn a_peeking_player_with_a_model_is_hit_where_the_lean_has_put_their_head() {
+        let Some(mut sim) = posed_duel() else { return };
+        let peeking = Input { peek_right: true, ..holding() };
+        run_both(&mut sim, &holding(), &peeking, 1.0);
+        let lean = sim.peek_offset(1);
+        // The eye is at the top of the head, which has gone right and down with it. Player 1
+        // faces the same way as player 0, so their right is the shooter's right.
+        let head = sim.world.params().eye_height + lean[1] - 12.0;
+        assert_eq!(level_shot(&sim, head, lean[0] + 8.0), Some(combat::BodyPart::Head));
+        assert_ne!(level_shot(&sim, sim.world.params().eye_height, 0.0), Some(combat::BodyPart::Head));
     }
 
     fn run_both(sim: &mut Sim, first: &Input, second: &Input, seconds: f32) {

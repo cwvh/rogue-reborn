@@ -87,7 +87,7 @@ On other platforms, or without the aliases:
 | F1 | toggle between first person and free-fly (collision off, Shift = faster, scroll = zoom) |
 | T | textured / wireframe |
 | P, C | show portals, show collision points |
-| B | show what bullets hit of each player, as yellow cylinders: legs, belly, chest and head (your own in third person or free-fly). They follow a crouch and a peek |
+| B | show what bullets hit of each player, outlined in yellow (your own in third person or free-fly): their posed body, arms and all, or without the players' model, cylinders for the legs, belly, chest and head |
 | N | characters blink or not |
 | H | cycle how soft sprites (shadows, light pools) are drawn, to track down a flicker: writes depth and is pulled toward the camera (the default), writes depth, no depth writes. F2 and F4 record the mode and the depth buffer's bits, and `--sprite-mode N` starts in one |
 | L | on a server: show or hide the lag meter (`--lag-meter` starts with it shown) |

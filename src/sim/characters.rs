@@ -44,6 +44,8 @@ pub struct Characters {
     pub motions: HashMap<String, Motion>,
     /// The name of the idle motion, which also stands in for any that is missing
     pub idle: String,
+    /// The motions players' bodies play, for posing them to be shot at
+    pub player: crate::body::PlayerMotions,
 }
 
 /// The motions characters play besides idling: flinches from wounds and the falls they die with
@@ -88,7 +90,8 @@ impl Characters {
                 motions.insert(name.to_string(), m);
             }
         }
-        Some(Characters { model, rig, motions, idle: idle.to_string() })
+        let player = crate::body::PlayerMotions::load(rig.as_ref().map(|r| &r.skeleton), |_, name| load_motion(name));
+        Some(Characters { model, rig, motions, idle: idle.to_string(), player })
     }
 
     /// How many frames a motion lasts, one if it is not loaded

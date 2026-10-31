@@ -19,15 +19,15 @@ use rogue_reborn::net::animation::Doing;
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
 use rogue_reborn::recording::{Playback, Recorder, Recording};
 use rogue_reborn::sim::characters::{Characters, Npc, Rig, place_npcs};
-use rogue_reborn::motion::quat_mul;
-use rogue_reborn::sim::movement::{CROUCHED_EMPTY_RELOAD_MOTION, CROUCHED_RELOAD_MOTION, EMPTY_RELOAD_MOTION, Movement, RELOAD_MOTION, Reloading, crouched_speed, ground_speed, hip_turn, movement_from_keys, reload_frame};
+use rogue_reborn::sim::movement::{Movement, Reloading, crouched_speed, ground_speed, hip_turn, movement_from_keys};
 use rogue_reborn::collision::{CollisionWorld, Params};
 use rogue_reborn::impact::{self, Surface};
 use crate::opengl::*;
 use crate::args::parse_args;
 use crate::camera::{Camera, listener_of, apply_camera};
 use rogue_reborn::util::unit3;
-use crate::player::{BodyKey, BodyState, PlayerMotions, is_arm, is_upper_body};
+use crate::player::{BodyKey, BodyState};
+use rogue_reborn::body::{self, PlayerMotions};
 use crate::draw::{WeaponDraw, CharacterArrays, draw_weapon, draw_character, draw_glass, draw_fracture, build_mesh, Which, draw_plan, wipe_opening, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
@@ -269,50 +269,7 @@ fn main() {
         let name = args.player_anims.iter().rev().find(|(k, _)| k == slot).map_or(default, |(_, m)| m.as_str());
         load_motion(name)
     };
-    // What is done in place stands on the floor, whatever height its motion was made at, so the
-    // body does not sink or rise from one into the next. Crouching down stands on its last frame,
-    // where it gives way to the kneel.
-    let planted_at = |slot: &str, default: &str, at_end: bool| slot_motion(slot, default).map(|mut m| {
-        if let Some(rig) = characters.as_ref().and_then(|c| c.rig.as_ref()) {
-            let frame = if at_end { m.frames.saturating_sub(1) as f32 } else { 0.0 };
-            rig.skeleton.plant(&mut m, frame);
-        }
-        m
-    });
-    let planted = |slot: &str, default: &str| planted_at(slot, default, false);
-    let player_motions = PlayerMotions {
-        idle: planted("idle", "up_cyc_mp5k"),
-        walk: slot_motion("walk", "tmu_wk1"),
-        run: slot_motion("run", "tmu_rn"),
-        back: slot_motion("back", "tmu_bk1"),
-        left: slot_motion("left", "tms_l2"),
-        right: slot_motion("right", "tms_r2"),
-        walk_left: slot_motion("walk_left", "tms_l1"),
-        walk_right: slot_motion("walk_right", "tms_r1"),
-        fire: planted("fire", "fire_up_mp5k"),
-        reload: planted("reload", RELOAD_MOTION),
-        reload_empty: planted("reload_empty", EMPTY_RELOAD_MOTION),
-        throw: planted("throw", "gr_ov_up"),
-        // Crouched, as the original's tables have them for a compact weapon
-        crouch_idle: planted("crouch_idle", "crouch_arms_mp5k"),
-        crouch_walk: slot_motion("crouch_walk", "tmc_fd"),
-        crouch_run: slot_motion("crouch_run", "rmc_rn"),
-        crouch_back: slot_motion("crouch_back", "tmc_bk"),
-        crouch_left: slot_motion("crouch_left", "tmc_lf"),
-        crouch_right: slot_motion("crouch_right", "tmc_rt"),
-        crouch_down: planted_at("crouch_down", "up_cr", true),
-        stand_up: planted("stand_up", "cr_up"),
-        crouch_reload: planted("crouch_reload", CROUCHED_RELOAD_MOTION),
-        crouch_reload_empty: planted("crouch_reload_empty", CROUCHED_EMPTY_RELOAD_MOTION),
-        // Stepping round after turning in place, on the legs, as the original's
-        turn: planted("turn", "tmu_plf"),
-        crouch_turn: planted("crouch_turn", "tmc_plf"),
-        // Peeking, as the original's: crouched it also has tac_plf and tac_prt, the same motions
-        peek_left: planted("peek_left", "tau_plf"),
-        peek_right: planted("peek_right", "tau_prt"),
-        crouch_peek_left: planted("crouch_peek_left", "tmac_plf"),
-        crouch_peek_right: planted("crouch_peek_right", "tmac_prt"),
-    };
+    let player_motions = PlayerMotions::load(characters.as_ref().and_then(|c| c.rig.as_ref()).map(|r| &r.skeleton), slot_motion);
 
     // The MP5K: definition, model and texture
     let weapon_def = weapon::read(Path::new("data/kit/pw_mp5k.wpn")).ok();
@@ -1574,8 +1531,7 @@ fn main() {
                              firing: bool, crouched: bool, hip_turn: f32, flinch: Option<(&rogue_reborn::motion::Motion, f32, f32)>,
                              peek: Option<rogue_reborn::sim::peek::Peek>, body: &mut BodyState| -> bool {
                 let Some(Rig { skeleton: skel, skin }) = &chars.rig else { return false };
-                let peeking = peek.filter(|_| flinch.is_none()).and_then(|k| player_motions.peek(k.right, k.crouched).map(|m| (m, k.frame, k.right)));
-                let moving = peeking.is_none() && matches!(movement, Movement::Walk | Movement::Run | Movement::Back | Movement::StrafeLeft | Movement::StrafeRight | Movement::WalkLeft | Movement::WalkRight);
+                let moving = player_motions.moving(movement, peek, flinch.is_some());
                 // Crouching down or standing up plays in place, at its own pace; moving cuts it short
                 let since = body.since_stance_change(crouched, game_time);
                 let changing = since.filter(|_| !moving)
@@ -1585,91 +1541,17 @@ fn main() {
                 let shuffle = body.shuffle(yaw_deg, !moving && changing.is_none(), game_time)
                     .and_then(|at| player_motions.turn(crouched).map(|m| (m, (game_time - at) * 30.0, at)))
                     .filter(|(m, f, _)| *f < m.frames.saturating_sub(1) as f32);
-                let reload = reloading.and_then(|r| player_motions.reload(r, crouched).map(|m| (m, reload_frame(r, crouched, m.frames.max(1) as f32))));
-                // Crouched, firing and throwing are done kneeling, by the arms, as they are while
-                // the body crouches down or stands up. A reload has a kneeling motion of its own.
-                let kneeling = crouched && !moving && movement != Movement::Idle && !(movement == Movement::Reload && reload.is_some());
-                let arms_only = kneeling || (changing.is_some() && movement != Movement::Idle);
-                // A motion that loops on its own clock, whatever the body's frame
-                let looping = |m: &'_ rogue_reborn::motion::Motion| (game_time * 30.0) % m.frames.max(1) as f32;
-                let movement_frame = frame;
-                let (mot, frame) = match (flinch, changing, shuffle, movement, reload) {
-                    (Some((m, f, _)), ..) => (m, f),
-                    _ if peeking.is_some() => peeking.map(|(m, f, _)| (m, f)).unwrap(),
-                    (None, Some(change), ..) => change,
-                    (None, None, Some((m, f, _)), ..) => (m, f),
-                    (None, None, None, Movement::Reload, Some(shown)) => shown,
-                    _ if kneeling => {
-                        let Some(knee) = player_motions.get(Movement::Idle, true) else { return false };
-                        (knee, looping(knee))
-                    }
-                    _ => {
-                        let Some(mot) = player_motions.get(movement, crouched) else { return false };
-                        (mot, frame)
-                    }
-                };
-                let (mut root, mut rots) = mot.sample(frame.min(mot.frames.saturating_sub(1) as f32));
-                // A reload keeps the arms busy, so they fire only outside one, and a flinch the same
-                let aiming = (firing || movement == Movement::Fire) && reload.is_none() && flinch.is_none();
-                // Moving, kneeling or stepping round: the legs from the motion, and the upper body
-                // reloads, fires (the fire motion looping at its own pace), throws or keeps the gun hold
-                let shuffling = flinch.is_none() && peeking.is_none() && shuffle.is_some();
-                if flinch.is_none() && peeking.is_none() && (moving || arms_only || shuffling) {
-                    let fire = player_motions.get(Movement::Fire, crouched).filter(|_| aiming).map(|m| (m, looping(m)));
-                    let throw = player_motions.get(Movement::Throw, crouched).filter(|_| (arms_only || shuffling) && movement == Movement::Throw).map(|m| (m, frame));
-                    let upper = reload.or(fire).or(throw).or_else(|| player_motions.get(Movement::Idle, crouched).map(|hold| (hold, 0.0)));
-                    if let Some((upper, at)) = upper {
-                        let (_, hold_rots) = upper.sample(at);
-                        // The hips of a crouched move pitch well forward of the kneeling hold's, so
-                        // crouched the chest keeps the way it faces in the hold, not its turn from
-                        // the hips (which would point the gun at the floor)
-                        let hips = skel.bones.iter().find(|b| b.name == "Hips").map(|b| b.anim_index);
-                        let (from, to) = match hips.and_then(|h| Some((*hold_rots.get(h)?, *rots.get(h)?))) {
-                            Some((held, under)) if crouched || changing.is_some() => (held, under),
-                            _ => ([0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]),
-                        };
-                        let undo = [-to[0], -to[1], -to[2], to[3]];
-                        for b in &skel.bones {
-                            if is_upper_body(&b.name) {
-                                if let (Some(r), Some(h)) = (rots.get_mut(b.anim_index), hold_rots.get(b.anim_index)) {
-                                    *r = if b.name == "Chest" { quat_mul(undo, quat_mul(from, *h)) } else { *h };
-                                }
-                            }
-                        }
-                    }
-                }
-                // Leaning, the arms alone still reload, fire and throw, from the leaned chest, as
-                // the original plays those on the arms
-                if let (Some(_), None) = (peeking, flinch) {
-                    let fire = player_motions.get(Movement::Fire, crouched).filter(|_| aiming).map(|m| (m, looping(m)));
-                    let throw = player_motions.get(Movement::Throw, crouched).filter(|_| movement == Movement::Throw).map(|m| (m, movement_frame));
-                    if let Some((arms, at)) = reload.or(fire).or(throw) {
-                        let (_, arm_rots) = arms.sample(at);
-                        for b in skel.bones.iter().filter(|b| is_arm(&b.name)) {
-                            if let (Some(r), Some(a)) = (rots.get_mut(b.anim_index), arm_rots.get(b.anim_index)) {
-                                *r = *a;
-                            }
-                        }
-                    }
-                }
-                // Going forward or back and to the side, the hips turn toward the way the body
-                // goes, about the upright, and the chest turns back as far so the upper body keeps
-                // facing the aim. A flinch takes the whole body as it is.
                 let turn = body.turn_hips(if moving { hip_turn } else { 0.0 }, game_time);
-                let bone = |name: &str| skel.bones.iter().find(|b| b.name == name).map(|b| b.anim_index);
-                if let (None, Some(h), Some(c)) = (flinch, bone("Hips"), bone("Chest")) {
-                    if let (Some(&hips), Some(&chest)) = (rots.get(h), rots.get(c)) {
-                        let inverse = |q: [f32; 4]| [-q[0], -q[1], -q[2], q[3]];
-                        let q = [0.0, (turn / 2.0).sin(), 0.0, (turn / 2.0).cos()];
-                        rots[h] = quat_mul(q, hips);
-                        rots[c] = quat_mul(inverse(hips), quat_mul(inverse(q), quat_mul(hips, chest)));
-                    }
-                }
+                let doing = body::Doing {
+                    movement, frame, crouched, reloading, firing, flinch: flinch.map(|(m, f, _)| (m, f)), peek, hip_turn: turn,
+                    changing, shuffle: shuffle.map(|(m, f, _)| (m, f)), clock: game_time,
+                };
+                let Some(body::Pose { mut root, rotations: mut rots, aiming, peeking, shuffling }) = body::pose(&player_motions, skel, &doing) else { return false };
                 // Raising the gun to fire is a cut, as in the original, so the first shots never
                 // leave a gun still on its way up. Once firing, the legs still ease.
                 let raising = aiming && !body.fade.key().is_some_and(|k| k.aiming);
                 let ease = if raising { 0.0 } else { rogue_reborn::motion::CROSSFADE_SECONDS };
-                let key = BodyKey { movement, reload: reloading.map(|r| r.empty), aiming, crouched, changing: changing.is_some(), flinch: flinch.map(|f| f.2.to_bits()), shuffle: shuffle.filter(|_| shuffling).map(|s| s.2.to_bits()), peek: peeking.map(|p| p.2) };
+                let key = BodyKey { movement, reload: reloading.map(|r| r.empty), aiming, crouched, changing: changing.is_some(), flinch: flinch.map(|f| f.2.to_bits()), shuffle: shuffle.filter(|_| shuffling).map(|s| s.2.to_bits()), peek: peeking };
                 body.fade.apply(key, game_time, ease, &mut root, &mut rots);
                 let pose = skel.pose([0.0, root[1], 0.0], &rots);
                 let verts = skin.apply(&pose);
@@ -1679,6 +1561,23 @@ fn main() {
                 glRotatef(yaw_deg, 0.0, 1.0, 0.0);
                 glScalef(scale[0], scale[1], scale[2]);
                 draw_character(&chars.model, &character_arrays, &verts, &part_textures, face, textured, glow_on(feet));
+                // What bullets hit (B): the posed body itself, outlined over it
+                if show_hitboxes {
+                    glDisable(0x0DE1); // GL_TEXTURE_2D
+                    glDisable(0x0B71); // GL_DEPTH_TEST
+                    glColor3f(1.0, 0.85, 0.0);
+                    glBegin(0x0001); // GL_LINES
+                    for t in chars.model.parts.iter().flat_map(|p| &p.triangles) {
+                        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                            let (a, b) = (verts[a as usize], verts[b as usize]);
+                            glVertex3f(a[0], a[1], a[2]);
+                            glVertex3f(b[0], b[1], b[2]);
+                        }
+                    }
+                    glEnd();
+                    glEnable(0x0B71);
+                    glColor4f(1.0, 1.0, 1.0, 1.0);
+                }
 
                 // The MP5K in the right hand, or a grenade until it is thrown
                 if let (Some(Some(wd)), Some((hand, off))) = (hand, &weapon_attach) {
@@ -2053,8 +1952,9 @@ fn main() {
             }
 
             // What bullets hit of each player, as yellow outlines: the player's own only when
-            // their body is seen, in third person or flying free
-            if show_hitboxes {
+            // their body is seen, in third person or flying free. With the players' model, that
+            // is the posed body, outlined where it is drawn; without, these cylinders.
+            if show_hitboxes && sim.characters.as_ref().is_none_or(|c| c.rig.is_none()) {
                 glDisable(0x0DE1); // GL_TEXTURE_2D
                 glColor3f(1.0, 0.85, 0.0);
                 let others = view.as_ref().map_or(&[][..], |v| &v.players[..]);
