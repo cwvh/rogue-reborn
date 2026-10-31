@@ -328,24 +328,45 @@ pub enum HitResult {
 pub struct Health {
     pub hp: f32,
     pub state: NpcState,
+    /// How much of `hp` a wound takes: all of it in as many wounds as they take before falling
+    pub wound: f32,
+}
+
+/// How much health a bullet takes for what it does (see `gfcm`): a wound's share, all of it for
+/// incapacitating or killing, or by the part it struck without the game's chart
+pub fn bullet_damage(effect: Option<crate::gfcm::Effect>, part: BodyPart, hp: f32, wound: f32) -> f32 {
+    use crate::gfcm::Effect;
+    match effect {
+        None => damage(part),
+        Some(Effect::Nothing) => 0.0,
+        Some(Effect::Wounded) => wound,
+        Some(Effect::Incapacitated | Effect::Dead) => hp,
+    }
 }
 
 impl Health {
     pub fn new() -> Self {
-        Self { hp: 100.0, state: NpcState::Idle }
+        Self::with_stamina(50.0)
+    }
+
+    /// Whole, taking as many wounds as `stamina` (out of 100) lets them
+    pub fn with_stamina(stamina: f32) -> Self {
+        Self { hp: 100.0, state: NpcState::Idle, wound: 100.0 / crate::gfcm::wounds_to_fall(stamina) as f32 }
     }
 
     pub fn is_dead(&self) -> bool {
         matches!(self.state, NpcState::Dead { .. })
     }
 
-    /// Apply a hit at time `now` (seconds). `roll` picks between variants.
-    pub fn apply_hit(&mut self, hit: &Hit, now: f32, roll: u32) -> HitResult {
+    /// Apply a hit at time `now` (seconds) that does what `effect` says (see `bullet_damage`).
+    /// `roll` picks between variants.
+    pub fn apply_hit(&mut self, hit: &Hit, effect: Option<crate::gfcm::Effect>, now: f32, roll: u32) -> HitResult {
         if self.is_dead() {
             return HitResult::Ignored;
         }
-        self.hp -= damage(hit.part);
-        if self.hp <= 0.0 {
+        self.hp -= bullet_damage(effect, hit.part, self.hp, self.wound);
+        // The last of a run of wounds leaves a little over for rounding
+        if self.hp <= 0.01 {
             self.hp = 0.0;
             self.state = NpcState::Dead { motion: death_motion(hit.part, hit.facing, roll), start: now };
             HitResult::Killed
@@ -546,7 +567,7 @@ mod tests {
     #[test]
     fn a_head_shot_kills_outright() {
         let mut h = Health::new();
-        assert_eq!(h.apply_hit(&hit(BodyPart::Head), 1.0, 0), HitResult::Killed);
+        assert_eq!(h.apply_hit(&hit(BodyPart::Head), None, 1.0, 0), HitResult::Killed);
         assert!(h.is_dead());
         assert_eq!(h.state, NpcState::Dead { motion: "thiu_hf", start: 1.0 });
     }
@@ -554,10 +575,10 @@ mod tests {
     #[test]
     fn body_shots_injure_then_kill() {
         let mut h = Health::new();
-        assert_eq!(h.apply_hit(&hit(BodyPart::Torso), 1.0, 0), HitResult::Injured);
+        assert_eq!(h.apply_hit(&hit(BodyPart::Torso), None, 1.0, 0), HitResult::Injured);
         assert!(matches!(h.state, NpcState::Reacting { motion: "thwu_bf", .. }));
-        assert_eq!(h.apply_hit(&hit(BodyPart::Torso), 2.0, 0), HitResult::Injured);
-        assert_eq!(h.apply_hit(&hit(BodyPart::Torso), 3.0, 1), HitResult::Killed);
+        assert_eq!(h.apply_hit(&hit(BodyPart::Torso), None, 2.0, 0), HitResult::Injured);
+        assert_eq!(h.apply_hit(&hit(BodyPart::Torso), None, 3.0, 1), HitResult::Killed);
         assert_eq!(h.hp, 0.0);
         assert!(matches!(h.state, NpcState::Dead { motion: "hw_fr_up2_g", .. }));
     }
@@ -565,9 +586,9 @@ mod tests {
     #[test]
     fn the_dead_stay_dead() {
         let mut h = Health::new();
-        h.apply_hit(&hit(BodyPart::Head), 1.0, 0);
+        h.apply_hit(&hit(BodyPart::Head), None, 1.0, 0);
         let before = h.state;
-        assert_eq!(h.apply_hit(&hit(BodyPart::Torso), 5.0, 2), HitResult::Ignored);
+        assert_eq!(h.apply_hit(&hit(BodyPart::Torso), None, 5.0, 2), HitResult::Ignored);
         assert_eq!(h.state, before);
     }
 

@@ -544,9 +544,14 @@ impl CollisionWorld {
     /// both sides, leaving out those that let `through` pass (`BULLETS`, `GRENADES`, `BLASTS`,
     /// or 0). With `body` it is the walls instead of the faces that stop rays.
     fn nearest(&self, origin: V3, dir: V3, max_dist: f32, through: u8, body: bool) -> Option<(f32, &Tri)> {
+        self.nearest_where(origin, dir, max_dist, through, |t| if body { self.stops_body(t) } else { self.stops_rays(t) })
+    }
+
+    /// As `nearest`, over the faces `counts` lets in
+    fn nearest_where(&self, origin: V3, dir: V3, max_dist: f32, through: u8, counts: impl Fn(&Tri) -> bool) -> Option<(f32, &Tri)> {
         let mut stops: Vec<(f32, &Tri)> = Vec::new();
         let mut passed: Vec<(f32, &Tri)> = Vec::new();
-        for (i, t) in self.tris.iter().enumerate().filter(|(_, t)| if body { self.stops_body(t) } else { self.stops_rays(t) }) {
+        for (i, t) in self.tris.iter().enumerate().filter(|(_, t)| counts(t)) {
             let Some(d) = crate::combat::ray_triangle(origin, dir, t.a, t.b, t.c).filter(|&d| d <= max_dist) else { continue };
             let passes = if self.door_tris.contains(&i) { self.door_passes(i) } else { t.passes | self.passes.get(t.material).copied().unwrap_or(0) };
             if passes & through != 0 { passed.push((d, t)) } else { stops.push((d, t)) }
@@ -628,12 +633,22 @@ impl CollisionWorld {
         self.hit(origin, dir, max_dist, BLASTS)
     }
 
+    /// What a bullet strikes as `bullet_hit` does, but among the faces of `rooms` only (and
+    /// those of no room), whichever rooms are solid around the players: for a line between two
+    /// places far from them (see `Visibility::rooms_along`)
+    pub fn bullet_hit_in(&self, origin: V3, dir: V3, max_dist: f32, rooms: &[u32]) -> Option<RayHit> {
+        let counts = |t: &Tri| t.ray && !t.off && (t.room == NO_ROOM || rooms.contains(&t.room));
+        self.nearest_where(origin, dir, max_dist, BULLETS, counts).map(|(dist, t)| self.ray_hit(dist, t, dir))
+    }
+
     fn hit(&self, origin: V3, dir: V3, max_dist: f32, through: u8) -> Option<RayHit> {
-        self.nearest(origin, dir, max_dist, through, false).map(|(dist, t)| {
-            // The file's normals are not reliable about which side is front
-            let n = if dot(t.n, dir) > 0.0 { scale(t.n, -1.0) } else { t.n };
-            RayHit { dist, normal: n, material: (t.material != usize::MAX).then_some(t.material), room: (t.room != NO_ROOM).then_some(t.room) }
-        })
+        self.nearest(origin, dir, max_dist, through, false).map(|(dist, t)| self.ray_hit(dist, t, dir))
+    }
+
+    fn ray_hit(&self, dist: f32, t: &Tri, dir: V3) -> RayHit {
+        // The file's normals are not reliable about which side is front
+        let n = if dot(t.n, dir) > 0.0 { scale(t.n, -1.0) } else { t.n };
+        RayHit { dist, normal: n, material: (t.material != usize::MAX).then_some(t.material), room: (t.room != NO_ROOM).then_some(t.room) }
     }
 
     pub fn triangle_count(&self) -> usize { self.tris.len() }

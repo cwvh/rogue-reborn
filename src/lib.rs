@@ -30,3 +30,4 @@ pub mod net;
 pub mod levels;
 pub mod mission;
 pub mod kit;
+pub mod gfcm;

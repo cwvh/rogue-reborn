@@ -27,6 +27,8 @@ pub struct Actor {
     pub scale: [f32; 3],
     /// Their Assault skill, out of 100: how well they shoot
     pub assault: f32,
+    /// Their Stamina, out of 100: how many wounds they take before they fall
+    pub stamina: f32,
     /// Face texture file names (`.bmp` in the file; the game data has them as
     /// `.rsb` in `data/texture/faces`)
     pub hrt_face: Option<String>,
@@ -68,6 +70,7 @@ pub fn parse(id: &str, text: &str) -> Actor {
         sex: Sex::Male,
         scale: [1.0; 3],
         assault: 50.0,
+        stamina: 50.0,
         hrt_face: None,
         camo_face: None,
         desert_face: None,
@@ -90,6 +93,10 @@ pub fn parse(id: &str, text: &str) -> Actor {
         } else if comment.starts_with("assault") {
             if let Ok(v) = value.parse() {
                 actor.assault = v;
+            }
+        } else if comment.starts_with("stamina") {
+            if let Ok(v) = value.parse() {
+                actor.stamina = v;
             }
         } else if comment.starts_with("scale") {
             // Team members' are written 1, .97, 1 and the others' 1.00 1.00 1.0

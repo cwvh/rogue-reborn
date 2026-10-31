@@ -1760,7 +1760,7 @@ fn main() {
                 for (slot, p) in sim.players.iter().enumerate().filter(|(_, p)| p.active) {
                     if let (Some(_), Some(hit)) = (p.respawn_at, p.hit) {
                         if corpses.get(&slot).is_none_or(|(start, _)| (start - hit.start).abs() > 0.1) {
-                            let health = combat::Health { hp: 0.0, state: combat::NpcState::Dead { motion: hit.motion, start: hit.start } };
+                            let health = combat::Health { hp: 0.0, state: combat::NpcState::Dead { motion: hit.motion, start: hit.start }, ..Default::default() };
                             let yaw = -sim::dequantize(p.look.0);
                             let scale = actors.get(slot % actors.len().max(1)).map_or([1.0; 3], |a| a.scale);
                             let pos = p.player.pos;

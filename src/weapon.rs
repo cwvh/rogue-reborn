@@ -29,6 +29,8 @@ pub struct Weapon {
     pub class: String,
     /// How it reloads: "subgun", "shotgun", "pistol" or "bolt action"
     pub reload_class: String,
+    /// The ammunition it fires, as the gunfire combat model names it (see `gfcm`)
+    pub ammo: Option<String>,
     pub gun: Option<Gun>,
 }
 
@@ -72,7 +74,10 @@ pub fn parse(text: &str) -> Result<Weapon> {
     }).context("muzzle not found")?;
 
     // After the muzzle, the ammunition's name, then the spread's numbers
-    let ammo_at = lines[model_at + 1..].iter().position(|l| l.starts_with('"')).map(|i| model_at + 1 + i);
+    // (A shotgun first has two numbers and a line of its pellets, it seems, then the name again)
+    let ammo_at = (model_at + 1..lines.len().saturating_sub(1))
+        .find(|&i| lines[i].starts_with('"') && lines[i + 1].parse::<f32>().is_ok());
+    let ammo = ammo_at.and_then(|a| lines[a].split('"').nth(1)).map(str::to_string);
     let numbers: Vec<f32> = ammo_at.map_or_else(Vec::new, |a| lines[a + 1..].iter().map_while(|l| l.parse().ok()).take(8).collect());
     let gun = (numbers.len() == 8).then(|| Gun {
         moving: [numbers[0], numbers[1], numbers[2], numbers[3], numbers[4]],
@@ -81,7 +86,7 @@ pub fn parse(text: &str) -> Result<Weapon> {
         close: numbers[7],
     });
 
-    Ok(Weapon { id, magazine, reserve, model, muzzle, sound, class, reload_class, gun })
+    Ok(Weapon { id, magazine, reserve, model, muzzle, sound, class, reload_class, ammo, gun })
 }
 
 #[cfg(test)]
@@ -100,7 +105,7 @@ mod tests {
         assert_eq!(w.model, "rsw_mp5k.qob");
         assert_eq!(w.muzzle, [0.0, -43.0, 13.0]);
         assert_eq!(w.sound.as_deref(), Some("C_sb5ks.wav"));
-        assert_eq!((w.class.as_str(), w.reload_class.as_str()), ("compact", "subgun"));
+        assert_eq!((w.class.as_str(), w.reload_class.as_str(), w.ammo.as_deref()), ("compact", "subgun", Some("9mmP(FMJ)")));
         // What sim::aim has for it
         let (gun, mp5k) = (w.gun.unwrap(), crate::sim::aim::MP5K);
         assert_eq!((gun.moving, gun.crouched, gun.recoil, gun.close), (mp5k.moving, mp5k.crouched, mp5k.recoil, mp5k.close));

@@ -101,6 +101,7 @@ impl super::Sim {
         let now = self.time;
         let params = self.world.params();
         let (stand_eye, kneel_eye) = (params.eye_height, params.crouch_eye_height);
+        let player_rooms: Vec<Vec<u32>> = self.players.iter().map(|p| self.rooms_at(p.player.pos, p.current_room)).collect();
         for i in 0..self.npcs.len() {
             let npc = &self.npcs[i];
             let Some(mut mind) = npc.mind.clone() else { continue };
@@ -110,6 +111,7 @@ impl super::Sim {
             }
             let kneel = kneels(npc.stance);
             let eye = [npc.pos[0], npc.floor + if kneel { kneel_eye } else { stand_eye }, npc.pos[2]];
+            let rooms = self.rooms_at([npc.pos[0], npc.floor, npc.pos[2]], None);
 
             // The players it sees: where it would aim at each, and how far that is
             let (_, range) = mind.view();
@@ -128,11 +130,8 @@ impl super::Sim {
                 let dist = super::dist3(eye, body);
                 // The one it is after it keeps sight of whichever way it faces, out to a glimpse
                 let looks = if mind.target == Some(slot) { dist <= CLOSE.max(range * visible * 1.75) } else { mind.could_see(eye, npc.yaw, body, visible) };
-                let clear = |to: V3| {
-                    let d = super::dist3(eye, to);
-                    let dir = [(to[0] - eye[0]) / d, (to[1] - eye[1]) / d, (to[2] - eye[2]) / d];
-                    self.world.bullet_hit(eye, dir, d).is_none_or(|h| h.dist >= d - 1.0)
-                };
+                // Only the rooms around the players are solid, so the line goes room to room
+                let clear = |to: V3| self.line_clear(eye, &rooms, to, &player_rooms[slot]);
                 if looks && (clear(body) || clear(head)) {
                     sees.push((slot, aim_at, dist));
                 }
@@ -318,6 +317,27 @@ mod tests {
         assert!(facing(sim.npcs[0].yaw, 180.0), "{}", sim.npcs[0].yaw);
         // A half turn at its rate before the first shot
         assert!(shots.first().is_some_and(|&t| t >= (180.0 - FACING) / TURN_RATE), "{shots:?}");
+    }
+
+    #[test]
+    fn a_terrorist_does_not_see_through_the_walls_of_rooms_far_from_the_players() {
+        // rm05: a guard in the cabin's room 308 faces the spawn in room 314 through a wall.
+        // Only the rooms around the player are solid, so it saw through it and shot them.
+        use crate::collision::{CollisionWorld, Params};
+        let Ok(level) = crate::map::read(std::path::Path::new("data/map/rm05/rm05.map")) else { return };
+        let level = std::sync::Arc::new(level);
+        let world = CollisionWorld::from_map(&level, Params::default());
+        let floor = world.ground_at(37789.0, 34346.0, 32877.0).unwrap();
+        let npc = crate::sim::characters::Npc {
+            pos: [37789.0, floor, 34346.0], floor, yaw: 179.0, stance: Some(Stance::Stand),
+            mind: Some(Mind::new(Alertness::Alert, 0.4, 4000.0, MP5K, 30, 3)),
+            ..Default::default()
+        };
+        let config = crate::sim::Config { magazine: 30, ammo: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };
+        let mut sim = crate::sim::Sim::new(level, world, config, None, vec![npc]);
+        sim.add_player([37813.4, 32767.0, 33285.3]);
+        assert!(wait(&mut sim, 3.0).is_empty());
+        assert!(!sim.npcs[0].aiming);
     }
 
     #[test]

@@ -165,6 +165,30 @@ For an AK in the hands of a terrorist with an Assault of 40, standing still: the
 from 1.7 degrees to 0.07 in 1.4 s, and it fires once that is 12 units wide at the target (at
 10 m, 1000 units, after about half a second), or nearly closed. Running: 15 degrees down to 3.2.
 
+## What a bullet does
+
+Whoever fires it, a bullet's effect comes from the gunfire combat model, `data/kit/gfcm.txt`
+(read by 0x5822c0; worked out by 0x5833e0, applied by 0x5b2ce0):
+
+- Each kind of ammunition (a weapon file names it after the muzzle) has a kill energy, how far it
+  can kill, and how it falls off: over `d` meters it loses `d * a + d^2 * b`. A 9mm round leaves
+  with 550 and is spent at 240 m.
+- The energy that reaches the target picks a row of the kill chart, ten bands from 1 to 1000. For
+  the part of the body struck (head, chest, abdomen, legs, arms) a roll from 1 to 100 picks what it
+  does: no effect, wounded, incapacitated or dead, the higher rolls doing worse.
+- A character's state only gets worse. A wound adds to their wounds, and when those reach their
+  limit they are incapacitated: one more than 1 for a Stamina up to 30, 2 up to 60, 3 up to 80,
+  4 up to 90, 5 above (0x5ae470, the Stamina at char+0x308; the actor's skills sit from char+0x2fc
+  in the file's order, Aggression first). Three wounds to the legs incapacitate too.
+- Also there, not used yet: the stun energy and its chart (dazed, stunned), armor (`TR_ARM1.eq`
+  and the like), which turns a share of the kill energy into stun, a first number per ammunition
+  not yet known (0.8 for 9mm), and a roll doubled for some head shots (when, depends on arguments
+  not pinned down).
+
+Ours (gfcm.rs): health is still the 100 shown, and a wound takes its share (a third for a
+terrorist with a Stamina of 50, a fifth for a player, whose Stamina is taken as 85); being
+incapacitated is dying.
+
 ## Not read yet
 
 - How a sighting becomes a threat: what makes it Suspicious, Distant, Immediate or Deadly, and
@@ -202,6 +226,7 @@ Small enough to try out on the maps we play, and grow from:
    sound. They reload when the magazine is empty, from the magazines the kit gives them.
    They stand, or kneel when squatting or kneeling, with the gun up as a player fires.
    Still to do: the delay the original may add before reacting, a reload and the weapons' own
-   holds in their bodies, shotguns' pellets, and the ammunition's damage.
+   holds in their bodies, and shotguns' pellets. Bullets do what the gunfire combat model says
+   (above).
 4. Then hearing (gunfire, footsteps), the guard and patrol plans (GuardSpot, MoveTo loops),
    triggers, and moving to cover.

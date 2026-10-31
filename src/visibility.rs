@@ -202,6 +202,31 @@ impl Visibility {
         self.sides.get(portal)?.iter().find(|(r, _)| *r == room).and_then(|(_, p)| *p)
     }
 
+    /// The rooms a straight line from `a`, in one of the rooms `from`, passes through to reach
+    /// `b`, in one of the rooms `to`: from room to room through the portals it crosses (not those
+    /// `blocked` by a closed door), as the original's sight follows a line out through its room's
+    /// portals (RogueSpear.exe 0x5639c0). None when it never gets there: a wall is in the way.
+    pub fn rooms_along(&self, from: &[u32], to: &[u32], a: [f32; 3], b: [f32; 3], blocked: &[bool]) -> Option<Vec<u32>> {
+        let mut seen: Vec<u32> = from.to_vec();
+        let mut at = 0;
+        while at < seen.len() {
+            let room = seen[at];
+            at += 1;
+            if to.contains(&room) {
+                return Some(seen);
+            }
+            for &i in self.by_room.get(&room).map(Vec::as_slice).unwrap_or_default() {
+                let other = self.sides[i].iter().map(|(r, _)| *r).find(|&r| r != room);
+                let Some(other) = other.filter(|o| !seen.contains(o)) else { continue };
+                if !blocked.get(i).copied().unwrap_or(false) && crosses(&self.corners[i], a, b) {
+                    seen.push(other);
+                }
+            }
+        }
+        // With no `to`, every room it gets into
+        to.is_empty().then_some(seen)
+    }
+
     /// Whether the map has a room with this number
     pub fn is_room(&self, number: u32) -> bool {
         self.index.contains_key(&number)
@@ -717,6 +742,20 @@ pub fn project(corners: &[[f32; 3]], clip: &dyn Fn([f32; 3]) -> [f32; 4]) -> Opt
 /// Whether one of the `touch` points (the player's feet and eyes) stands in a portal: within
 /// `TOUCH` of its plane, and within its opening. Near its edge is not in it: on rm02's
 /// stairwell, the feet on the top landing are 30 units above the top of the doorway below.
+/// Whether the segment from `a` to `b` goes through a portal's opening
+fn crosses(corners: &[[f32; 3]], a: [f32; 3], b: [f32; 3]) -> bool {
+    let Some(n) = plane_normal(corners) else { return false };
+    let c = corners[0];
+    let side = |p: [f32; 3]| (p[0] - c[0]) * n[0] + (p[1] - c[1]) * n[1] + (p[2] - c[2]) * n[2];
+    let (sa, sb) = (side(a), side(b));
+    if sa * sb > 0.0 || sa == sb {
+        return false;
+    }
+    let t = sa / (sa - sb);
+    let p = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+    distance_to_polygon(corners, p) <= 1.0
+}
+
 fn stands_in(corners: &[[f32; 3]], touch: &[[f32; 3]]) -> bool {
     let Some(n) = plane_normal(corners) else {
         return touch.iter().any(|&p| distance_to_polygon(corners, p) <= TOUCH);

@@ -325,7 +325,7 @@ pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, sight: f32, w
             });
             let scale = actor.as_ref().map_or([1.0; 3], |a| a.scale);
             let mut npc = Npc {
-                health: Health::new(),
+                health: actor.as_ref().map_or_else(Health::new, |a| Health::with_stamina(a.stamina)),
                 pos: p,
                 floor,
                 yaw,

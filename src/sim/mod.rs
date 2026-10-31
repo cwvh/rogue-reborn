@@ -41,6 +41,13 @@ pub const RELOAD_SECONDS: f32 = 2.2;
 /// A player's health at the start
 pub const PLAYER_HP: f32 = 100.0;
 
+/// A player's Stamina, out of 100, which says how many wounds they take: the original's
+/// operatives' is mostly 75 to 95
+pub const PLAYER_STAMINA: f32 = 85.0;
+
+/// The ammunition the players' MP5K fires (pw_mp5k.wpn)
+pub const PLAYER_AMMO: &str = "9mmP(FMJ)";
+
 /// How far from the feet, across the floor, a posed body can reach (a peek, an arm out)
 const POSED_REACH: f32 = 120.0;
 
@@ -404,6 +411,8 @@ pub struct Sim {
 
     pub characters: Option<Characters>,
     pub npcs: Vec<Npc>,
+    /// What bullets do (data/kit/gfcm.txt), or without it each part of the body takes so much
+    pub gunfire: Option<Arc<crate::gfcm::Gunfire>>,
 
     pub doors: Vec<Door>,
     pub door_states: Vec<DoorState>,
@@ -447,6 +456,7 @@ impl Sim {
             applied_rooms: None,
             characters,
             npcs,
+            gunfire: crate::gfcm::read(std::path::Path::new("data/kit/gfcm.txt")).ok().map(Arc::new),
         }
     }
 
@@ -1064,8 +1074,23 @@ impl Sim {
     /// character (a player's bullet), glass, which it breaks and goes on through, or the level
     fn bullet(&mut self, eye: V3, dir: V3, by: Shooter, ev: &mut Vec<Event>) {
         let now = self.time;
+        // Where it flies, room to room, and what of those rooms' it strikes. Only the rooms
+        // around the players are solid, so this alone says what stops a character's bullet,
+        // and whether a player's reaches someone far off.
+        let start_rooms = match by {
+            Shooter::Player(s) => self.rooms_at(self.players[s].player.pos, self.players[s].current_room),
+            Shooter::Character(i) => self.rooms_at([self.npcs[i].pos[0], self.npcs[i].floor, self.npcs[i].pos[2]], None),
+        };
+        let crossed = self.flight(eye, dir, &start_rooms);
+        let far_wall = |sim: &Sim| sim.world.bullet_hit_in(eye, dir, 20000.0, &crossed).map(|h| h.dist);
         // Through the faces bullets pass, such as a chain fence
-        let mut wall = self.world.bullet_hit(eye, dir, 20000.0).map(|h| h.dist);
+        let near_wall = |sim: &Sim| match by {
+            Shooter::Player(_) => sim.world.bullet_hit(eye, dir, 20000.0).map(|h| h.dist),
+            Shooter::Character(_) => far_wall(sim),
+        };
+        let mut wall = near_wall(self);
+        let flown = far_wall(self);
+        let reaches = |rooms: &[u32], d: f32| rooms.iter().any(|r| crossed.contains(r)) && flown.is_none_or(|w| w >= d - 1.0);
 
         let mut best: Option<(usize, combat::Hit)> = None;
         if let (Some(chars), Shooter::Player(_)) = (&self.characters, by) {
@@ -1073,7 +1098,8 @@ impl Sim {
                 if npc.health.is_dead() {
                     continue;
                 }
-                if let Some(h) = chars.raycast(npc, now, eye, dir) {
+                let h = chars.raycast(npc, now, eye, dir).filter(|h| reaches(&self.rooms_at([npc.pos[0], npc.floor, npc.pos[2]], None), h.distance));
+                if let Some(h) = h {
                     if best.map_or(true, |(_, b)| h.distance < b.distance) {
                         best = Some((i, h));
                     }
@@ -1081,7 +1107,8 @@ impl Sim {
             }
         }
 
-        let hit_player = self.player_hit(by, eye, dir);
+        let hit_player = self.player_hit(by, eye, dir)
+            .filter(|&(v, d, _)| reaches(&self.rooms_at(self.players[v].player.pos, self.players[v].current_room), d));
 
         // Glass in the way breaks and lets the bullet through
         loop {
@@ -1101,12 +1128,17 @@ impl Sim {
             ev.push(Event::Glass { pane: gi, at, dir, seed: self.rng });
             ev.push(Event::Log(format!("t={now:.2} shot broke glass {}", self.panes[gi].name)));
             ev.push(Event::Sound { name: "C_GBRKMD.WAV".to_string(), at: Some(self.panes[gi].center()), gain: 1.0 });
-            wall = self.world.bullet_hit(eye, dir, 20000.0).map(|h| h.dist);
+            wall = near_wall(self);
         }
 
         let start = [eye[0] + dir[0] * 30.0, eye[1] + dir[1] * 30.0 - 8.0, eye[2] + dir[2] * 30.0];
         // Another player in the way, nearer than whatever else was hit
         let hit_player = hit_player.filter(|h| wall.is_none_or(|w| h.1 <= w) && best.as_ref().is_none_or(|(_, b)| h.1 < b.distance));
+        // What it does to a person it struck `dist` away, rolled
+        let ammo = match by {
+            Shooter::Player(_) => Some(PLAYER_AMMO.to_string()),
+            Shooter::Character(i) => self.npcs[i].weapon.and_then(|w| self.characters.as_ref()?.weapons.get(w)?.1.ammo.clone()),
+        };
         let shot = |end: V3, hit_character: bool| match by {
             Shooter::Player(player) => Event::Shot { player, start, end, hit_character },
             Shooter::Character(npc) => Event::CharacterShot { npc, start, end },
@@ -1118,12 +1150,15 @@ impl Sim {
                 Shooter::Player(a) => (Some(a), if part == combat::BodyPart::Head { Cause::HeadShot } else { Cause::Shot }),
                 Shooter::Character(_) => (None, Cause::Terrorist),
             };
-            self.hurt_player(victim, attacker, combat::damage(part), point, Wound::Shot(part, from), cause, ev);
+            let effect = self.bullet_effect(ammo.as_deref(), part, dist);
+            let hp = self.players[victim].hp;
+            let amount = combat::bullet_damage(effect, part, hp, PLAYER_HP / crate::gfcm::wounds_to_fall(PLAYER_STAMINA) as f32);
+            self.hurt_player(victim, attacker, amount, point, Wound::Shot(part, from), cause, ev);
             ev.push(shot(point, true));
             return;
         }
         let Shooter::Player(slot) = by else {
-            self.strike_level(eye, dir, wall, ev);
+            self.strike_level(eye, dir, wall, Some(&crossed), ev);
             let d = wall.unwrap_or(5000.0);
             ev.push(shot([eye[0] + dir[0] * d, eye[1] + dir[1] * d, eye[2] + dir[2] * d], false));
             return;
@@ -1136,8 +1171,9 @@ impl Sim {
                     mind.seen_at = now;
                     mind.alertness = crate::mission::Alertness::Alert;
                 }
+                let effect = self.bullet_effect(ammo.as_deref(), hit.part, hit.distance);
                 next_rng(&mut self.rng);
-                let result = self.npcs[i].health.apply_hit(&hit, now, (self.rng >> 33) as u32);
+                let result = self.npcs[i].health.apply_hit(&hit, effect, now, (self.rng >> 33) as u32);
                 self.players[slot].target_hp = Some(self.npcs[i].health.hp);
                 ev.push(Event::Log(format!("t={now:.2} shot hit character {i}: {:?} from the {:?}, {:?}, hp now {}", hit.part, hit.facing, result, self.npcs[i].health.hp)));
                 let text = match result {
@@ -1155,16 +1191,51 @@ impl Sim {
                 ev.push(Event::Shot { player: slot, start, end: hit.point, hit_character: true });
             }
             _ => {
-                self.strike_level(eye, dir, wall, ev);
+                self.strike_level(eye, dir, wall, None, ev);
                 let d = wall.unwrap_or(5000.0);
                 ev.push(shot([eye[0] + dir[0] * d, eye[1] + dir[1] * d, eye[2] + dir[2] * d], false));
             }
         }
     }
 
-    /// A bullet striking the level, if `wall` says it does
-    fn strike_level(&mut self, eye: V3, dir: V3, wall: Option<f32>, ev: &mut Vec<Event>) {
-        if let Some(hit) = wall.and_then(|_| self.world.bullet_hit(eye, dir, 20000.0)) {
+    /// What a bullet of `ammo` does to the part of a person it struck `dist` away, rolled: none
+    /// without the game's chart or the ammunition in it
+    fn bullet_effect(&mut self, ammo: Option<&str>, part: combat::BodyPart, dist: f32) -> Option<crate::gfcm::Effect> {
+        let roll = 1 + (next_rng(&mut self.rng) >> 33) as u32 % 100;
+        let gunfire = self.gunfire.as_ref()?;
+        Some(gunfire.effect(gunfire.ammo(ammo?)?, part, dist / 100.0, roll))
+    }
+
+    /// The rooms a person standing at `feet` is in (`hint` is the one they were last in)
+    fn rooms_at(&self, feet: V3, hint: Option<usize>) -> Vec<u32> {
+        self.visibility.player_rooms(&self.level, [feet[0], feet[1] + 50.0, feet[2]], hint)
+    }
+
+    /// The rooms a bullet from `eye` along `dir`, starting in the rooms `from`, flies into
+    /// through the portals it crosses
+    fn flight(&self, eye: V3, dir: V3, from: &[u32]) -> Vec<u32> {
+        let far = [eye[0] + dir[0] * 20000.0, eye[1] + dir[1] * 20000.0, eye[2] + dir[2] * 20000.0];
+        self.visibility.rooms_along(from, &[], eye, far, &self.blocked_portals).unwrap_or_default()
+    }
+
+    /// Whether nothing stops a bullet between `a`, in the rooms `from`, and `b`, in the rooms
+    /// `to`: the line goes from room to room through portals to get there, and strikes none of
+    /// those rooms' faces on the way
+    fn line_clear(&self, a: V3, from: &[u32], b: V3, to: &[u32]) -> bool {
+        let d = dist3(a, b);
+        let Some(rooms) = self.visibility.rooms_along(from, to, a, b, &self.blocked_portals) else { return false };
+        let dir = [(b[0] - a[0]) / d, (b[1] - a[1]) / d, (b[2] - a[2]) / d];
+        self.world.bullet_hit_in(a, dir, d, &rooms).is_none_or(|h| h.dist >= d - 1.0)
+    }
+
+    /// A bullet striking the level, if `wall` says it does: among the faces of `rooms` if
+    /// given, else what is solid around the players
+    fn strike_level(&mut self, eye: V3, dir: V3, wall: Option<f32>, rooms: Option<&[u32]>, ev: &mut Vec<Event>) {
+        let hit = match rooms {
+            Some(rooms) => self.world.bullet_hit_in(eye, dir, 20000.0, rooms),
+            None => self.world.bullet_hit(eye, dir, 20000.0),
+        };
+        if let Some(hit) = wall.and(hit) {
             let point = [eye[0] + dir[0] * hit.dist, eye[1] + dir[1] * hit.dist, eye[2] + dir[2] * hit.dist];
             let surface = self.surface_of(hit.material);
             let material = hit.material.and_then(|m| self.level.materials.materials.get(m)).map_or("?", |m| m.filename.as_str()).to_string();
@@ -1779,6 +1850,8 @@ mod tests {
     fn duel() -> Sim {
         let mut sim = demo();
         sim.pvp = true;
+        // Each part of the body takes so much, so where a bullet lands says what it does
+        sim.gunfire = None;
         sim.spawns = vec![[0.0, 0.0, -350.0], [0.0, 0.0, 350.0]];
         sim.add_player([0.0, 0.0, -100.0]);
         // Standing still a moment closes the spread their shots leave in
@@ -1994,6 +2067,28 @@ mod tests {
         for _ in 0..(seconds / TICK).round() as usize {
             sim.tick(&[*first, *second], TICK);
         }
+    }
+
+    #[test]
+    fn a_bullet_does_what_the_gunfire_chart_rolls_for_it() {
+        let Some(gunfire) = crate::gfcm::read(std::path::Path::new("data/kit/gfcm.txt")).ok().map(Arc::new) else { return };
+        // A chest shot close up: wounds, or kills outright
+        let (mut wounded, mut killed) = (0, 0);
+        for seed in 0..40 {
+            let mut sim = duel();
+            sim.gunfire = Some(gunfire.clone());
+            sim.rng = seed * 7919 + 1;
+            sim.tick(&[aim(-14.6), holding()], TICK);
+            match sim.players[1].hp {
+                hp if hp == 0.0 => killed += 1,
+                hp => {
+                    // A wound is a fifth, as a player takes five
+                    assert!((hp - (PLAYER_HP - PLAYER_HP / 5.0)).abs() < 1e-3, "{hp}");
+                    wounded += 1;
+                }
+            }
+        }
+        assert!(wounded > 5 && killed > 5, "{wounded} wounded, {killed} killed");
     }
 
     #[test]
