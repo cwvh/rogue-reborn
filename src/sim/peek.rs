@@ -3,6 +3,8 @@
 //! 0x5cb6a0), and the eye goes where the head goes, to the side and up or down
 //! (0x5a9ba0, 0x5d67c0). Letting go plays the rest of the motion, which leans back; let go
 //! before the hold and it leans back from as far as it got. Peeking stands the player still.
+//! The lean stops short where a wall is in the way: the original moves the body's cylinder to
+//! the side as far as the head goes, and pauses the motion where that meets a wall (0x5d6670).
 
 /// The motions play at this many frames a second
 const FPS: f32 = 30.0;
@@ -83,17 +85,23 @@ pub struct Peek {
 
 impl Peek {
     /// The peek one tick on with the peek keys held so: one starts when only one of them is
-    /// down, keeps its side until it has played out, and ends when it has
-    pub fn step(peek: Option<Peek>, left: bool, right: bool, crouched: bool, dt: f32) -> Option<Peek> {
+    /// down, keeps its side until it has played out, and ends when it has. `clearance` says how
+    /// far the body would be from the walls moved this far to the right (negative inside one).
+    pub fn step(peek: Option<Peek>, left: bool, right: bool, crouched: bool, dt: f32, clearance: impl Fn(f32) -> f32) -> Option<Peek> {
         let Some(mut p) = peek else {
             return (left != right).then_some(Peek { right, crouched, frame: 0.0, returning: false });
         };
         let m = Motion::of(p.right, p.crouched);
         let held = if p.right { right } else { left };
         if held {
-            // Out to the hold and still there; pressed again while leaning back, it stops where it is
+            // Out to the hold and still there, unless a wall is in the way; pressed again while
+            // leaning back, it stops where it is
             if !p.returning && p.frame < m.hold {
-                p.frame = (p.frame + FPS * dt).min(m.hold);
+                let next = (p.frame + FPS * dt).min(m.hold);
+                let (now, then) = (clearance(m.moved(p.frame)[0]), clearance(m.moved(next)[0]));
+                if then >= 0.0 || then >= now {
+                    p.frame = next;
+                }
             }
             p.returning = false;
             return Some(p);
@@ -123,7 +131,7 @@ mod tests {
 
     fn hold(mut p: Option<Peek>, left: bool, right: bool, seconds: f32) -> Option<Peek> {
         for _ in 0..(seconds / DT).round() as usize {
-            p = Peek::step(p, left, right, false, DT);
+            p = Peek::step(p, left, right, false, DT, |_| f32::INFINITY);
         }
         p
     }
@@ -143,9 +151,27 @@ mod tests {
     #[test]
     fn let_go_on_the_way_out_a_peek_leans_back_from_where_it_got() {
         let half = hold(None, false, true, 0.4).expect("peeking");
-        let back = Peek::step(Some(half), false, false, false, 0.0).expect("leaning back");
+        let back = Peek::step(Some(half), false, false, false, 0.0, |_| f32::INFINITY).expect("leaning back");
         assert!(back.returning);
         assert!((back.eye()[0] - half.eye()[0]).abs() < 4.0, "{:?} from {:?}", back.eye(), half.eye());
+    }
+
+    #[test]
+    fn a_wall_stops_the_lean_short_and_one_behind_lets_it_go() {
+        // A wall 10 units to the left of the body
+        let wall = |side: f32| 10.0 + side;
+        let mut p = None;
+        for _ in 0..120 {
+            p = Peek::step(p, true, false, false, DT, wall);
+        }
+        let side = p.expect("peeking").eye()[0];
+        assert!((-11.0..=-9.0).contains(&side), "{side}");
+        // Already against it, leaning away is no trouble
+        let mut p = None;
+        for _ in 0..120 {
+            p = Peek::step(p, false, true, false, DT, |side: f32| -5.0 + side);
+        }
+        assert_eq!(p.expect("peeking").frame, STANDING_RIGHT.hold);
     }
 
     #[test]

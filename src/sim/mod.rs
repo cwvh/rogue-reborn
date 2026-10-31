@@ -821,8 +821,12 @@ impl Sim {
         let crouched = body.crouched;
         let speed = |m| if crouched { crouched_speed(m) } else { ground_speed(m) };
         let alive = self.players[slot].respawn_at.is_none();
+        // The body moved to the side as far as the head goes has to be clear of the walls
+        let (body, side) = (self.players[slot].player, right(input.look().0));
+        let world = &self.world;
+        let clearance = |by: f32| world.wall_clearance(&Player { pos: [body.pos[0] + side[0] * by, body.pos[1], body.pos[2] - side[2] * by], ..body });
         let peek = &mut self.players[slot].peek;
-        *peek = peek::Peek::step(*peek, input.peek_left && alive, input.peek_right && alive, crouched, dt);
+        *peek = peek::Peek::step(*peek, input.peek_left && alive, input.peek_right && alive, crouched, dt, clearance);
         // Peeking stands the player still
         let still = peek.is_some();
 
@@ -1620,6 +1624,22 @@ mod tests {
         assert!(peeked[0] - eye[0] < -50.0 && peeked[1] < eye[1], "{peeked:?} from {eye:?}");
         run(&mut sim, &holding(), 1.0);
         assert_eq!(sim.eye(0), eye);
+    }
+
+    #[test]
+    fn a_peek_stops_short_at_a_wall() {
+        let mut sim = demo();
+        // 40 from the west wall, which leaves 10 past the body's 30
+        let x = -crate::demo::WIDTH / 2.0 + 40.0;
+        sim.players[0].player.pos[0] = x;
+        run(&mut sim, &holding(), 0.1);
+        let eye = sim.eye(0);
+        run(&mut sim, &Input { peek_left: true, ..holding() }, 1.0);
+        let moved = sim.eye(0)[0] - eye[0];
+        assert!((-11.0..-8.0).contains(&moved), "leaned {moved} into the wall");
+        run(&mut sim, &holding(), 1.0);
+        run(&mut sim, &Input { peek_right: true, ..holding() }, 1.0);
+        assert!(sim.eye(0)[0] - eye[0] > 45.0, "{:?}", sim.eye(0));
     }
 
     #[test]
