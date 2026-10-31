@@ -808,15 +808,14 @@ impl Sim {
             else { -speed(movement::Movement::Back) };
         let side = |right: bool| speed(movement::movement_from_keys(false, false, !right, right, run));
         let side_speed = scale * if a == d { 0.0 } else if d { side(true) } else { -side(false) };
-        let mut vel = [
-            fwd_flat[0] * fwd_speed + right_cam[0] * side_speed,
-            fwd_flat[2] * fwd_speed + right_cam[2] * side_speed,
-        ];
-        // Moving diagonally is no faster than the faster of the two
-        let (len, cap) = ((vel[0] * vel[0] + vel[1] * vel[1]).sqrt(), fwd_speed.abs().max(side_speed.abs()));
-        if len > cap && len > 0.0 {
-            vel = [vel[0] / len * cap, vel[1] / len * cap];
-        }
+        // Forward or back with a side key, the original keeps the forward or back pace and turns
+        // it toward the side by the hips' 27 degrees
+        let (ahead, aside) = if fwd_speed != 0.0 && side_speed != 0.0 {
+            (fwd_speed * movement::HIP_TURN.cos(), fwd_speed.abs() * side_speed.signum() * movement::HIP_TURN.sin())
+        } else {
+            (fwd_speed, side_speed)
+        };
+        let vel = [fwd_flat[0] * ahead + right_cam[0] * aside, fwd_flat[2] * ahead + right_cam[2] * aside];
 
         let before = self.players[slot].player.pos;
         self.world.step(&mut self.players[slot].player, [vel[0] * dt, -vel[1] * dt], dt);
@@ -1559,6 +1558,27 @@ mod tests {
             run(&mut sim, &Input { right: true, run: run_key, ..holding() }, 0.5);
             let side = sim.players[0].player.pos[0] - x;
             assert!((side.abs() - pace * 0.5).abs() < 10.0, "{side} against {pace}");
+        }
+    }
+
+    #[test]
+    fn a_diagonal_goes_27_degrees_off_at_the_forward_or_back_pace() {
+        for (input, pace) in [
+            (Input { forward: true, right: true, ..holding() }, ground_speed(movement::Movement::Run)),
+            (Input { forward: true, left: true, run: false, ..holding() }, ground_speed(movement::Movement::Walk)),
+            (Input { back: true, right: true, ..holding() }, ground_speed(movement::Movement::Back)),
+        ] {
+            let mut sim = demo();
+            let start = sim.players[0].player.pos;
+            run(&mut sim, &input, 0.25);
+            let end = sim.players[0].player.pos;
+            let (dx, dz) = (end[0] - start[0], end[2] - start[2]);
+            let gone = dx.hypot(dz);
+            assert!((gone - pace * 0.25).abs() < 5.0, "{gone} against {pace}");
+            let off = dx.abs().atan2(dz.abs()).to_degrees();
+            assert!((off - 27.0).abs() < 0.5, "{off} degrees off");
+            // To the side the key says, ahead or behind as the other one does
+            assert_eq!(dx > 0.0, input.right, "{dx}");
         }
     }
 

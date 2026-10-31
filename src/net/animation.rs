@@ -14,9 +14,9 @@ const SMOOTHING: f32 = 12.0;
 /// Slower than this (units a second, at normal speed) is standing still
 const STILL: f32 = 60.0;
 
-/// Going more than this far to the side for each unit forward or back (about 11 degrees off) is
-/// going to the side as well
-const SIDEWAYS: f32 = 0.2;
+/// Going more than this far to the side for each unit forward or back (about 13.5 degrees off,
+/// half the 27 a diagonal goes) is going to the side as well
+const SIDEWAYS: f32 = 0.24;
 
 /// Further than this in a frame (or between two snapshots) is not walking but being put somewhere else
 pub const TELEPORT: f32 = 250.0;
