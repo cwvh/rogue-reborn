@@ -34,6 +34,20 @@ pub struct Npc {
     pub stance: Option<Stance>,
     /// Which of `Characters::weapons` is in its hands
     pub weapon: Option<usize>,
+    /// Aiming at a player, which it stands (or kneels) to do, and when it last fired
+    pub aiming: bool,
+    pub last_shot: f32,
+    /// What it knows and holds, as a terrorist: only the game's own copy keeps it
+    pub mind: Option<super::terrorist::Mind>,
+}
+
+impl Default for Npc {
+    fn default() -> Npc {
+        Npc {
+            health: Health::new(), pos: [0.0; 3], floor: 0.0, yaw: 0.0, scale: [1.0; 3], stagger: 0.0,
+            body: None, stance: None, weapon: None, aiming: false, last_shot: f32::NEG_INFINITY, mind: None,
+        }
+    }
 }
 
 /// A skeleton and the skin that follows it
@@ -212,6 +226,17 @@ impl Characters {
     /// skeleton, or a motion to play.
     pub fn bones(&self, npc: &Npc, now: f32, idle_frame: f32) -> Option<Vec<skeleton::Transform>> {
         let skeleton = &self.body(npc).1?.skeleton;
+        // Aiming, the gun up as a player's is when they fire, still between shots
+        if npc.aiming && matches!(npc.health.state, NpcState::Idle) {
+            let firing = now - npc.last_shot < 0.15;
+            let doing = crate::body::Doing {
+                movement: crate::sim::movement::Movement::Fire,
+                frame: 0.0, crouched: super::terrorist::kneels(npc.stance), reloading: None, firing: true, flinch: None, peek: None,
+                hip_turn: 0.0, changing: None, shuffle: None, clock: if firing { now } else { 0.0 },
+            };
+            let pose = crate::body::pose(&self.player, skeleton, &doing)?;
+            return Some(skeleton.pose([0.0, pose.root[1], 0.0], &pose.rotations));
+        }
         let playing = |motion, frame, looping| super::idle::Playing { motion, frame, looping };
         let (now_playing, from) = match (npc.health.state, npc.stance) {
             (NpcState::Idle, Some(stance)) => super::idle::at(stance, npc.stagger.to_bits() as u64, now, |m| self.frames(m)),
@@ -271,7 +296,8 @@ fn dress(member: &crate::mission::Member) -> (crate::kit::Kit, Option<Actor>) {
 /// finds), the members side by side where there is room. Each wears the model their kit names
 /// with their actor's textures, which become `characters`' bodies, holds the kit's weapon, and
 /// waits in their stance.
-pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, world: &CollisionWorld, characters: &mut Characters) -> Vec<Npc> {
+/// They see as far as `sight`, the mission's Max LOS Distance.
+pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, sight: f32, world: &CollisionWorld, characters: &mut Characters) -> Vec<Npc> {
     let mut rng = seed | 1;
     let mut npcs = Vec::new();
     for team in teams.iter().filter(|t| t.terrorists) {
@@ -289,7 +315,14 @@ pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, world: &Colli
             let floor = world.ground_at(p[0], p[2], p[1] + 100.0).unwrap_or(p[1]);
             let (kit, actor) = dress(member);
             let body = kit.model.and_then(|m| characters.add_body(&m, actor.as_ref()));
-            let weapon = kit.weapon.and_then(|w| characters.add_weapon(&w));
+            let weapon = kit.weapon.as_ref().and_then(|(w, _)| characters.add_weapon(w));
+            // Armed, they fight
+            let mind = weapon.and_then(|w| {
+                let (_, wpn) = &characters.weapons[w];
+                let skill = actor.as_ref().map_or(0.5, |a| a.assault / 100.0);
+                let magazines = kit.weapon.as_ref().map_or(1, |(_, n)| *n);
+                Some(super::terrorist::Mind::new(member.alertness, skill, sight, wpn.gun?, wpn.magazine, magazines))
+            });
             let scale = actor.as_ref().map_or([1.0; 3], |a| a.scale);
             let mut npc = Npc {
                 health: Health::new(),
@@ -301,6 +334,8 @@ pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, world: &Colli
                 body,
                 stance: Some(member.stance),
                 weapon,
+                mind,
+                ..Npc::default()
             };
             let feet_to_origin = -characters.body(&npc).0.bounds().0[1];
             npc.pos[1] = floor + feet_to_origin * scale[1];
@@ -334,9 +369,7 @@ pub fn place_npcs(
             yaw: yaw(i, *p),
             scale: actor.map_or([1.0; 3], |a| actors[a].scale),
             stagger: i as f32 * 0.73,
-            body: None,
-            stance: None,
-            weapon: None,
+            ..Npc::default()
         });
         faces.push(actor);
     }
@@ -358,7 +391,7 @@ mod tests {
             let Some((_, teams)) = mission::teams(Path::new(&map_path), Difficulty::Medium) else { continue };
             let level_map = crate::map::read(Path::new(&map_path)).unwrap();
             let world = CollisionWorld::from_map(&level_map, Params::default());
-            let npcs = place_terrorists(&teams, 7, &world, &mut characters);
+            let npcs = place_terrorists(&teams, 7, 4000.0, &world, &mut characters);
             let members: Vec<_> = teams.iter().filter(|t| t.terrorists).flat_map(|t| &t.members).collect();
             assert_eq!(npcs.len(), members.len());
             for (n, m) in npcs.iter().zip(&members) {

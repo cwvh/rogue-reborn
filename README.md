@@ -107,7 +107,7 @@ On other platforms, or without the aliases:
 | `--first-person` | start walking instead of in free-fly |
 | `--textured` | textured instead of wireframe |
 | `--spawn N` | start at the Nth mission spawn point (1-based) |
-| `--difficulty easy\|medium\|hard` | which of the mission's difficulty files places its terrorists (medium by default). On the 18 RM levels the terrorists stand where the mission starts them, a team at one of its places picked at random (`--seed` fixes it), each in the model their kit names, holding its weapon and waiting in their stance; elsewhere, characters stand at the spawn points |
+| `--difficulty easy\|medium\|hard` | which of the mission's difficulty files places its terrorists (medium by default). On the 18 RM levels the terrorists stand where the mission starts them, a team at one of its places picked at random (`--seed` fixes it), each in the model their kit names, holding its weapon and waiting in their stance. A terrorist who sees you turns and fires; elsewhere, characters stand at the spawn points |
 | `--max-fps N` | cap the frame rate (turns vsync off); the default is vsync |
 | `--realistic-decals` | per-surface bullet holes with splinters, sparks and dust, instead of the game's sprites |
 | `--no-sound`, `--volume 0.0-1.0` | sound off, master volume |

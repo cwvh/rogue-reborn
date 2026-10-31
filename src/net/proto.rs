@@ -20,7 +20,7 @@ use crate::sim::{Cause, Event, Input, MAX_PLAYERS, Sim, Struck, TICK, Throw};
 type V3 = [f32; 3];
 
 /// Bumped whenever the messages change, so that a client and server that disagree notice
-pub const PROTOCOL: u8 = 7;
+pub const PROTOCOL: u8 = 8;
 
 const MAGIC: u16 = 0x5252;
 
@@ -130,6 +130,8 @@ pub struct NpcSnap {
     pub yaw: f32,
     pub hp: f32,
     pub state: NpcState,
+    /// Aiming at a player
+    pub aiming: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -197,7 +199,7 @@ impl Snapshot {
             ack_seq,
             culling: sim.culling,
             players,
-            npcs: sim.npcs.iter().map(|n| NpcSnap { pos: n.pos, yaw: n.yaw, hp: n.health.hp, state: n.health.state }).collect(),
+            npcs: sim.npcs.iter().map(|n| NpcSnap { pos: n.pos, yaw: n.yaw, hp: n.health.hp, state: n.health.state, aiming: n.aiming }).collect(),
             thrown: sim.thrown.iter().map(|t| ThrownSnap {
                 owner: t.owner as u8,
                 pos: t.grenade.pos,
@@ -264,6 +266,7 @@ impl Snapshot {
             npc.yaw = s.yaw;
             npc.health.hp = s.hp;
             npc.health.state = s.state;
+            npc.aiming = s.aiming;
         }
 
         sim.thrown = self.thrown.iter().map(|t| crate::sim::Thrown {
@@ -346,6 +349,12 @@ fn write_event(w: &mut Writer, e: &Event) -> bool {
             w.v3(*end);
             w.bool(*hit_character);
         }
+        Event::CharacterShot { npc, start, end } => {
+            w.u8(7);
+            w.u16(*npc as u16);
+            w.v3(*start);
+            w.v3(*end);
+        }
         Event::BulletHit { point, normal, dir, surface, material, dist, seed } => {
             w.u8(2);
             w.v3(*point);
@@ -381,7 +390,7 @@ fn write_event(w: &mut Writer, e: &Event) -> bool {
             w.u8(6);
             w.u8(killer.map_or(255, |k| k as u8));
             w.u8(*victim as u8);
-            w.u8(match cause { Cause::Shot => 0, Cause::HeadShot => 1, Cause::Grenade => 2 });
+            w.u8(match cause { Cause::Shot => 0, Cause::HeadShot => 1, Cause::Grenade => 2, Cause::Terrorist => 3 });
         }
     }
     true
@@ -401,8 +410,9 @@ fn read_event(r: &mut Reader) -> Result<Event> {
         6 => Event::Kill {
             killer: Some(r.u8()?).filter(|&k| k != 255).map(|k| k as usize),
             victim: r.u8()? as usize,
-            cause: match r.u8()? { 0 => Cause::Shot, 1 => Cause::HeadShot, 2 => Cause::Grenade, c => bail!("no such cause of death as {c}") },
+            cause: match r.u8()? { 0 => Cause::Shot, 1 => Cause::HeadShot, 2 => Cause::Grenade, 3 => Cause::Terrorist, c => bail!("no such cause of death as {c}") },
         },
+        7 => Event::CharacterShot { npc: r.u16()? as usize, start: r.v3()?, end: r.v3()? },
         t => bail!("no such event as {t}"),
     })
 }
@@ -706,22 +716,26 @@ fn write_npc(w: &mut Writer, n: &NpcSnap) {
     w.v3(n.pos);
     w.f32(n.yaw);
     w.f32(n.hp);
+    // Aiming is the state's top bit
+    let aiming = if n.aiming { 0x80 } else { 0 };
     match n.state {
-        NpcState::Idle => w.u8(0),
-        NpcState::Reacting { motion, start } => { w.u8(1); w.u8(motion_byte(motion)); w.f32(start); }
-        NpcState::Dead { motion, start } => { w.u8(2); w.u8(motion_byte(motion)); w.f32(start); }
+        NpcState::Idle => w.u8(aiming),
+        NpcState::Reacting { motion, start } => { w.u8(1 | aiming); w.u8(motion_byte(motion)); w.f32(start); }
+        NpcState::Dead { motion, start } => { w.u8(2 | aiming); w.u8(motion_byte(motion)); w.f32(start); }
     }
 }
 
 fn read_npc(r: &mut Reader) -> Result<NpcSnap> {
     let (pos, yaw, hp) = (r.v3()?, r.f32()?, r.f32()?);
-    let state = match r.u8()? {
+    let byte = r.u8()?;
+    let aiming = byte & 0x80 != 0;
+    let state = match byte & 0x7f {
         0 => NpcState::Idle,
         1 => NpcState::Reacting { motion: motion_from(r.u8()?)?, start: r.f32()? },
         2 => NpcState::Dead { motion: motion_from(r.u8()?)?, start: r.f32()? },
         s => bail!("no such state as {s}"),
     };
-    Ok(NpcSnap { pos, yaw, hp, state })
+    Ok(NpcSnap { pos, yaw, hp, state, aiming })
 }
 
 fn write_thrown(w: &mut Writer, t: &ThrownSnap) {
@@ -1038,9 +1052,9 @@ mod tests {
             tick: 900, time: 15.0, ack_seq: 777, culling: true,
             players: vec![player(0), PlayerSnap { message: None, target_hp: None, ..player(3) }],
             npcs: vec![
-                NpcSnap { pos: [1.0, 0.0, 2.0], yaw: 30.0, hp: 100.0, state: NpcState::Idle },
-                NpcSnap { pos: [2.0, 0.0, 2.0], yaw: 60.0, hp: 40.0, state: NpcState::Reacting { motion: "thwu_bf", start: 14.5 } },
-                NpcSnap { pos: [3.0, 0.0, 2.0], yaw: 90.0, hp: 0.0, state: NpcState::Dead { motion: "hw_bk_up2", start: 12.0 } },
+                NpcSnap { pos: [1.0, 0.0, 2.0], yaw: 30.0, hp: 100.0, state: NpcState::Idle, aiming: true },
+                NpcSnap { pos: [2.0, 0.0, 2.0], yaw: 60.0, hp: 40.0, state: NpcState::Reacting { motion: "thwu_bf", start: 14.5 }, aiming: true },
+                NpcSnap { pos: [3.0, 0.0, 2.0], yaw: 90.0, hp: 0.0, state: NpcState::Dead { motion: "hw_bk_up2", start: 12.0 }, aiming: false },
             ],
             thrown: vec![ThrownSnap { owner: 1, pos: [5.0; 3], vel: [1.0, 2.0, 3.0], fuse: 1.5, spin: 40.0, at_rest: false }],
             doors: vec![(0.0, false), (0.5, true), (1.0, true)],
@@ -1054,6 +1068,8 @@ mod tests {
                 (15, Event::PlayerBlast { player: 1, shake: 0.5, veil: 0.25 }),
                 (16, Event::Kill { killer: Some(0), victim: 1, cause: Cause::HeadShot }),
                 (17, Event::Kill { killer: None, victim: 1, cause: Cause::Grenade }),
+                (18, Event::Kill { killer: None, victim: 0, cause: Cause::Terrorist }),
+                (19, Event::CharacterShot { npc: 300, start: [1.0; 3], end: [2.0; 3] }),
             ],
         }
     }
@@ -1074,12 +1090,12 @@ mod tests {
         }
         let mut snap = snapshot();
         let (bytes, sent) = ToClient::Snapshot(snap.clone()).encode();
-        assert_eq!(sent, 8);
+        assert_eq!(sent, 10);
         assert_eq!(ToClient::decode(&bytes).unwrap(), ToClient::Snapshot(snap.clone()));
         // The server's own log is not sent, and does not count against what was not
         snap.events.insert(1, (99, Event::Log("t=1.00 door opening".to_string())));
         let (bytes, sent) = ToClient::Snapshot(snap.clone()).encode();
-        assert_eq!(sent, 9);
+        assert_eq!(sent, 11);
         snap.events.remove(1);
         assert_eq!(ToClient::decode(&bytes).unwrap(), ToClient::Snapshot(snap));
         for m in [
@@ -1131,7 +1147,7 @@ mod tests {
         let mut snap = snapshot();
         // Only the receiver's own player carries what is on their screen
         snap.players = (0..MAX_PLAYERS as u8).map(|i| if i == 0 { player(0) } else { PlayerSnap { message: None, target_hp: None, aim: None, ..player(i) } }).collect();
-        snap.npcs = (0..16).map(|_| NpcSnap { pos: [1.0; 3], yaw: 1.0, hp: 1.0, state: NpcState::Reacting { motion: "thwu_bb", start: 1.0 } }).collect();
+        snap.npcs = (0..16).map(|_| NpcSnap { pos: [1.0; 3], yaw: 1.0, hp: 1.0, state: NpcState::Reacting { motion: "thwu_bb", start: 1.0 }, aiming: true }).collect();
         snap.events.clear();
         let (bytes, _) = ToClient::Snapshot(snap).encode();
         assert!(bytes.len() < MAX_PACKET - 40, "{} bytes before any events", bytes.len());

@@ -187,10 +187,21 @@ Small enough to try out on the maps we play, and grow from:
    33 to 90 any other way), its members side by side, each in the model their kit names with their
    actor's textures, the kit's weapon (the primary, or else the secondary) in the right hand,
    waiting in their stance with its rests and fidgets. Still to do: smoking, drinking and
-   talking, dropping the weapon on dying, hit reactions that start from their stance, and
-   alertness.
-2. Seeing, as above: field of view, range, glimpses, visibility and line of sight.
-3. Reacting to a player in view: turn toward them and fire, after a delay and with a spread to be
-   read from the exe (and the skills); reload; take wounds and die as the characters do now.
+   talking, dropping the weapon on dying, and hit reactions that start from their stance.
+2. Seeing, as above: field of view and range from their alertness and the mission's Max LOS
+   Distance, the player's visibility (crouched, moving) and line of sight. Done (sim::terrorist),
+   but for glimpses (a player they are already after they keep seeing out to the glimpse range)
+   and the light. Guessed: a normal view of 90 degrees and a close radius of 200 units. Seeing a
+   player makes them alert, and so does being shot by one, who becomes their target.
+3. Reacting to a player in view: turn toward them and fire. Done: they turn at 180 degrees a second
+   (a guess), aim through the spread above with their weapon's numbers and their Assault skill,
+   and pull the trigger by the rule above once they face the player, at their head if they shoot
+   well and else their middle. The spread opening with each shot makes bursts of the automatics.
+   Shots are as fast as the kind of weapon (guesses: 600 a minute for automatics, a pistol 0.3 s,
+   a sniper's rifle 0.6 s, a shotgun 0.8 s) and hurt as players' bullets do, with the weapon's own
+   sound. They reload when the magazine is empty, from the magazines the kit gives them.
+   They stand, or kneel when squatting or kneeling, with the gun up as a player fires.
+   Still to do: the delay the original may add before reacting, a reload and the weapons' own
+   holds in their bodies, shotguns' pellets, and the ammunition's damage.
 4. Then hearing (gunfire, footsteps), the guard and patrol plans (GuardSpot, MoveTo loops),
    triggers, and moving to cover.

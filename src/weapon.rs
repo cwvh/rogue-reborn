@@ -2,13 +2,17 @@
 //!
 //! Text files, one value per line, with no field names. Only the fields
 //! worked out so far are read: the magazine size and reserve ammunition
-//! (the first two integer-only lines), the model file (the first quoted
-//! `.qob`) and the muzzle offset in model space (the first line of three
-//! numbers after it).
+//! (the first two integer-only lines), the sound of a shot (the first `.wav`),
+//! the kind of weapon and how it reloads (the two lines after the sounds), the
+//! model file (the first quoted `.qob`), the muzzle offset in model space (the
+//! first line of three numbers after it), and after the ammunition's name the
+//! numbers its spread is worked out from (see `sim::aim`).
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
+
+use crate::sim::aim::Gun;
 
 #[derive(Clone, Debug)]
 pub struct Weapon {
@@ -19,6 +23,27 @@ pub struct Weapon {
     pub model: String,
     /// Where bullets leave the weapon, in model space
     pub muzzle: [f32; 3],
+    /// The sound of one shot
+    pub sound: Option<String>,
+    /// "long arm", "compact", "machine pistol", "sniper" or "pistol"
+    pub class: String,
+    /// How it reloads: "subgun", "shotgun", "pistol" or "bolt action"
+    pub reload_class: String,
+    pub gun: Option<Gun>,
+}
+
+impl Weapon {
+    /// Seconds between shots with the trigger held. The file does not say it plainly, so these
+    /// are guesses by the kind of weapon: the automatics at 600 rounds a minute.
+    pub fn interval(&self) -> f32 {
+        match (self.class.as_str(), self.reload_class.as_str()) {
+            (_, "shotgun") => 0.8,
+            (_, "bolt action") => 1.5,
+            ("sniper", _) => 0.6,
+            ("pistol", _) => 0.3,
+            _ => 0.1,
+        }
+    }
 }
 
 pub fn read(path: &Path) -> Result<Weapon> {
@@ -37,13 +62,26 @@ pub fn parse(text: &str) -> Result<Weapon> {
         l.trim_matches('"').to_ascii_lowercase().ends_with(".qob") && l.starts_with('"')
     }).context("model not found")?;
     let model = lines[model_at].trim_matches('"').to_string();
+    let word = |i: Option<usize>| i.and_then(|i| lines.get(i)).map_or_else(String::new, |l| l.trim_matches('"').to_ascii_lowercase());
+    let (class, reload_class) = (word(model_at.checked_sub(3)), word(model_at.checked_sub(2)));
+    let sound = lines.iter().find(|l| l.to_ascii_lowercase().ends_with(".wav\"")).map(|l| l.trim_matches('"').to_string());
 
     let muzzle = lines[model_at + 1..].iter().find_map(|l| {
         let v: Vec<f32> = l.split_whitespace().filter_map(|n| n.parse().ok()).collect();
         (v.len() == 3 && l.split_whitespace().count() == 3).then(|| [v[0], v[1], v[2]])
     }).context("muzzle not found")?;
 
-    Ok(Weapon { id, magazine, reserve, model, muzzle })
+    // After the muzzle, the ammunition's name, then the spread's numbers
+    let ammo_at = lines[model_at + 1..].iter().position(|l| l.starts_with('"')).map(|i| model_at + 1 + i);
+    let numbers: Vec<f32> = ammo_at.map_or_else(Vec::new, |a| lines[a + 1..].iter().map_while(|l| l.parse().ok()).take(8).collect());
+    let gun = (numbers.len() == 8).then(|| Gun {
+        moving: [numbers[0], numbers[1], numbers[2], numbers[3], numbers[4]],
+        crouched: numbers[5],
+        recoil: numbers[6],
+        close: numbers[7],
+    });
+
+    Ok(Weapon { id, magazine, reserve, model, muzzle, sound, class, reload_class, gun })
 }
 
 #[cfg(test)]
@@ -61,6 +99,11 @@ mod tests {
         assert_eq!((w.magazine, w.reserve), (30, 900));
         assert_eq!(w.model, "rsw_mp5k.qob");
         assert_eq!(w.muzzle, [0.0, -43.0, 13.0]);
+        assert_eq!(w.sound.as_deref(), Some("C_sb5ks.wav"));
+        assert_eq!((w.class.as_str(), w.reload_class.as_str()), ("compact", "subgun"));
+        // What sim::aim has for it
+        let (gun, mp5k) = (w.gun.unwrap(), crate::sim::aim::MP5K);
+        assert_eq!((gun.moving, gun.crouched, gun.recoil, gun.close), (mp5k.moving, mp5k.crouched, mp5k.recoil, mp5k.close));
     }
 
     #[test]

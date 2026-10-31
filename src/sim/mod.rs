@@ -12,6 +12,7 @@ pub mod characters;
 pub mod idle;
 pub mod movement;
 pub mod peek;
+pub mod terrorist;
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -213,6 +214,15 @@ pub enum Cause {
     Shot,
     HeadShot,
     Grenade,
+    /// A terrorist shot them
+    Terrorist,
+}
+
+/// Who fired a bullet: a player, or one of the characters
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Shooter {
+    Player(usize),
+    Character(usize),
 }
 
 /// Something that happened in a tick
@@ -224,6 +234,8 @@ pub enum Event {
     Log(String),
     /// A player fired: where the shot left and where it ended, and whether it struck a character
     Shot { player: usize, start: V3, end: V3, hit_character: bool },
+    /// A character fired: where the shot left and where it ended
+    CharacterShot { npc: usize, start: V3, end: V3 },
     /// A bullet struck the level. `seed` is for the effects it makes, `dist` how far it flew.
     BulletHit { point: V3, normal: V3, dir: V3, surface: Surface, material: String, dist: f32, seed: u64 },
     /// A pane broke where `at` is, struck along `dir`
@@ -616,6 +628,16 @@ impl Sim {
             h.f32(n.floor);
             h.f32(n.yaw);
             h.f32(n.health.hp);
+            h.u32(n.aiming as u32);
+            h.f32(n.last_shot);
+            if let Some(m) = &n.mind {
+                h.u32(m.target.map_or(u32::MAX, |t| t as u32));
+                h.f32(m.seen_at);
+                h.f32(m.aim.angle);
+                h.u32(m.ammo + (m.magazines << 16));
+                h.opt_f32(m.reload_until);
+                h.f32(m.next_shot);
+            }
             match n.health.state {
                 combat::NpcState::Idle => h.u32(0),
                 combat::NpcState::Reacting { motion, start } => { h.u32(1); h.bytes(motion.as_bytes()); h.f32(start); }
@@ -789,6 +811,8 @@ impl Sim {
                 }
             }
         }
+        // The terrorists see the players where they have moved to, and fire
+        self.terrorists(dt, &mut ev);
 
         self.apply_union_rooms();
         self.update_grenades(dt, &mut ev);
@@ -1033,11 +1057,18 @@ impl Sim {
         let (off, round) = self.players[slot].aim.throw(u);
         self.players[slot].aim.fired();
         let dir = deflect(aimed, off, round);
+        self.bullet(eye, dir, Shooter::Player(slot), ev);
+    }
+
+    /// A bullet from `eye` along the unit vector `dir`, and what it strikes: a player, a
+    /// character (a player's bullet), glass, which it breaks and goes on through, or the level
+    fn bullet(&mut self, eye: V3, dir: V3, by: Shooter, ev: &mut Vec<Event>) {
+        let now = self.time;
         // Through the faces bullets pass, such as a chain fence
         let mut wall = self.world.bullet_hit(eye, dir, 20000.0).map(|h| h.dist);
 
         let mut best: Option<(usize, combat::Hit)> = None;
-        if let Some(chars) = &self.characters {
+        if let (Some(chars), Shooter::Player(_)) = (&self.characters, by) {
             for (i, npc) in self.npcs.iter().enumerate() {
                 if npc.health.is_dead() {
                     continue;
@@ -1050,7 +1081,7 @@ impl Sim {
             }
         }
 
-        let hit_player = self.player_hit(slot, eye, dir);
+        let hit_player = self.player_hit(by, eye, dir);
 
         // Glass in the way breaks and lets the bullet through
         loop {
@@ -1076,16 +1107,35 @@ impl Sim {
         let start = [eye[0] + dir[0] * 30.0, eye[1] + dir[1] * 30.0 - 8.0, eye[2] + dir[2] * 30.0];
         // Another player in the way, nearer than whatever else was hit
         let hit_player = hit_player.filter(|h| wall.is_none_or(|w| h.1 <= w) && best.as_ref().is_none_or(|(_, b)| h.1 < b.distance));
+        let shot = |end: V3, hit_character: bool| match by {
+            Shooter::Player(player) => Event::Shot { player, start, end, hit_character },
+            Shooter::Character(npc) => Event::CharacterShot { npc, start, end },
+        };
         if let Some((victim, dist, part)) = hit_player {
             let point = [eye[0] + dir[0] * dist, eye[1] + dir[1] * dist, eye[2] + dir[2] * dist];
             let from = self.placement(victim).facing_of_shot(dir);
-            let cause = if part == combat::BodyPart::Head { Cause::HeadShot } else { Cause::Shot };
-            self.hurt_player(victim, Some(slot), combat::damage(part), point, Wound::Shot(part, from), cause, ev);
-            ev.push(Event::Shot { player: slot, start, end: point, hit_character: true });
+            let (attacker, cause) = match by {
+                Shooter::Player(a) => (Some(a), if part == combat::BodyPart::Head { Cause::HeadShot } else { Cause::Shot }),
+                Shooter::Character(_) => (None, Cause::Terrorist),
+            };
+            self.hurt_player(victim, attacker, combat::damage(part), point, Wound::Shot(part, from), cause, ev);
+            ev.push(shot(point, true));
             return;
         }
+        let Shooter::Player(slot) = by else {
+            self.strike_level(eye, dir, wall, ev);
+            let d = wall.unwrap_or(5000.0);
+            ev.push(shot([eye[0] + dir[0] * d, eye[1] + dir[1] * d, eye[2] + dir[2] * d], false));
+            return;
+        };
         match best {
             Some((i, hit)) if wall.map_or(true, |w| hit.distance <= w) => {
+                // Shot, they turn on whoever shot them
+                if let Some(mind) = self.npcs[i].mind.as_mut() {
+                    mind.target = Some(slot);
+                    mind.seen_at = now;
+                    mind.alertness = crate::mission::Alertness::Alert;
+                }
                 next_rng(&mut self.rng);
                 let result = self.npcs[i].health.apply_hit(&hit, now, (self.rng >> 33) as u32);
                 self.players[slot].target_hp = Some(self.npcs[i].health.hp);
@@ -1105,17 +1155,21 @@ impl Sim {
                 ev.push(Event::Shot { player: slot, start, end: hit.point, hit_character: true });
             }
             _ => {
-                // The bullet struck the level
-                if let Some(hit) = wall.and_then(|_| self.world.bullet_hit(eye, dir, 20000.0)) {
-                    let point = [eye[0] + dir[0] * hit.dist, eye[1] + dir[1] * hit.dist, eye[2] + dir[2] * hit.dist];
-                    let surface = self.surface_of(hit.material);
-                    let material = hit.material.and_then(|m| self.level.materials.materials.get(m)).map_or("?", |m| m.filename.as_str()).to_string();
-                    next_rng(&mut self.rng);
-                    ev.push(Event::BulletHit { point, normal: hit.normal, dir, surface, material, dist: hit.dist, seed: self.rng });
-                }
+                self.strike_level(eye, dir, wall, ev);
                 let d = wall.unwrap_or(5000.0);
-                ev.push(Event::Shot { player: slot, start, end: [eye[0] + dir[0] * d, eye[1] + dir[1] * d, eye[2] + dir[2] * d], hit_character: false });
+                ev.push(shot([eye[0] + dir[0] * d, eye[1] + dir[1] * d, eye[2] + dir[2] * d], false));
             }
+        }
+    }
+
+    /// A bullet striking the level, if `wall` says it does
+    fn strike_level(&mut self, eye: V3, dir: V3, wall: Option<f32>, ev: &mut Vec<Event>) {
+        if let Some(hit) = wall.and_then(|_| self.world.bullet_hit(eye, dir, 20000.0)) {
+            let point = [eye[0] + dir[0] * hit.dist, eye[1] + dir[1] * hit.dist, eye[2] + dir[2] * hit.dist];
+            let surface = self.surface_of(hit.material);
+            let material = hit.material.and_then(|m| self.level.materials.materials.get(m)).map_or("?", |m| m.filename.as_str()).to_string();
+            next_rng(&mut self.rng);
+            ev.push(Event::BulletHit { point, normal: hit.normal, dir, surface, material, dist: hit.dist, seed: self.rng });
         }
     }
 
@@ -1277,17 +1331,20 @@ impl Sim {
 
     /// The nearest other player that a bullet from `eye` along `dir` hits, if players can be
     /// hit: who, how far along, and where on the body
-    fn player_hit(&self, shooter: usize, eye: V3, dir: V3) -> Option<(usize, f32, combat::BodyPart)> {
-        if !self.pvp {
-            return None;
-        }
+    fn player_hit(&self, by: Shooter, eye: V3, dir: V3) -> Option<(usize, f32, combat::BodyPart)> {
+        // Players hurt each other only when the game says they can; characters always can, and
+        // see players where they are, with no looking back
+        let (shooter, back) = match by {
+            Shooter::Player(_) if !self.pvp => return None,
+            Shooter::Player(s) => (Some(s), self.rewind.get(s).copied().unwrap_or(0.0)),
+            Shooter::Character(_) => (None, 0.0),
+        };
         let a = dir[0] * dir[0] + dir[2] * dir[2];
         if a < 1e-9 {
             return None;
         }
-        let back = self.rewind.get(shooter).copied().unwrap_or(0.0);
         (0..self.players.len())
-            .filter(|&i| i != shooter && self.players[i].active && self.players[i].respawn_at.is_none())
+            .filter(|&i| Some(i) != shooter && self.players[i].active && self.players[i].respawn_at.is_none())
             .filter_map(|i| {
                 // Where the shooter saw the body
                 let seen = self.seen_then(i, back)?;
@@ -1416,12 +1473,13 @@ impl Sim {
                 self.players[a].kills += 1;
                 let text = match cause {
                     Cause::HeadShot => "HEAD SHOT KILL",
-                    Cause::Shot => "KILLED",
+                    Cause::Shot | Cause::Terrorist => "KILLED",
                     Cause::Grenade => "GRENADE KILL",
                 };
                 self.announce(a, text, 1.2);
                 self.announce(victim, &format!("KILLED BY PLAYER {}", a + 1), RESPAWN_SECONDS);
             }
+            None if cause == Cause::Terrorist => self.announce(victim, "KILLED BY A TERRORIST", RESPAWN_SECONDS),
             None => self.announce(victim, "YOU KILLED YOURSELF", RESPAWN_SECONDS),
         }
         ev.push(Event::Log(format!("t={now:.2} player {victim} died")));
@@ -1895,7 +1953,7 @@ mod tests {
         let target = sim.players[1].player.pos;
         let from = [target[0] + aside, target[1] + height, sim.players[0].player.pos[2]];
         let dir = unit3([0.0, 0.0, target[2] - from[2]]);
-        sim.player_hit(0, from, dir).map(|h| h.2)
+        sim.player_hit(Shooter::Player(0), from, dir).map(|h| h.2)
     }
 
     #[test]

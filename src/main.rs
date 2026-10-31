@@ -441,7 +441,7 @@ fn main() {
     let (npcs, npc_actor) = match (&joined, &mut characters, args.no_models, &mission_file) {
         (_, Some(c), false, Some(path)) => match mission::read(path) {
             Ok(teams) => {
-                let npcs = place_terrorists(&teams, seed, &world, c);
+                let npcs = place_terrorists(&teams, seed, mission::max_los(path), &world, c);
                 println!("{} terrorists from {}", npcs.len(), path.display());
                 let n = npcs.len();
                 (npcs, vec![None; n])
@@ -453,7 +453,7 @@ fn main() {
         },
         (Some(s), _, _, _) => (
             s.npcs.iter().map(|n| Npc {
-                health: combat::Health::new(), pos: n.pos, floor: n.floor, yaw: n.yaw, scale: n.scale, stagger: n.stagger, body: None, stance: None, weapon: None,
+                health: combat::Health::new(), pos: n.pos, floor: n.floor, yaw: n.yaw, scale: n.scale, stagger: n.stagger, ..Npc::default()
             }).collect(),
             s.npcs.iter().map(|n| n.actor.map(|a| a as usize)).collect(),
         ),
@@ -1014,6 +1014,12 @@ fn main() {
                         tracer = Some((start, end, hit_character, game_time + 0.1));
                     }
                 }
+                // A character fired: its muzzle flashes, here as on the server
+                sim::Event::CharacterShot { npc, .. } => {
+                    if let Some(n) = sim.npcs.get_mut(npc) {
+                        n.last_shot = game_time;
+                    }
+                }
                 sim::Event::BulletHit { point, normal, dir, surface, material, dist, seed } => {
                     // The bullet struck the level: leave a hole and throw some debris
                     let surface = args.decal_surface.unwrap_or(surface);
@@ -1104,6 +1110,7 @@ fn main() {
                         (Some(k), sim::Cause::HeadShot) => format!("{} HEAD SHOT {}", who(k), who(victim)),
                         (Some(k), sim::Cause::Shot) => format!("{} SHOT {}", who(k), who(victim)),
                         (Some(k), sim::Cause::Grenade) => format!("{} BLEW UP {}", who(k), who(victim)),
+                        (_, sim::Cause::Terrorist) => format!("A TERRORIST SHOT {}", who(victim)),
                         (None, _) => format!("{} KILLED THEMSELVES", who(victim)),
                     };
                     let color = if victim == me { [1.0, 0.35, 0.3] } else if killer == Some(me) { [1.0, 0.85, 0.3] } else { [1.0, 1.0, 1.0] };
@@ -1576,7 +1583,7 @@ fn main() {
                         glPushMatrix();
                         glMultMatrixf(bones[*hand].matrix().as_ptr());
                         glMultMatrixf(off.matrix().as_ptr());
-                        draw_weapon(wd, textured, false);
+                        draw_weapon(wd, textured, game_time - spot.last_shot < 0.05);
                         glPopMatrix();
                     }
                     glPopMatrix();
@@ -1716,9 +1723,7 @@ fn main() {
                         yaw: -yaw,
                         scale: [1.0; 3],
                         stagger: slot as f32 * 0.73,
-                        body: None,
-                        stance: None,
-                        weapon: None,
+                        ..Npc::default()
                     };
                     let idle = game_time * 30.0 + ghost.stagger * 9.0;
                     let posed = chars.pose(&ghost, view_time, idle);
@@ -1759,7 +1764,7 @@ fn main() {
                             let yaw = -sim::dequantize(p.look.0);
                             let scale = actors.get(slot % actors.len().max(1)).map_or([1.0; 3], |a| a.scale);
                             let pos = p.player.pos;
-                            corpses.insert(slot, (hit.start, Npc { health, pos, floor: pos[1], yaw, scale, stagger: 0.0, body: None, stance: None, weapon: None }));
+                            corpses.insert(slot, (hit.start, Npc { health, pos, floor: pos[1], yaw, scale, stagger: 0.0, body: None, ..Npc::default() }));
                         }
                     }
                 }

@@ -25,6 +25,8 @@ pub struct Actor {
     pub sex: Sex,
     /// Per-axis model scale
     pub scale: [f32; 3],
+    /// Their Assault skill, out of 100: how well they shoot
+    pub assault: f32,
     /// Face texture file names (`.bmp` in the file; the game data has them as
     /// `.rsb` in `data/texture/faces`)
     pub hrt_face: Option<String>,
@@ -65,6 +67,7 @@ pub fn parse(id: &str, text: &str) -> Actor {
         name: id.to_string(),
         sex: Sex::Male,
         scale: [1.0; 3],
+        assault: 50.0,
         hrt_face: None,
         camo_face: None,
         desert_face: None,
@@ -84,6 +87,10 @@ pub fn parse(id: &str, text: &str) -> Actor {
             actor.name = unquoted;
         } else if comment.starts_with("sex") {
             actor.sex = if unquoted.eq_ignore_ascii_case("female") { Sex::Female } else { Sex::Male };
+        } else if comment.starts_with("assault") {
+            if let Ok(v) = value.parse() {
+                actor.assault = v;
+            }
         } else if comment.starts_with("scale") {
             // Team members' are written 1, .97, 1 and the others' 1.00 1.00 1.0
             let v: Vec<f32> = value.split([',', ' ', '\t']).filter_map(|n| n.trim().parse().ok()).collect();
@@ -166,8 +173,8 @@ mod tests {
         let text = "1.00 1.00 1.0\t// Scale\n\"arab_cat1_teyes_2.rsb\"\t// Eye texture\n\
                     \"none.bmp\"\t// Lip texture\n\"arab_cat1_tchest.rsb\"\t// Chest texture\n\
                     \"arab_cat1_thair_2.rsb\"\t// Hair texture\n";
-        let a = parse("TER_arab_cat1_03", text);
-        assert_eq!(a.scale, [1.0; 3]);
+        let a = parse("TER_arab_cat1_03", &format!("{text}25\t\t// Assault\n"));
+        assert_eq!((a.scale, a.assault), ([1.0; 3], 25.0));
         assert_eq!(a.texture_for("arab_cat1_teyes.bmp"), Some("arab_cat1_teyes_2.rsb"));
         // none.bmp keeps the model's own, and other parts keep theirs
         assert_eq!(a.texture_for("arab_cat1_tlips.bmp"), None);

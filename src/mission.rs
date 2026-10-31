@@ -61,6 +61,21 @@ impl Stance {
     }
 }
 
+/// How watchful a character is, which sets how wide and far they see (see `sim::terrorist`)
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Alertness {
+    #[default]
+    Bored,
+    Ready,
+    Alert,
+}
+
+impl Alertness {
+    pub fn parse(s: &str) -> Option<Alertness> {
+        [Alertness::Bored, Alertness::Ready, Alertness::Alert].into_iter().find(|a| format!("{a:?}").eq_ignore_ascii_case(s))
+    }
+}
+
 /// One of a team's characters
 #[derive(Clone, Debug, PartialEq)]
 pub struct Member {
@@ -69,8 +84,7 @@ pub struct Member {
     pub actor: String,
     /// The kit file (`data/kit`): their weapons and model
     pub kit: String,
-    /// Bored, Ready or Alert
-    pub alertness: String,
+    pub alertness: Alertness,
     pub stance: Stance,
 }
 
@@ -96,6 +110,22 @@ pub fn teams(map_path: &Path, difficulty: Difficulty) -> Option<(PathBuf, Vec<Te
             None
         }
     }
+}
+
+/// How far the mission's characters see, from the mission file beside a difficulty file
+/// (`RM01Med.mdf` has `RM01.mis`): its Max LOS Distance, 4000 when it does not say
+pub fn max_los(difficulty_file: &Path) -> f32 {
+    let stem = difficulty_file.file_stem().map_or_else(String::new, |s| s.to_string_lossy().to_string());
+    let level = ["Easy", "Med", "Hard"].iter().find_map(|d| stem.strip_suffix(d)).unwrap_or(&stem);
+    let dir = difficulty_file.parent().unwrap_or(Path::new("."));
+    crate::util::find_file(dir, level, "mis")
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|bytes| {
+            String::from_utf8_lossy(&bytes).lines()
+                .find(|l| l.to_ascii_lowercase().contains("// max los distance"))
+                .and_then(|l| l.split("//").next()?.trim().parse().ok())
+        })
+        .unwrap_or(4000.0)
 }
 
 /// The difficulty file of the mission on the level at `map_path` (`RM01.map` is `RM01Med.mdf`),
@@ -147,6 +177,7 @@ pub fn parse(text: &str) -> Result<Vec<Team>> {
             let kit = field("the kit file")?;
             field("whether they are a primary objective")?;
             let alertness = field("their alertness")?;
+            let alertness = Alertness::parse(&alertness).unwrap_or_default();
             field("their radio")?;
             let stance = field("their stance")?;
             // The original stands a character whose stance it does not know (0x598cd0)
@@ -190,8 +221,8 @@ mod tests {
         let t = &teams[0];
         assert!(t.terrorists);
         assert_eq!(t.name, "Response Team");
-        assert_eq!(t.members.iter().map(|m| (m.name.as_str(), m.stance, m.alertness.as_str())).collect::<Vec<_>>(),
-            [("Response #1", Stance::Stand, "Bored"), ("Response #2", Stance::Kneel, "Ready")]);
+        assert_eq!(t.members.iter().map(|m| (m.name.as_str(), m.stance, m.alertness)).collect::<Vec<_>>(),
+            [("Response #1", Stance::Stand, Alertness::Bored), ("Response #2", Stance::Kneel, Alertness::Ready)]);
         assert_eq!(t.members[1].kit, "TER_arab_cat1_AK47.kit");
         assert_eq!(t.starts, [([29809.5, 32777.0, 34509.1], 0.0), ([31424.4, 32777.0, 34336.0], 64.0)]);
         assert_eq!(t.plans, ["BeginPlan", "ROE Investigate", "EndPlan"]);
@@ -208,5 +239,13 @@ mod tests {
             read += 1;
         }
         assert!(read == 0 || read == 54, "{read} missions");
+    }
+
+    #[test]
+    fn a_mission_says_how_far_its_characters_see() {
+        let path = Path::new("data/mission/RM02Med.mdf");
+        if path.exists() {
+            assert_eq!(max_los(path), 4000.0);
+        }
     }
 }
