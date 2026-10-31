@@ -20,7 +20,7 @@ use crate::sim::{Cause, Event, Input, MAX_PLAYERS, Sim, Struck, TICK, Throw};
 type V3 = [f32; 3];
 
 /// Bumped whenever the messages change, so that a client and server that disagree notice
-pub const PROTOCOL: u8 = 6;
+pub const PROTOCOL: u8 = 7;
 
 const MAGIC: u16 = 0x5252;
 
@@ -57,6 +57,9 @@ pub struct Setup {
     /// Whether players can hurt each other
     pub pvp: bool,
     pub doors_open: Option<f32>,
+    /// The mission whose terrorists stand in the level, placed with `seed` the same way by
+    /// everyone, in place of `npcs`
+    pub mission: Option<String>,
     pub npcs: Vec<NpcSetup>,
 }
 
@@ -815,6 +818,7 @@ fn write_setup(w: &mut Writer, s: &Setup) {
     w.bool(s.culling);
     w.bool(s.pvp);
     w.opt_f32(s.doors_open);
+    w.string(s.mission.as_deref().unwrap_or(""));
     w.u16(s.npcs.len() as u16);
     for n in &s.npcs {
         w.v3(n.pos);
@@ -834,6 +838,7 @@ fn read_setup(r: &mut Reader) -> Result<Setup> {
     let culling = r.bool()?;
     let pvp = r.bool()?;
     let doors_open = r.opt_f32()?;
+    let mission = Some(r.string()?).filter(|m| !m.is_empty());
     let n = r.u16()? as usize;
     let mut npcs = Vec::with_capacity(n.min(1024));
     for _ in 0..n {
@@ -841,7 +846,7 @@ fn read_setup(r: &mut Reader) -> Result<Setup> {
         let actor = r.u16()?;
         npcs.push(NpcSetup { pos, floor, yaw, scale, stagger, actor: (actor != u16::MAX).then_some(actor) });
     }
-    Ok(Setup { map, model, idle, magazine, ammo, reserve, grenades, speed_scale, seed, culling, pvp, doors_open, npcs })
+    Ok(Setup { map, model, idle, magazine, ammo, reserve, grenades, speed_scale, seed, culling, pvp, doors_open, mission, npcs })
 }
 
 fn header(w: &mut Writer, kind: u8) {
@@ -1006,7 +1011,7 @@ mod tests {
         Setup {
             map: "data/map/rm11/rm11.map".to_string(), model: "data/character/team_hrt/blue_M_a.CRP".to_string(),
             idle: "up_none_cyc".to_string(), magazine: 30, ammo: 30, reserve: 900, grenades: 3, speed_scale: 1.0,
-            seed: 0x5eed, culling: true, pvp: true, doors_open: Some(0.0),
+            seed: 0x5eed, culling: true, pvp: true, doors_open: Some(0.0), mission: Some("data/mission/RM11Med.mdf".to_string()),
             npcs: (0..8).map(|i| NpcSetup {
                 pos: [i as f32 * 110.0, 0.0, 12.0], floor: 0.0, yaw: 90.0 + i as f32, scale: [1.0, 1.0, 1.0],
                 stagger: i as f32 * 0.73, actor: (i % 3 != 0).then_some(i as u16),

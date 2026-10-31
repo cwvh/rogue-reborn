@@ -37,6 +37,30 @@ impl Difficulty {
     }
 }
 
+/// How a character waits until something happens, in the order the original numbers them
+/// (RogueSpear.exe 0x7ff550)
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Stance {
+    Kneel,
+    Cower,
+    Sit,
+    Squat,
+    #[default]
+    Stand,
+    Lean,
+    SitInChair,
+    Slouch,
+}
+
+impl Stance {
+    pub const ALL: [Stance; 8] = [Stance::Kneel, Stance::Cower, Stance::Sit, Stance::Squat, Stance::Stand, Stance::Lean, Stance::SitInChair, Stance::Slouch];
+
+    /// As a mission writes it, in any case
+    pub fn parse(s: &str) -> Option<Stance> {
+        Stance::ALL.into_iter().find(|t| format!("{t:?}").eq_ignore_ascii_case(s))
+    }
+}
+
 /// One of a team's characters
 #[derive(Clone, Debug, PartialEq)]
 pub struct Member {
@@ -47,8 +71,7 @@ pub struct Member {
     pub kit: String,
     /// Bored, Ready or Alert
     pub alertness: String,
-    /// Stand, Kneel, Lean, Squat, SitInChair or Slouch
-    pub stance: String,
+    pub stance: Stance,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -126,6 +149,8 @@ pub fn parse(text: &str) -> Result<Vec<Team>> {
             let alertness = field("their alertness")?;
             field("their radio")?;
             let stance = field("their stance")?;
+            // The original stands a character whose stance it does not know (0x598cd0)
+            let stance = Stance::parse(&stance).unwrap_or_default();
             members.push(Member { name, actor, kit, alertness, stance });
         }
         let count: usize = next("how many places it starts at")?.parse().with_context(|| format!("team {name}'s count of starting places"))?;
@@ -165,8 +190,8 @@ mod tests {
         let t = &teams[0];
         assert!(t.terrorists);
         assert_eq!(t.name, "Response Team");
-        assert_eq!(t.members.iter().map(|m| (m.name.as_str(), m.stance.as_str(), m.alertness.as_str())).collect::<Vec<_>>(),
-            [("Response #1", "Stand", "Bored"), ("Response #2", "Kneel", "Ready")]);
+        assert_eq!(t.members.iter().map(|m| (m.name.as_str(), m.stance, m.alertness.as_str())).collect::<Vec<_>>(),
+            [("Response #1", Stance::Stand, "Bored"), ("Response #2", Stance::Kneel, "Ready")]);
         assert_eq!(t.members[1].kit, "TER_arab_cat1_AK47.kit");
         assert_eq!(t.starts, [([29809.5, 32777.0, 34509.1], 0.0), ([31424.4, 32777.0, 34336.0], 64.0)]);
         assert_eq!(t.plans, ["BeginPlan", "ROE Investigate", "EndPlan"]);

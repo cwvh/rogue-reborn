@@ -24,6 +24,7 @@ fn setup() -> Setup {
         culling: true,
         pvp: false,
         doors_open: None,
+        mission: None,
         npcs: Vec::new(),
     }
 }

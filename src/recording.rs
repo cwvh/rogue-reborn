@@ -20,7 +20,7 @@ use crate::sim::{Input, Sim, TICK};
 /// Every this many ticks, the sim's checksum is recorded
 pub const CHECK_EVERY: u32 = 60;
 
-const MAGIC: &[u8; 8] = b"RRDEMO\0\x03";
+const MAGIC: &[u8; 8] = b"RRDEMO\0\x04";
 
 /// How a game began: enough to set up the same sim again
 #[derive(Clone, Debug, PartialEq)]
@@ -50,6 +50,8 @@ pub struct Header {
     pub no_models: bool,
     pub model_yaw: Option<f32>,
     pub actor: Option<String>,
+    /// The mission whose terrorists stood in the level, placed with `seed`
+    pub mission: Option<String>,
 }
 
 /// A game: how it began, what the player did each tick, and checksums to check a replay by
@@ -116,6 +118,7 @@ impl Recording {
         w.opt_f32(h.model_yaw);
         w.string(h.actor.as_deref().unwrap_or(""));
         w.u8(h.actor.is_some() as u8);
+        w.string(h.mission.as_deref().unwrap_or(""));
 
         w.u32(self.inputs.len() as u32);
         let mut before = Before::default();
@@ -149,9 +152,10 @@ impl Recording {
         let model_yaw = r.opt_f32()?;
         let actor_name = r.string()?;
         let actor = (r.u8()? != 0).then_some(actor_name);
+        let mission = Some(r.string()?).filter(|m| !m.is_empty());
         let header = Header {
             build, map, npcs, own_spawn, camera, yaw, pitch, seed, magazine, ammo, reserve, grenades,
-            speed_scale, culling, doors_open, model, no_models, model_yaw, actor,
+            speed_scale, culling, doors_open, model, no_models, model_yaw, actor, mission,
         };
 
         let n = r.u32()? as usize;
@@ -287,7 +291,7 @@ mod tests {
             camera: [0.0, 165.0, 350.0], yaw: 12.5, pitch: -3.0, seed: 7, magazine: 30, ammo: 30,
             reserve: 90, grenades: 3, speed_scale: 1.0, culling: true, doors_open: Some(0.5),
             model: "data/character/team_hrt/blue_M_a.CRP".to_string(), no_models: false, model_yaw: None,
-            actor: Some("ding".to_string()),
+            actor: Some("ding".to_string()), mission: Some("data/mission/RM01Med.mdf".to_string()),
         }
     }
 

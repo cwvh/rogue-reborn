@@ -1,13 +1,14 @@
 //! The characters standing in the level: where they are, how they are posed for hit
-//! detection, and the model they share.
+//! detection, and the models they wear: the team members' one, and the kits' own.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::actor::Actor;
+use crate::actor::{self, Actor};
 use crate::collision::CollisionWorld;
 use crate::combat::{self, Health, NpcState, Placement};
 use crate::crp::{self, Crp, Skin};
+use crate::mission::Stance;
 use crate::motion::{self, Motion};
 use crate::skeleton::{self, Skeleton};
 use crate::util::find_file;
@@ -27,6 +28,10 @@ pub struct Npc {
     pub scale: V3,
     /// Staggers each character's idle animation and blinking, so they do not all move as one
     pub stagger: f32,
+    /// Which of `Characters::bodies` it wears, or the team members' model
+    pub body: Option<usize>,
+    /// How it waits, as a mission's characters do, or else idling as `Characters::idle`
+    pub stance: Option<Stance>,
 }
 
 /// A skeleton and the skin that follows it
@@ -35,11 +40,25 @@ pub struct Rig {
     pub skin: Skin,
 }
 
-/// The model all the characters share, and the motions they play
+/// A model a kit dresses a character in (they share the team members' skeleton, so play the
+/// same motions), and the textures an actor wears on it
+pub struct Body {
+    pub model: Crp,
+    pub rig: Option<Rig>,
+    /// The texture each part wears, the part's own or the actor's in its place, and the
+    /// directory it is in
+    pub textures: Vec<(PathBuf, String)>,
+    /// The model's file and the actor's, which make it this body
+    key: (PathBuf, String),
+}
+
+/// The models the characters wear, and the motions they play
 pub struct Characters {
+    /// The team members' model, which players and the characters without a body of their own wear
     pub model: Crp,
     /// Without a skeleton the model stays in its bind pose
     pub rig: Option<Rig>,
+    pub bodies: Vec<Body>,
     /// By name: the idle motion, injury reactions and deaths
     pub motions: HashMap<String, Motion>,
     /// The name of the idle motion, which also stands in for any that is missing
@@ -61,37 +80,80 @@ pub fn load_motion(name: &str) -> Option<Motion> {
     motion::read(&find_file(Path::new("data/motion"), name, "dam").or_else(|| { eprintln!("no motion named {name}"); None })?).ok()
 }
 
+/// Where a texture a model wears is: beside it, or else in another character's directory, as
+/// an actor's sometimes are (the original finds textures by name wherever they are)
+fn texture_dir(beside: &Path, texture: &str) -> PathBuf {
+    let t = Path::new(texture);
+    let stem = t.file_stem().map_or_else(String::new, |s| s.to_string_lossy().to_string());
+    let ext = if t.extension().is_some_and(|e| e.eq_ignore_ascii_case("tga")) { "tga" } else { "rsb" };
+    let others = std::fs::read_dir("data/character").into_iter().flatten().flatten().map(|e| e.path());
+    std::iter::once(beside.to_path_buf()).chain(others)
+        .find(|d| find_file(d, &stem, ext).is_some())
+        .unwrap_or_else(|| beside.to_path_buf())
+}
+
+/// A model and the skeleton beside it, skinned to it. None when the model cannot be read.
+fn load_model(path: &Path) -> Option<(Crp, Option<Rig>)> {
+    let model = match crp::read(path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("could not load {}: {e:#}", path.display());
+            return None;
+        }
+    };
+    let rig = (|| {
+        let dir = path.parent()?;
+        let stem = path.file_stem()?.to_string_lossy().to_string();
+        let skeleton = skeleton::read(&find_file(dir, &stem, "skl").or_else(|| { eprintln!("no skeleton beside {}", path.display()); None })?).ok()?;
+        let skin = model.skin(&skeleton).or_else(|| { eprintln!("{} does not match its skeleton", path.display()); None })?;
+        Some(Rig { skeleton, skin })
+    })();
+    Some((model, rig))
+}
+
 impl Characters {
     /// Read the model, its skeleton and the motions from the game's data. None when the model
     /// cannot be read. `idle` names the motion characters idle with.
     pub fn load(model_path: &Path, idle: &str) -> Option<Characters> {
-        let model = match crp::read(model_path) {
-            Ok(c) => {
-                println!("loaded {} ({} vertices, {} triangles)", c.name, c.vertices.len(),
-                    c.parts.iter().map(|p| p.triangles.len()).sum::<usize>());
-                c
-            }
-            Err(e) => {
-                eprintln!("could not load {}: {e:#}", model_path.display());
-                return None;
-            }
-        };
-        // Skeleton and skinning for posed models
-        let rig = (|| {
-            let dir = model_path.parent()?;
-            let stem = model_path.file_stem()?.to_string_lossy().to_string();
-            let skeleton = skeleton::read(&find_file(dir, &stem, "skl").or_else(|| { eprintln!("no skeleton beside {}", model_path.display()); None })?).ok()?;
-            let skin = model.skin(&skeleton).or_else(|| { eprintln!("mesh does not match skeleton"); None })?;
-            Some(Rig { skeleton, skin })
-        })();
+        let (model, rig) = load_model(model_path)?;
+        println!("loaded {} ({} vertices, {} triangles)", model.name, model.vertices.len(),
+            model.parts.iter().map(|p| p.triangles.len()).sum::<usize>());
         let mut motions = HashMap::new();
-        for name in std::iter::once(idle).chain(REACTION_MOTIONS) {
+        for name in std::iter::once(idle).chain(REACTION_MOTIONS).chain(super::idle::motions()) {
+            if motions.contains_key(name) {
+                continue;
+            }
             if let Some(m) = load_motion(name) {
                 motions.insert(name.to_string(), m);
             }
         }
         let player = crate::body::PlayerMotions::load(rig.as_ref().map(|r| &r.skeleton), |_, name| load_motion(name));
-        Some(Characters { model, rig, motions, idle: idle.to_string(), player })
+        Some(Characters { model, rig, bodies: Vec::new(), motions, idle: idle.to_string(), player })
+    }
+
+    /// The body a model makes with an actor's textures on it, loaded the first time it is
+    /// asked for. None when the model cannot be read.
+    pub fn add_body(&mut self, model_path: &Path, actor: Option<&Actor>) -> Option<usize> {
+        let key = (model_path.to_path_buf(), actor.map_or_else(String::new, |a| a.id.clone()));
+        if let Some(i) = self.bodies.iter().position(|b| b.key == key) {
+            return Some(i);
+        }
+        let (model, rig) = load_model(model_path)?;
+        let dir = model_path.parent().unwrap_or(Path::new("."));
+        let textures = model.parts.iter().map(|p| {
+            let texture = actor.and_then(|a| a.texture_for(&p.material)).unwrap_or(&p.material);
+            (texture_dir(dir, texture), texture.to_string())
+        }).collect();
+        self.bodies.push(Body { model, rig, textures, key });
+        Some(self.bodies.len() - 1)
+    }
+
+    /// The model a character wears and its rig
+    pub fn body(&self, npc: &Npc) -> (&Crp, Option<&Rig>) {
+        match npc.body.and_then(|b| self.bodies.get(b)) {
+            Some(b) => (&b.model, b.rig.as_ref()),
+            None => (&self.model, self.rig.as_ref()),
+        }
     }
 
     /// How many frames a motion lasts, one if it is not loaded
@@ -102,7 +164,7 @@ impl Characters {
     /// Where a character stands, for shots and blasts
     pub fn placement(&self, npc: &Npc) -> Placement {
         Placement {
-            pos: [npc.pos[0], if self.rig.is_some() { npc.floor } else { npc.pos[1] }, npc.pos[2]],
+            pos: [npc.pos[0], if self.body(npc).1.is_some() { npc.floor } else { npc.pos[1] }, npc.pos[2]],
             yaw_deg: npc.yaw,
             scale: npc.scale,
         }
@@ -113,79 +175,104 @@ impl Characters {
         now * 30.0 + npc.stagger * 9.0
     }
 
-    /// The model's vertices posed for what the character is doing: idling at `idle_frame`,
-    /// reacting to a hit or dead. Empty when there is no skeleton to pose it with.
+    /// The model's vertices posed for what the character is doing: waiting in its stance,
+    /// idling at `idle_frame` without one, reacting to a hit or dead. Empty when there is no
+    /// skeleton to pose it with.
     pub fn pose(&self, npc: &Npc, now: f32, idle_frame: f32) -> Vec<V3> {
-        let Some(Rig { skeleton, skin }) = &self.rig else { return Vec::new() };
-        let (name, frame, looping): (&str, f32, bool) = match npc.health.state {
-            NpcState::Idle => (self.idle.as_str(), idle_frame, true),
-            NpcState::Reacting { motion, start } => (motion, (now - start) * 30.0, false),
-            NpcState::Dead { motion, start } => (motion, (now - start) * 30.0, false),
+        let (model, Some(Rig { skeleton, skin })) = self.body(npc) else { return Vec::new() };
+        let playing = |motion, frame, looping| super::idle::Playing { motion, frame, looping };
+        let (now_playing, from) = match (npc.health.state, npc.stance) {
+            (NpcState::Idle, Some(stance)) => super::idle::at(stance, npc.stagger.to_bits() as u64, now, |m| self.frames(m)),
+            (NpcState::Idle, None) => (playing(self.idle.as_str(), idle_frame, true), None),
+            (NpcState::Reacting { motion, start }, _) => (playing(motion, (now - start) * 30.0, false), None),
+            (NpcState::Dead { motion, start }, _) => (playing(motion, (now - start) * 30.0, false), None),
         };
-        let Some(mot) = self.motions.get(name).or_else(|| self.motions.get(self.idle.as_str())) else {
-            return self.model.vertices.clone();
+        let sample = |p: super::idle::Playing| {
+            let mot = self.motions.get(p.motion).or_else(|| self.motions.get(self.idle.as_str()))?;
+            let frames = mot.frames.max(1) as f32;
+            let f = if p.looping { p.frame % frames } else { p.frame.min(frames - 1.0) };
+            let (root, rots) = mot.sample(f);
+            Some((root, rots, mot.keys[0].root))
         };
-        let frames = mot.frames.max(1) as f32;
-        let f = if looping { frame % frames } else { frame.min(frames - 1.0) };
-        let (root, rots) = mot.sample(f);
-        // Hit and death motions carry the body along with them
-        let k0 = mot.keys[0].root;
-        let (dx, dz) = if looping { (0.0, 0.0) } else { (root[0] - k0[0], root[2] - k0[2]) };
+        let Some((mut root, mut rots, k0)) = sample(now_playing) else { return model.vertices.clone() };
+        // Waiting, one motion blends in from the one before
+        if let Some((before, weight)) = from.and_then(|(b, w)| Some((sample(b)?, w))) {
+            for (q, b) in rots.iter_mut().zip(&before.1) {
+                *q = motion::slerp(*q, *b, weight);
+            }
+            root[1] += (before.0[1] - root[1]) * weight;
+        }
+        // Hit and death motions carry the body along with them; waiting stays in place
+        let waiting = matches!(npc.health.state, NpcState::Idle);
+        let (dx, dz) = if now_playing.looping || waiting { (0.0, 0.0) } else { (root[0] - k0[0], root[2] - k0[2]) };
         skin.apply(&skeleton.pose([dx, root[1], dz], &rots))
     }
 
     /// Where a shot from `origin` along the unit vector `dir` strikes the character, if it does
     pub fn raycast(&self, npc: &Npc, now: f32, origin: V3, dir: V3) -> Option<combat::Hit> {
-        let rig = self.rig.as_ref()?;
+        let (model, rig) = self.body(npc);
+        let rig = rig?;
         let verts = self.pose(npc, now, Self::idle_frame(npc, now));
-        combat::raycast_character(&self.model, &rig.skeleton, &rig.skin, &verts, &self.placement(npc), origin, dir)
+        combat::raycast_character(model, &rig.skeleton, &rig.skin, &verts, &self.placement(npc), origin, dir)
     }
 }
 
 /// How far apart the members of a team stand, side by side across where it starts
 const TEAM_SPACING: f32 = 70.0;
 
+/// The model a member's kit dresses them in, and their actor, if the game has them
+fn dress(member: &crate::mission::Member) -> (Option<PathBuf>, Option<Actor>) {
+    let file = |dir: &str, name: &str| {
+        let name = Path::new(name);
+        find_file(Path::new(dir), &name.file_stem()?.to_string_lossy(), &name.extension()?.to_string_lossy())
+    };
+    let model = file("data/kit", &member.kit).and_then(|k| crate::kit::model(&k).ok().flatten());
+    let actor = file("data/actor", &member.actor).and_then(|a| actor::read(&a).ok());
+    if model.is_none() {
+        eprintln!("{} wears the team members' model: no model for the kit {}", member.name, member.kit);
+    }
+    (model, actor)
+}
+
 /// Stand each of a mission's terrorists where their team starts: at one of its places, picked
 /// with `seed`, facing its heading (256ths of a turn, 0 along +z, as examples/mission-headings.rs
-/// finds), the members side by side where there is room. Team members' faces are dealt out in
-/// turn, as `place_npcs` does.
-pub fn place_terrorists(
-    teams: &[crate::mission::Team],
-    seed: u64,
-    world: &CollisionWorld,
-    model: &Crp,
-    actors: &[Actor],
-) -> (Vec<Npc>, Vec<Option<usize>>) {
-    let feet_to_origin = -model.bounds().0[1];
+/// finds), the members side by side where there is room. Each wears the model their kit names
+/// with their actor's textures, which become `characters`' bodies, and waits in their stance.
+pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, world: &CollisionWorld, characters: &mut Characters) -> Vec<Npc> {
     let mut rng = seed | 1;
-    let (mut npcs, mut faces) = (Vec::new(), Vec::new());
+    let mut npcs = Vec::new();
     for team in teams.iter().filter(|t| t.terrorists) {
         let pick = (crate::util::next_rng(&mut rng) >> 33) as usize % team.starts.len();
         let (at, heading) = team.starts[pick];
         let yaw = heading * 360.0 / 256.0;
         let (sin, cos) = yaw.to_radians().sin_cos();
         let n = team.members.len();
-        for k in 0..n {
+        for (k, member) in team.members.iter().enumerate() {
             let across = (k as f32 - (n - 1) as f32 / 2.0) * TEAM_SPACING;
             // Beside the place, unless a wall is there
             let beside = [at[0] + cos * across, at[1], at[2] - sin * across];
             let clear = |q: V3| world.wall_clearance(&crate::collision::Player::new([q[0], world.ground_at(q[0], q[2], q[1] + 100.0).unwrap_or(q[1]), q[2]])) >= 0.0;
             let p = if clear(beside) || !clear(at) { beside } else { at };
             let floor = world.ground_at(p[0], p[2], p[1] + 100.0).unwrap_or(p[1]);
-            let actor = (!actors.is_empty()).then(|| npcs.len() % actors.len());
-            let scale_y = actor.map_or(1.0, |a| actors[a].scale[1]);
-            npcs.push(Npc {
+            let (model, actor) = dress(member);
+            let body = model.and_then(|m| characters.add_body(&m, actor.as_ref()));
+            let scale = actor.as_ref().map_or([1.0; 3], |a| a.scale);
+            let mut npc = Npc {
                 health: Health::new(),
-                pos: [p[0], floor + feet_to_origin * scale_y, p[2]],
+                pos: p,
                 floor,
                 yaw,
-                scale: actor.map_or([1.0; 3], |a| actors[a].scale),
+                scale,
                 stagger: npcs.len() as f32 * 0.73,
-            });
-            faces.push(actor);
+                body,
+                stance: Some(member.stance),
+            };
+            let feet_to_origin = -characters.body(&npc).0.bounds().0[1];
+            npc.pos[1] = floor + feet_to_origin * scale[1];
+            npcs.push(npc);
         }
     }
-    (npcs, faces)
+    npcs
 }
 
 /// Stand a character at each spawn point (a point on the map's floor) but those in `skip`,
@@ -212,6 +299,8 @@ pub fn place_npcs(
             yaw: yaw(i, *p),
             scale: actor.map_or([1.0; 3], |a| actors[a].scale),
             stagger: i as f32 * 0.73,
+            body: None,
+            stance: None,
         });
         faces.push(actor);
     }
@@ -225,17 +314,27 @@ mod tests {
     use crate::mission::{self, Difficulty};
 
     #[test]
-    fn every_missions_terrorists_stand_on_a_floor_clear_of_the_walls() {
-        let model = Path::new("data/character/team_hrt/blue_M_a.CRP");
-        let Ok(model) = crp::read(model) else { return };
+    fn every_missions_terrorists_stand_on_a_floor_clear_of_the_walls_dressed_by_their_kit() {
+        let Some(mut characters) = Characters::load(Path::new("data/character/team_hrt/blue_M_a.CRP"), "up_none_cyc") else { return };
         let (mut placed, mut in_walls) = (0, Vec::new());
         for level in 1..=19 {
             let map_path = format!("data/map/rm{level:02}/rm{level:02}.map");
             let Some((_, teams)) = mission::teams(Path::new(&map_path), Difficulty::Medium) else { continue };
             let level_map = crate::map::read(Path::new(&map_path)).unwrap();
             let world = CollisionWorld::from_map(&level_map, Params::default());
-            let (npcs, _) = place_terrorists(&teams, 7, &world, &model, &[]);
-            assert_eq!(npcs.len(), teams.iter().filter(|t| t.terrorists).map(|t| t.members.len()).sum::<usize>());
+            let npcs = place_terrorists(&teams, 7, &world, &mut characters);
+            let members: Vec<_> = teams.iter().filter(|t| t.terrorists).flat_map(|t| &t.members).collect();
+            assert_eq!(npcs.len(), members.len());
+            for (n, m) in npcs.iter().zip(&members) {
+                assert_eq!(n.stance, Some(m.stance));
+                let body = &characters.bodies[n.body.unwrap_or_else(|| panic!("rm{level:02}: {} wears no model of their own", m.name))];
+                assert!(body.rig.is_some(), "{}", m.kit);
+                for (dir, t) in &body.textures {
+                    let t = Path::new(t);
+                    let ext = if t.extension().is_some_and(|e| e.eq_ignore_ascii_case("tga")) { "tga" } else { "rsb" };
+                    assert!(find_file(dir, &t.file_stem().unwrap().to_string_lossy(), ext).is_some(), "{} has no {}", dir.display(), t.display());
+                }
+            }
             for n in &npcs {
                 let floor = world.ground_at(n.pos[0], n.pos[2], n.floor + 1.0);
                 assert!(floor.is_some_and(|f| (f - n.floor).abs() < 1.0), "rm{level:02}: no floor under {:?}", n.pos);

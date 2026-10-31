@@ -9,6 +9,7 @@
 
 pub mod aim;
 pub mod characters;
+pub mod idle;
 pub mod movement;
 pub mod peek;
 

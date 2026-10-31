@@ -15,7 +15,7 @@ use rogue_reborn::net::proto::{NpcSetup, Setup};
 use rogue_reborn::net::server::Server;
 use rogue_reborn::net::setup::build_sim;
 use rogue_reborn::mission;
-use rogue_reborn::sim::characters::{Characters, place_npcs, place_terrorists};
+use rogue_reborn::sim::characters::{Characters, place_npcs};
 use rogue_reborn::sim::{Event, MAX_PLAYERS};
 use rogue_reborn::{actor, demo, map, weapon};
 
@@ -135,14 +135,10 @@ fn main() {
     let weapon_def = weapon::read(Path::new("data/kit/pw_mp5k.wpn")).ok();
     let characters = if args.no_models { None } else { Characters::load(&args.model, idle) };
     let actors = actor::read_all(Path::new("data/actor"));
-    let teams = level_path.as_deref().and_then(|p| mission::teams(p, mission::Difficulty::Medium));
-    let (npcs, faces) = match (&characters, teams) {
-        // The mission's terrorists where it puts them
-        (Some(c), Some((path, teams))) => {
-            let placed = place_terrorists(&teams, args.seed, &world, &c.model, &actors);
-            eprintln!("rrsrv: {} terrorists from {}", placed.0.len(), path.display());
-            placed
-        }
+    // The mission's terrorists, which the server and every client place from its file alike
+    let mission_file = level_path.as_deref().and_then(|p| mission::find(p, mission::Difficulty::Medium)).filter(|_| characters.is_some());
+    let (npcs, faces) = match (&characters, &mission_file) {
+        (Some(_), Some(_)) => (Vec::new(), Vec::new()),
         (Some(c), None) => place_npcs(&npc_spawns, &[], &world, &c.model, &actors, &|_, p| {
             // In the box room they face the players; elsewhere they are dealt a facing
             let first = player_spawns[0];
@@ -164,6 +160,7 @@ fn main() {
         culling: true,
         pvp: !args.no_pvp,
         doors_open: None,
+        mission: mission_file.map(|m| m.display().to_string()),
         npcs: npcs.iter().zip(&faces).map(|(n, f)| NpcSetup {
             pos: n.pos, floor: n.floor, yaw: n.yaw, scale: n.scale, stagger: n.stagger, actor: f.map(|a| a as u16),
         }).collect(),
@@ -174,7 +171,10 @@ fn main() {
         eprintln!("rrsrv: {e:#}");
         std::process::exit(2);
     });
-    let n_npcs = setup.npcs.len();
+    let n_npcs = sim.npcs.len();
+    if let Some(m) = &setup.mission {
+        eprintln!("rrsrv: {n_npcs} terrorists from {m}");
+    }
     let mut server = Server::new(sim, setup, build, player_spawns);
     server.set_snapshot_rate(args.snapshot_rate);
     server.set_lag_compensation(!args.no_lag_compensation);

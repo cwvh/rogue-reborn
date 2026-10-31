@@ -1,9 +1,10 @@
-//! Reader for team-member actor files (`data/actor/*.act`).
+//! Reader for actor files: team members' (`data/actor/*.act`), and terrorists' and hostages'
+//! (`*.ter`, `*.hst`).
 //!
 //! These are text files with one value per line and a `//` comment naming
 //! the field. Fields are matched by their comment, not by line position, since
-//! only some of them are needed here: name, sex, model scale and the
-//! per-uniform face textures.
+//! only some of them are needed here: name, sex, model scale, the team members'
+//! per-uniform face textures and the textures the others' models wear.
 
 use std::path::{Path, PathBuf};
 
@@ -30,6 +31,25 @@ pub struct Actor {
     pub camo_face: Option<String>,
     pub desert_face: Option<String>,
     pub winter_face: Option<String>,
+    /// The textures a terrorist's or hostage's model wears for its eyes, lips, chest and hair,
+    /// in place of the model's own
+    pub eyes: Option<String>,
+    pub lips: Option<String>,
+    pub chest: Option<String>,
+    pub hair: Option<String>,
+}
+
+impl Actor {
+    /// The texture this actor wears on a part of their model whose own is `material`, if not
+    /// the part's own: the original matches the part's name against `_teyes`, `_heyes` and the
+    /// like (RogueSpear.exe 0x5d3fb0)
+    pub fn texture_for(&self, material: &str) -> Option<&str> {
+        let name = material.to_ascii_lowercase();
+        let slots = [("eyes", &self.eyes), ("lips", &self.lips), ("chest", &self.chest), ("hair", &self.hair)];
+        slots.into_iter()
+            .find(|(slot, _)| name.contains(&format!("_t{slot}")) || name.contains(&format!("_h{slot}")))
+            .and_then(|(_, t)| t.as_deref())
+    }
 }
 
 pub fn read(path: &Path) -> Result<Actor> {
@@ -49,6 +69,10 @@ pub fn parse(id: &str, text: &str) -> Actor {
         camo_face: None,
         desert_face: None,
         winter_face: None,
+        eyes: None,
+        lips: None,
+        chest: None,
+        hair: None,
     };
 
     for line in text.lines() {
@@ -61,7 +85,8 @@ pub fn parse(id: &str, text: &str) -> Actor {
         } else if comment.starts_with("sex") {
             actor.sex = if unquoted.eq_ignore_ascii_case("female") { Sex::Female } else { Sex::Male };
         } else if comment.starts_with("scale") {
-            let v: Vec<f32> = value.split(',').filter_map(|n| n.trim().parse().ok()).collect();
+            // Team members' are written 1, .97, 1 and the others' 1.00 1.00 1.0
+            let v: Vec<f32> = value.split([',', ' ', '\t']).filter_map(|n| n.trim().parse().ok()).collect();
             if v.len() == 3 {
                 actor.scale = [v[0], v[1], v[2]];
             }
@@ -75,6 +100,10 @@ pub fn parse(id: &str, text: &str) -> Actor {
             } else if comment.starts_with("winter") {
                 actor.winter_face = Some(unquoted);
             }
+        } else if let Some(slot) = ["eye", "lip", "chest", "hair"].iter().position(|s| comment.starts_with(&format!("{s} texture"))) {
+            // none.bmp leaves the model's own
+            let texture = (!unquoted.eq_ignore_ascii_case("none.bmp") && !unquoted.is_empty()).then_some(unquoted);
+            *[&mut actor.eyes, &mut actor.lips, &mut actor.chest, &mut actor.hair][slot] = texture;
         }
     }
     actor
@@ -130,6 +159,20 @@ mod tests {
         assert_eq!(a.camo_face.as_deref(), Some("chavez_camo_head.bmp"));
         assert_eq!(a.desert_face.as_deref(), Some("chavez_des_head.bmp"));
         assert_eq!(a.winter_face, None);
+    }
+
+    #[test]
+    fn a_terrorist_wears_their_own_eyes_and_lips() {
+        let text = "1.00 1.00 1.0\t// Scale\n\"arab_cat1_teyes_2.rsb\"\t// Eye texture\n\
+                    \"none.bmp\"\t// Lip texture\n\"arab_cat1_tchest.rsb\"\t// Chest texture\n\
+                    \"arab_cat1_thair_2.rsb\"\t// Hair texture\n";
+        let a = parse("TER_arab_cat1_03", text);
+        assert_eq!(a.scale, [1.0; 3]);
+        assert_eq!(a.texture_for("arab_cat1_teyes.bmp"), Some("arab_cat1_teyes_2.rsb"));
+        // none.bmp keeps the model's own, and other parts keep theirs
+        assert_eq!(a.texture_for("arab_cat1_tlips.bmp"), None);
+        assert_eq!(a.texture_for("arab_cat1_head.bmp"), None);
+        assert_eq!(a.texture_for("rus_gen_hhair.bmp"), Some("arab_cat1_thair_2.rsb"));
     }
 
     #[test]

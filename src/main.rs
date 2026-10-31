@@ -158,6 +158,10 @@ fn main() {
         net = Some((client, link));
         joined = Some(setup);
     }
+    // Without --seed each run picks its own, which a recording keeps
+    let seed = *args.seed.get_or_insert_with(|| {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64)
+    });
     let map_buf = match (&args.map, &args.level) {
         _ if args.demo => PathBuf::from("data/map/m00/demo.map"),
         (Some(path), level) => {
@@ -263,7 +267,7 @@ fn main() {
         .unwrap_or_else(|| PathBuf::from("data/character/team_hrt/blue_M_a.CRP"));
     // Motions other characters play: idle (or --anim), injury reactions and deaths
     let idle_name = args.anim.clone().unwrap_or_else(|| "up_none_cyc".to_string());
-    let characters = Characters::load(&model_path, &idle_name);
+    let mut characters = Characters::load(&model_path, &idle_name);
     let load_motion = rogue_reborn::sim::characters::load_motion;
     // The player carries the MP5K, so uses the SMG-holding movement set
     let slot_motion = |slot: &str, default: &str| {
@@ -427,29 +431,59 @@ fn main() {
         }
     }).collect();
 
-    let (npcs, npc_actor) = match (&joined, &characters, args.no_models) {
-        (Some(s), _, _) => (
-            s.npcs.iter().map(|n| Npc { health: combat::Health::new(), pos: n.pos, floor: n.floor, yaw: n.yaw, scale: n.scale, stagger: n.stagger }).collect(),
+    // The mission whose terrorists stand in the level: the one a recording or the server names,
+    // or else the level's own at the difficulty asked for
+    let mission_file: Option<PathBuf> = match (&playback, &joined) {
+        (Some(p), _) => p.header().mission.as_ref().map(PathBuf::from),
+        (_, Some(s)) => s.mission.as_ref().map(PathBuf::from),
+        _ => mission::find(map_path, args.difficulty).filter(|_| !args.demo),
+    };
+    let (npcs, npc_actor) = match (&joined, &mut characters, args.no_models, &mission_file) {
+        (_, Some(c), false, Some(path)) => match mission::read(path) {
+            Ok(teams) => {
+                let npcs = place_terrorists(&teams, seed, &world, c);
+                println!("{} terrorists from {}", npcs.len(), path.display());
+                let n = npcs.len();
+                (npcs, vec![None; n])
+            }
+            Err(e) => {
+                eprintln!("{e:#}");
+                (Vec::new(), Vec::new())
+            }
+        },
+        (Some(s), _, _, _) => (
+            s.npcs.iter().map(|n| Npc {
+                health: combat::Health::new(), pos: n.pos, floor: n.floor, yaw: n.yaw, scale: n.scale, stagger: n.stagger, body: None, stance: None,
+            }).collect(),
             s.npcs.iter().map(|n| n.actor.map(|a| a as usize)).collect(),
         ),
-        // The mission's terrorists where it puts them, or else characters at the spawn points
-        (None, Some(c), false) => match mission::teams(map_path, args.difficulty).filter(|_| !args.demo) {
-            Some((path, teams)) => {
-                let seed = args.seed.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64));
-                let placed = place_terrorists(&teams, seed, &world, &c.model, &actors);
-                println!("{} terrorists from {}", placed.0.len(), path.display());
-                placed
-            }
-            None => place_npcs(&mission_spawns, own_spawn.as_slice(), &world, &c.model, &actors, &|i, p| {
-                args.model_yaw.unwrap_or_else(|| match mission_spawns.first() {
-                    // In the demo room everyone faces the player
-                    Some(player) if args.demo => (player[0] - p[0]).atan2(player[2] - p[2]).to_degrees(),
-                    _ => i as f32 * 137.5,
-                })
-            }),
-        },
+        // Characters at the spawn points
+        (None, Some(c), false, None) => place_npcs(&mission_spawns, own_spawn.as_slice(), &world, &c.model, &actors, &|i, p| {
+            args.model_yaw.unwrap_or_else(|| match mission_spawns.first() {
+                // In the demo room everyone faces the player
+                Some(player) if args.demo => (player[0] - p[0]).atan2(player[2] - p[2]).to_degrees(),
+                _ => i as f32 * 137.5,
+            })
+        }),
         _ => (Vec::new(), Vec::new()),
     };
+    // Each body a kit dresses its character in, as drawn: its corners laid out, and the texture
+    // each part wears
+    let body_draws: Vec<(CharacterArrays, Vec<Option<u32>>)> = characters.as_ref().map_or_else(Vec::new, |c| {
+        c.bodies.iter().map(|b| {
+            let mut cache: HashMap<String, Option<u32>> = HashMap::new();
+            let textures = b.textures.iter().map(|(dir, t)| {
+                *cache.entry(t.clone()).or_insert_with(|| {
+                    let id = load_character_texture(dir, t);
+                    if id.is_none() {
+                        println!("no texture for {t}");
+                    }
+                    id
+                })
+            }).collect();
+            (CharacterArrays::new(&b.model), textures)
+        }).collect()
+    });
 
     if let Some(p) = args.pos { camera.position = p; }
     if let Some(y) = args.yaw { camera.yaw = y; }
@@ -496,6 +530,7 @@ fn main() {
         no_models: args.no_models,
         model_yaw: args.model_yaw,
         actor: args.actor.clone(),
+        mission: mission_file.as_ref().map(|p| p.display().to_string()),
     }));
     let mut sim = sim::Sim::new(
         level.clone(),
@@ -1508,8 +1543,12 @@ fn main() {
                         continue;
                     }
                     let idle = args.anim_frame.unwrap_or_else(|| game_time * args.anim_fps.unwrap_or(30.0) + spot.stagger * 9.0);
+                    let (model, arrays, textures) = match spot.body.and_then(|b| chars.bodies.get(b).zip(body_draws.get(b))) {
+                        Some((b, (arrays, textures))) => (&b.model, arrays, textures.as_slice()),
+                        None => (c, &character_arrays, part_textures.as_slice()),
+                    };
                     let posed = chars.pose(spot, game_time, idle);
-                    let verts: &[[f32; 3]] = if posed.is_empty() { &c.vertices } else { &posed };
+                    let verts: &[[f32; 3]] = if posed.is_empty() { &model.vertices } else { &posed };
                     let y = if posed.is_empty() { spot.pos[1] } else { spot.floor };
                     glPushMatrix();
                     glTranslatef(spot.pos[0], y, spot.pos[2]);
@@ -1521,7 +1560,7 @@ fn main() {
                     let face = npc_actor[i].map(|a| face_textures[a]).and_then(|(main, blink)| {
                         if blinking { blink.or(main) } else { main }
                     });
-                    draw_character(c, &character_arrays, verts, &part_textures, face, textured, glow_on([spot.pos[0], y, spot.pos[2]]));
+                    draw_character(model, arrays, verts, textures, face, textured, glow_on([spot.pos[0], y, spot.pos[2]]));
                     glPopMatrix();
                 }
                 glColor4f(1.0, 1.0, 1.0, 1.0);
@@ -1659,6 +1698,8 @@ fn main() {
                         yaw: -yaw,
                         scale: [1.0; 3],
                         stagger: slot as f32 * 0.73,
+                        body: None,
+                        stance: None,
                     };
                     let idle = game_time * 30.0 + ghost.stagger * 9.0;
                     let posed = chars.pose(&ghost, view_time, idle);
@@ -1699,7 +1740,7 @@ fn main() {
                             let yaw = -sim::dequantize(p.look.0);
                             let scale = actors.get(slot % actors.len().max(1)).map_or([1.0; 3], |a| a.scale);
                             let pos = p.player.pos;
-                            corpses.insert(slot, (hit.start, Npc { health, pos, floor: pos[1], yaw, scale, stagger: 0.0 }));
+                            corpses.insert(slot, (hit.start, Npc { health, pos, floor: pos[1], yaw, scale, stagger: 0.0, body: None, stance: None }));
                         }
                     }
                 }

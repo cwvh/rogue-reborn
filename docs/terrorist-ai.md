@@ -12,9 +12,11 @@ teams. A team of terrorists has:
 - an actor file (`data/actor/TER_*.ter`): health, and skills out of 100: Aggression, Leadership,
   Self-control, Stamina, Sniper, Demolitions, Electronics, Assault, Grenades, Stealth;
 - a kit (`data/kit/TER_*.kit`): a primary and a secondary weapon (`tw_ak47.wpn`, `sw_de357.wpn`)
-  and how many magazines of each, and armor;
+  and how many magazines of each, the model they wear (a directory of `data/character` and the
+  model in three levels of detail, `arab_cat1_a`..`c`), and armor;
 - an initial alertness: Bored (775 teams), Ready (225) or Alert (54);
-- an initial stance: Stand (951), Lean (47), Kneel (23), Squat (15), SitInChair (12), Slouch (6);
+- an initial stance: Stand (951), Lean (47), Squat (23), Slouch (6), Kneel (5) (hostages Stand,
+  Kneel and SitInChair);
 - a radio: None, CellPhone or Earpiece;
 - starting locations (x y z and a heading), of which one is picked;
 - a plan, and trigger plans that take over from it.
@@ -55,6 +57,29 @@ reader yet).
 
 The AI keeps several states apart, as the game's debug map colors them (0x54d250): alertness,
 awareness, threat awareness, psychological state, behavior, combat state, ROE, and panicked.
+
+## Waiting in a stance
+
+The stances are numbered Kneel, Cower, Sit, Squat, Stand, Lean, SitInChair, Slouch (0x7ff550); an
+unknown one stands. Until something happens, 0x5ceb20 plays the stance's rest, a short loop, and
+now and then a fidget, picked by chance from the stance's own; after it the character rests in the
+pose the fidget ends in, its `r` motion (0x5d1280: `tib_4a` then `tib_4ar`).
+
+| Stance | Rest | Fidgets, with the chance of each and those before it | Rest between |
+| --- | --- | --- | --- |
+| Stand | `tib_1r` | `tib_3` .15, `tib_2` .45 (it is in the table twice), `tib_4a` .6, `tib_5`..`tib_9` .05 each, `tib_10` the rest (0x76db5c) | 190-395 |
+| Lean | `til_1r` | `til_1` .3, `til_2` .6, `til_3` (0x76db38) | 190-395 |
+| Squat | `tic_1r` | `tic_1` .33, `tic_2` .66, `tic_3` (0x76db24) | 240-520 |
+| Kneel | `hik_1r` | `hik_1` .33, `hik_2` .66, `hik_3` (0x76db18) | 240-520 |
+| Slouch | `tis_1r` | `tis_1` | |
+
+The rest between is counted only while a rest plays (0x5c6c18), in updates of the character's
+motions. A standing character whose team has some flag set (char+0xe0, +0x180) picks `tib_c1`..`c6`
+instead, by the table at 0x76db44. Standing and leaning also smoke (`tib_cig1` lights up, `cig2`
+puffs 5 to 8 times, `cig3` throws it away, with a `cigarette_rob` model in the hand), drink from a
+`flask_sob` (`tib_11`, `til_4`) and talk in pairs (`tib_t1`..`t4`), at chances that depend on
+whether they are alone. Squatting and kneeling also play `rmrc_base` and `hst_kneel_cyc` (as a base
+under the rest, it seems), and a squatter without a rifle or subgun plays `tmic_*` instead.
 
 ## Seeing
 
@@ -156,12 +181,13 @@ from 1.7 degrees to 0.07 in 1.4 s, and it fires once that is 12 units wide at th
 Small enough to try out on the maps we play, and grow from:
 
 1. Terrorists from the mission files, where the mission puts them: the team's actor, kit, stance,
-   alertness and one of its starting spots. Placed so far (mission.rs, characters::place_terrorists):
-   a team at one of its places, facing its heading (256ths of a turn from +z, which
+   alertness and one of its starting spots. Done (mission.rs, kit.rs, characters::place_terrorists,
+   sim::idle): a team at one of its places, facing its heading (256ths of a turn from +z, which
    examples/mission-headings.rs settles: that way 12 of 574 face a wall within 100 units, against
-   33 to 90 any other way), its members side by side. They still wear the one shared model and
-   idle standing; their own models (the kit names TER_arabturk/arab_cat1_a..c), stances and
-   alertness are next.
+   33 to 90 any other way), its members side by side, each in the model their kit names with their
+   actor's textures, waiting in their stance with its rests and fidgets. Still to do: smoking,
+   drinking and talking, the weapons in their hands, hit reactions that start from their stance,
+   and alertness.
 2. Seeing, as above: field of view, range, glimpses, visibility and line of sight.
 3. Reacting to a player in view: turn toward them and fire, after a delay and with a spread to be
    read from the exe (and the skills); reload; take wounds and die as the characters do now.
