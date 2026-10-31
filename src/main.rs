@@ -453,7 +453,7 @@ fn main() {
         },
         (Some(s), _, _, _) => (
             s.npcs.iter().map(|n| Npc {
-                health: combat::Health::new(), pos: n.pos, floor: n.floor, yaw: n.yaw, scale: n.scale, stagger: n.stagger, body: None, stance: None,
+                health: combat::Health::new(), pos: n.pos, floor: n.floor, yaw: n.yaw, scale: n.scale, stagger: n.stagger, body: None, stance: None, weapon: None,
             }).collect(),
             s.npcs.iter().map(|n| n.actor.map(|a| a as usize)).collect(),
         ),
@@ -483,6 +483,10 @@ fn main() {
             }).collect();
             (CharacterArrays::new(&b.model), textures)
         }).collect()
+    });
+    // The weapons in the characters' hands
+    let held_draws: Vec<Option<WeaponDraw>> = characters.as_ref().map_or_else(Vec::new, |c| {
+        c.weapons.iter().map(|(_, w)| load_model_draw(&w.model, w.muzzle)).collect()
     });
 
     if let Some(p) = args.pos { camera.position = p; }
@@ -1547,7 +1551,12 @@ fn main() {
                         Some((b, (arrays, textures))) => (&b.model, arrays, textures.as_slice()),
                         None => (c, &character_arrays, part_textures.as_slice()),
                     };
-                    let posed = chars.pose(spot, game_time, idle);
+                    let bones = chars.bones(spot, game_time, idle);
+                    let posed = match (&bones, chars.body(spot).1) {
+                        (Some(bones), Some(rig)) => rig.skin.apply(bones),
+                        (None, Some(_)) => model.vertices.clone(),
+                        (_, None) => Vec::new(),
+                    };
                     let verts: &[[f32; 3]] = if posed.is_empty() { &model.vertices } else { &posed };
                     let y = if posed.is_empty() { spot.pos[1] } else { spot.floor };
                     glPushMatrix();
@@ -1561,6 +1570,15 @@ fn main() {
                         if blinking { blink.or(main) } else { main }
                     });
                     draw_character(model, arrays, verts, textures, face, textured, glow_on([spot.pos[0], y, spot.pos[2]]));
+                    // Their weapon in the right hand, as the players hold theirs
+                    let held = spot.weapon.and_then(|w| held_draws.get(w)).and_then(Option::as_ref);
+                    if let (Some(bones), Some(wd), Some((hand, off))) = (&bones, held, &weapon_attach) {
+                        glPushMatrix();
+                        glMultMatrixf(bones[*hand].matrix().as_ptr());
+                        glMultMatrixf(off.matrix().as_ptr());
+                        draw_weapon(wd, textured, false);
+                        glPopMatrix();
+                    }
                     glPopMatrix();
                 }
                 glColor4f(1.0, 1.0, 1.0, 1.0);
@@ -1700,6 +1718,7 @@ fn main() {
                         stagger: slot as f32 * 0.73,
                         body: None,
                         stance: None,
+                        weapon: None,
                     };
                     let idle = game_time * 30.0 + ghost.stagger * 9.0;
                     let posed = chars.pose(&ghost, view_time, idle);
@@ -1740,7 +1759,7 @@ fn main() {
                             let yaw = -sim::dequantize(p.look.0);
                             let scale = actors.get(slot % actors.len().max(1)).map_or([1.0; 3], |a| a.scale);
                             let pos = p.player.pos;
-                            corpses.insert(slot, (hit.start, Npc { health, pos, floor: pos[1], yaw, scale, stagger: 0.0, body: None, stance: None }));
+                            corpses.insert(slot, (hit.start, Npc { health, pos, floor: pos[1], yaw, scale, stagger: 0.0, body: None, stance: None, weapon: None }));
                         }
                     }
                 }

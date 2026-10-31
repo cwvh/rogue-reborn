@@ -36,6 +36,7 @@ pub fn build_sim(setup: &Setup) -> Result<Sim> {
             stagger: n.stagger,
             body: None,
             stance: None,
+            weapon: None,
         }).collect(),
     };
     let config = Config {

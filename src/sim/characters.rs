@@ -32,6 +32,8 @@ pub struct Npc {
     pub body: Option<usize>,
     /// How it waits, as a mission's characters do, or else idling as `Characters::idle`
     pub stance: Option<Stance>,
+    /// Which of `Characters::weapons` is in its hands
+    pub weapon: Option<usize>,
 }
 
 /// A skeleton and the skin that follows it
@@ -59,6 +61,8 @@ pub struct Characters {
     /// Without a skeleton the model stays in its bind pose
     pub rig: Option<Rig>,
     pub bodies: Vec<Body>,
+    /// The weapons characters carry: their files in `data/kit`, and what they say
+    pub weapons: Vec<(String, crate::weapon::Weapon)>,
     /// By name: the idle motion, injury reactions and deaths
     pub motions: HashMap<String, Motion>,
     /// The name of the idle motion, which also stands in for any that is missing
@@ -128,7 +132,7 @@ impl Characters {
             }
         }
         let player = crate::body::PlayerMotions::load(rig.as_ref().map(|r| &r.skeleton), |_, name| load_motion(name));
-        Some(Characters { model, rig, bodies: Vec::new(), motions, idle: idle.to_string(), player })
+        Some(Characters { model, rig, bodies: Vec::new(), weapons: Vec::new(), motions, idle: idle.to_string(), player })
     }
 
     /// The body a model makes with an actor's textures on it, loaded the first time it is
@@ -146,6 +150,24 @@ impl Characters {
         }).collect();
         self.bodies.push(Body { model, rig, textures, key });
         Some(self.bodies.len() - 1)
+    }
+
+    /// The weapon a file in `data/kit` describes, read the first time it is asked for
+    pub fn add_weapon(&mut self, file: &str) -> Option<usize> {
+        if let Some(i) = self.weapons.iter().position(|(f, _)| f.eq_ignore_ascii_case(file)) {
+            return Some(i);
+        }
+        let path = find_file(Path::new("data/kit"), &Path::new(file).file_stem()?.to_string_lossy(), "wpn")?;
+        match crate::weapon::read(&path) {
+            Ok(w) => {
+                self.weapons.push((file.to_string(), w));
+                Some(self.weapons.len() - 1)
+            }
+            Err(e) => {
+                eprintln!("{e:#}");
+                None
+            }
+        }
     }
 
     /// The model a character wears and its rig
@@ -179,7 +201,17 @@ impl Characters {
     /// idling at `idle_frame` without one, reacting to a hit or dead. Empty when there is no
     /// skeleton to pose it with.
     pub fn pose(&self, npc: &Npc, now: f32, idle_frame: f32) -> Vec<V3> {
-        let (model, Some(Rig { skeleton, skin })) = self.body(npc) else { return Vec::new() };
+        let (model, Some(rig)) = self.body(npc) else { return Vec::new() };
+        match self.bones(npc, now, idle_frame) {
+            Some(bones) => rig.skin.apply(&bones),
+            None => model.vertices.clone(),
+        }
+    }
+
+    /// The skeleton posed as `pose` poses the model, in the model's space. None without a
+    /// skeleton, or a motion to play.
+    pub fn bones(&self, npc: &Npc, now: f32, idle_frame: f32) -> Option<Vec<skeleton::Transform>> {
+        let skeleton = &self.body(npc).1?.skeleton;
         let playing = |motion, frame, looping| super::idle::Playing { motion, frame, looping };
         let (now_playing, from) = match (npc.health.state, npc.stance) {
             (NpcState::Idle, Some(stance)) => super::idle::at(stance, npc.stagger.to_bits() as u64, now, |m| self.frames(m)),
@@ -194,7 +226,7 @@ impl Characters {
             let (root, rots) = mot.sample(f);
             Some((root, rots, mot.keys[0].root))
         };
-        let Some((mut root, mut rots, k0)) = sample(now_playing) else { return model.vertices.clone() };
+        let (mut root, mut rots, k0) = sample(now_playing)?;
         // Waiting, one motion blends in from the one before
         if let Some((before, weight)) = from.and_then(|(b, w)| Some((sample(b)?, w))) {
             for (q, b) in rots.iter_mut().zip(&before.1) {
@@ -205,7 +237,7 @@ impl Characters {
         // Hit and death motions carry the body along with them; waiting stays in place
         let waiting = matches!(npc.health.state, NpcState::Idle);
         let (dx, dz) = if now_playing.looping || waiting { (0.0, 0.0) } else { (root[0] - k0[0], root[2] - k0[2]) };
-        skin.apply(&skeleton.pose([dx, root[1], dz], &rots))
+        Some(skeleton.pose([dx, root[1], dz], &rots))
     }
 
     /// Where a shot from `origin` along the unit vector `dir` strikes the character, if it does
@@ -220,24 +252,25 @@ impl Characters {
 /// How far apart the members of a team stand, side by side across where it starts
 const TEAM_SPACING: f32 = 70.0;
 
-/// The model a member's kit dresses them in, and their actor, if the game has them
-fn dress(member: &crate::mission::Member) -> (Option<PathBuf>, Option<Actor>) {
+/// The kit a member wears, and their actor, if the game has them
+fn dress(member: &crate::mission::Member) -> (crate::kit::Kit, Option<Actor>) {
     let file = |dir: &str, name: &str| {
         let name = Path::new(name);
         find_file(Path::new(dir), &name.file_stem()?.to_string_lossy(), &name.extension()?.to_string_lossy())
     };
-    let model = file("data/kit", &member.kit).and_then(|k| crate::kit::model(&k).ok().flatten());
+    let kit = file("data/kit", &member.kit).and_then(|k| crate::kit::read(&k).ok()).unwrap_or_default();
     let actor = file("data/actor", &member.actor).and_then(|a| actor::read(&a).ok());
-    if model.is_none() {
+    if kit.model.is_none() {
         eprintln!("{} wears the team members' model: no model for the kit {}", member.name, member.kit);
     }
-    (model, actor)
+    (kit, actor)
 }
 
 /// Stand each of a mission's terrorists where their team starts: at one of its places, picked
 /// with `seed`, facing its heading (256ths of a turn, 0 along +z, as examples/mission-headings.rs
 /// finds), the members side by side where there is room. Each wears the model their kit names
-/// with their actor's textures, which become `characters`' bodies, and waits in their stance.
+/// with their actor's textures, which become `characters`' bodies, holds the kit's weapon, and
+/// waits in their stance.
 pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, world: &CollisionWorld, characters: &mut Characters) -> Vec<Npc> {
     let mut rng = seed | 1;
     let mut npcs = Vec::new();
@@ -254,8 +287,9 @@ pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, world: &Colli
             let clear = |q: V3| world.wall_clearance(&crate::collision::Player::new([q[0], world.ground_at(q[0], q[2], q[1] + 100.0).unwrap_or(q[1]), q[2]])) >= 0.0;
             let p = if clear(beside) || !clear(at) { beside } else { at };
             let floor = world.ground_at(p[0], p[2], p[1] + 100.0).unwrap_or(p[1]);
-            let (model, actor) = dress(member);
-            let body = model.and_then(|m| characters.add_body(&m, actor.as_ref()));
+            let (kit, actor) = dress(member);
+            let body = kit.model.and_then(|m| characters.add_body(&m, actor.as_ref()));
+            let weapon = kit.weapon.and_then(|w| characters.add_weapon(&w));
             let scale = actor.as_ref().map_or([1.0; 3], |a| a.scale);
             let mut npc = Npc {
                 health: Health::new(),
@@ -266,6 +300,7 @@ pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, world: &Colli
                 stagger: npcs.len() as f32 * 0.73,
                 body,
                 stance: Some(member.stance),
+                weapon,
             };
             let feet_to_origin = -characters.body(&npc).0.bounds().0[1];
             npc.pos[1] = floor + feet_to_origin * scale[1];
@@ -301,6 +336,7 @@ pub fn place_npcs(
             stagger: i as f32 * 0.73,
             body: None,
             stance: None,
+            weapon: None,
         });
         faces.push(actor);
     }
@@ -327,6 +363,8 @@ mod tests {
             assert_eq!(npcs.len(), members.len());
             for (n, m) in npcs.iter().zip(&members) {
                 assert_eq!(n.stance, Some(m.stance));
+                // Some carry nothing, as a security guard lying dead on rm01
+                assert_eq!(n.weapon.is_some(), dress(m).0.weapon.is_some(), "rm{level:02}: {}", m.name);
                 let body = &characters.bodies[n.body.unwrap_or_else(|| panic!("rm{level:02}: {} wears no model of their own", m.name))];
                 assert!(body.rig.is_some(), "{}", m.kit);
                 for (dir, t) in &body.textures {

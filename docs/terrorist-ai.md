@@ -185,9 +185,10 @@ Small enough to try out on the maps we play, and grow from:
    sim::idle): a team at one of its places, facing its heading (256ths of a turn from +z, which
    examples/mission-headings.rs settles: that way 12 of 574 face a wall within 100 units, against
    33 to 90 any other way), its members side by side, each in the model their kit names with their
-   actor's textures, waiting in their stance with its rests and fidgets. Still to do: smoking,
-   drinking and talking, the weapons in their hands, hit reactions that start from their stance,
-   and alertness.
+   actor's textures, the kit's weapon (the primary, or else the secondary) in the right hand,
+   waiting in their stance with its rests and fidgets. Still to do: smoking, drinking and
+   talking, dropping the weapon on dying, hit reactions that start from their stance, and
+   alertness.
 2. Seeing, as above: field of view, range, glimpses, visibility and line of sight.
 3. Reacting to a player in view: turn toward them and fire, after a delay and with a spread to be
    read from the exe (and the skills); reload; take wounds and die as the characters do now.
