@@ -323,9 +323,9 @@ pub struct Sim {
     /// For each player, how many ticks back in time the others were when they took their shot,
     /// as that player saw them (a server sets it before each tick; none means no looking back)
     pub rewind: Vec<f32>,
-    /// Where each living player was at the end of each of the latest ticks, and whether they
-    /// were crouched, oldest first
-    past: VecDeque<Vec<Option<(V3, bool)>>>,
+    /// Where each living player was at the end of each of the latest ticks, whether they were
+    /// crouched and how far a peek leaned them (`peek_offset`), oldest first
+    past: VecDeque<Vec<Option<(V3, bool, V3)>>>,
     eye_height: f32,
     /// What a player starts with
     pub magazine: u32,
@@ -737,7 +737,11 @@ impl Sim {
         }
         self.apply_union_rooms();
         if self.pvp {
-            self.past.push_back(self.players.iter().map(|p| (p.active && p.respawn_at.is_none()).then_some((p.player.pos, p.player.crouched))).collect());
+            let past = (0..self.players.len()).map(|i| {
+                let p = &self.players[i];
+                (p.active && p.respawn_at.is_none()).then(|| (p.player.pos, p.player.crouched, self.peek_offset(i)))
+            }).collect();
+            self.past.push_back(past);
             while self.past.len() > PAST_TICKS {
                 self.past.pop_front();
             }
@@ -746,12 +750,12 @@ impl Sim {
     }
 
     /// Where a player was `back` ticks ago (between ticks, if it is not a whole number), or
-    /// where they are if `back` is nothing, and whether they were crouched (as at the nearer
-    /// tick). None if they were not standing then.
-    fn body_then(&self, slot: usize, back: f32) -> Option<(V3, bool)> {
+    /// where they are if `back` is nothing, whether they were crouched (as at the nearer tick)
+    /// and how far a peek leaned them. None if they were not standing then.
+    fn body_then(&self, slot: usize, back: f32) -> Option<(V3, bool, V3)> {
         let now = &self.players[slot].player;
         if back <= 0.0 || self.past.is_empty() {
-            return Some((now.pos, now.crouched));
+            return Some((now.pos, now.crouched, self.peek_offset(slot)));
         }
         // The newest tick in `past` is the one just finished, which is as good as now
         let back = back.min((self.past.len() - 1) as f32);
@@ -759,9 +763,10 @@ impl Sim {
         let at = |i: usize| self.past[i].get(slot).copied().flatten();
         let (newer_body, older_body) = (at(newer), newer.checked_sub(1).and_then(at));
         match (newer_body, older_body) {
-            (Some((n, nc)), Some((o, oc))) => {
+            (Some((n, nc, nl)), Some((o, oc, ol))) => {
                 let f = back.fract();
-                Some(([0, 1, 2].map(|k| n[k] + (o[k] - n[k]) * f), if f < 0.5 { nc } else { oc }))
+                let mix = |a: V3, b: V3| [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * f);
+                Some((mix(n, o), if f < 0.5 { nc } else { oc }, mix(nl, ol)))
             }
             (Some(n), None) if back.fract() < 0.5 => Some(n),
             (None, Some(o)) if back.fract() >= 0.5 => Some(o),
@@ -1183,33 +1188,34 @@ impl Sim {
         (0..self.players.len())
             .filter(|&i| i != shooter && self.players[i].active && self.players[i].respawn_at.is_none())
             .filter_map(|i| {
-                // The body is an upright cylinder, where the shooter saw it
-                let (feet, crouched) = self.body_then(i, back)?;
+                // The body is an upright cylinder, where the shooter saw it, cut by height into
+                // the legs, belly, chest and head. A peek leans them toward where the head has
+                // gone: the legs stay, and each part above goes so much of the way.
+                let (feet, crouched, lean) = self.body_then(i, back)?;
                 let height = self.world.params().body_height(crouched);
-                let (ox, oz) = (eye[0] - feet[0], eye[2] - feet[2]);
-                let b = 2.0 * (ox * dir[0] + oz * dir[2]);
-                let c = ox * ox + oz * oz - HIT_RADIUS * HIT_RADIUS;
-                let disc = b * b - 4.0 * a * c;
-                if disc < 0.0 {
-                    return None;
-                }
-                let t = (-b - disc.sqrt()) / (2.0 * a);
-                let up = (eye[1] + dir[1] * t - feet[1]) / height;
-                if t <= 0.0 || !(0.0..=1.0).contains(&up) {
-                    return None;
-                }
-                // Below the belly, the leg on the side of the body the bullet goes in
                 let place = self.placement(i);
                 let right = place.to_world([1.0, 0.0, 0.0]);
-                let across = (ox + dir[0] * t) * (right[0] - place.pos[0]) + (oz + dir[2] * t) * (right[2] - place.pos[2]);
-                let part = match up {
-                    u if u >= 0.88 => combat::BodyPart::Head,
-                    u if u >= 0.55 => combat::BodyPart::Torso,
-                    u if u >= 0.40 => combat::BodyPart::Abdomen,
-                    _ if across > 0.0 => combat::BodyPart::RightLeg,
-                    _ => combat::BodyPart::LeftLeg,
-                };
-                Some((i, t, part))
+                let parts = [(0.0, 0.40, 0.0, None), (0.40, 0.55, 0.25, Some(combat::BodyPart::Abdomen)),
+                    (0.55, 0.88, 0.6, Some(combat::BodyPart::Torso)), (0.88, 1.0, 1.0, Some(combat::BodyPart::Head))];
+                parts.iter().filter_map(|&(lo, hi, follows, part)| {
+                    let at = [0, 1, 2].map(|k| feet[k] + lean[k] * follows);
+                    let (ox, oz) = (eye[0] - at[0], eye[2] - at[2]);
+                    let b = 2.0 * (ox * dir[0] + oz * dir[2]);
+                    let c = ox * ox + oz * oz - HIT_RADIUS * HIT_RADIUS;
+                    let disc = b * b - 4.0 * a * c;
+                    if disc < 0.0 {
+                        return None;
+                    }
+                    let t = (-b - disc.sqrt()) / (2.0 * a);
+                    let up = (eye[1] + dir[1] * t - at[1]) / height;
+                    if t <= 0.0 || !(lo..=hi).contains(&up) {
+                        return None;
+                    }
+                    // Below the belly, the leg on the side of the body the bullet goes in
+                    let across = (ox + dir[0] * t) * (right[0] - place.pos[0]) + (oz + dir[2] * t) * (right[2] - place.pos[2]);
+                    let part = part.unwrap_or(if across > 0.0 { combat::BodyPart::RightLeg } else { combat::BodyPart::LeftLeg });
+                    Some((i, t, part))
+                }).min_by(|a, b| a.1.total_cmp(&b.1))
             })
             .min_by(|a, b| a.1.total_cmp(&b.1))
     }
@@ -1701,6 +1707,34 @@ mod tests {
         let mut sim = duel();
         sim.tick(&[aim(8.0), holding()], TICK);
         assert_eq!(sim.players[1].hp, 100.0);
+    }
+
+    #[test]
+    fn a_peeking_player_is_hit_where_their_head_has_gone() {
+        let peeking = Input { peek_right: true, ..holding() };
+        let leaned = || {
+            let mut sim = duel();
+            run_both(&mut sim, &holding(), &peeking, 1.0);
+            sim
+        };
+        // Where the head was, the bullet goes past
+        let mut sim = leaned();
+        sim.tick(&[aim(0.0), peeking], TICK);
+        assert_eq!(sim.players[1].hp, 100.0);
+        // Where it has gone, it is a head shot
+        let mut sim = leaned();
+        let target = sim.eye(1);
+        sim.players[0].player.pos[0] = target[0];
+        let from = sim.eye(0);
+        let pitch = (target[1] - from[1]).atan2((target[2] - from[2]).abs()).to_degrees();
+        let events = sim.tick(&[aim(pitch), peeking], TICK);
+        assert!(events.contains(&Event::Kill { killer: Some(0), victim: 1, cause: Cause::HeadShot }), "{events:?}");
+    }
+
+    fn run_both(sim: &mut Sim, first: &Input, second: &Input, seconds: f32) {
+        for _ in 0..(seconds / TICK).round() as usize {
+            sim.tick(&[*first, *second], TICK);
+        }
     }
 
     #[test]
