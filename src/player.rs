@@ -34,6 +34,11 @@ pub struct PlayerMotions {
     /// Stepping round in place after turning, standing and crouched
     pub turn: Option<motion::Motion>,
     pub crouch_turn: Option<motion::Motion>,
+    /// Peeking round a corner to the left and right (see `sim::peek`), standing and crouched
+    pub peek_left: Option<motion::Motion>,
+    pub peek_right: Option<motion::Motion>,
+    pub crouch_peek_left: Option<motion::Motion>,
+    pub crouch_peek_right: Option<motion::Motion>,
 }
 
 impl PlayerMotions {
@@ -71,6 +76,16 @@ impl PlayerMotions {
         if crouched { &self.crouch_turn } else { &self.turn }.as_ref()
     }
 
+    /// The motion a peek plays, to the right or left, standing or crouched
+    pub fn peek(&self, right: bool, crouched: bool) -> Option<&motion::Motion> {
+        match (right, crouched) {
+            (false, false) => &self.peek_left,
+            (true, false) => &self.peek_right,
+            (false, true) => &self.crouch_peek_left,
+            (true, true) => &self.crouch_peek_right,
+        }.as_ref()
+    }
+
     /// The motion for a reload, as the magazine was, standing or kneeling
     pub fn reload(&self, r: Reloading, crouched: bool) -> Option<&motion::Motion> {
         match (r.empty, crouched) {
@@ -97,6 +112,8 @@ pub struct BodyKey {
     pub flinch: Option<u32>,
     /// Stepping round after a turn in place, by when it began, as for a flinch
     pub shuffle: Option<u32>,
+    /// Peeking, to the right or not
+    pub peek: Option<bool>,
 }
 
 /// A body's ease from one motion into the next

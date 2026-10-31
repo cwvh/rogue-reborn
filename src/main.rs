@@ -307,6 +307,11 @@ fn main() {
         // Stepping round after turning in place, on the legs, as the original's
         turn: planted("turn", "tmu_plf"),
         crouch_turn: planted("crouch_turn", "tmc_plf"),
+        // Peeking, as the original's: crouched it also has tac_plf and tac_prt, the same motions
+        peek_left: planted("peek_left", "tau_plf"),
+        peek_right: planted("peek_right", "tau_prt"),
+        crouch_peek_left: planted("crouch_peek_left", "tmac_plf"),
+        crouch_peek_right: planted("crouch_peek_right", "tmac_prt"),
     };
 
     // The MP5K: definition, model and texture
@@ -1558,12 +1563,15 @@ fn main() {
             // done in place, and a change of stance plays crouching down or standing up. `flinch`
             // is a wound's flinch, its frame and when it began, which takes the whole body while
             // it plays. `hip_turn` is how far the hips would turn toward a side step (see
-            // `movement::hip_turn`). `body` is what the drawing remembers of this body from frame to frame.
+            // `movement::hip_turn`). `peek` takes the whole body, as a flinch does, while it lasts.
+            // `body` is what the drawing remembers of this body from frame to frame.
             let draw_body = |chars: &Characters, movement: Movement, frame: f32, feet: [f32; 3], yaw_deg: f32, scale: [f32; 3],
                              face: Option<u32>, hand: Option<&Option<WeaponDraw>>, grenade: bool, flash: bool, reloading: Option<Reloading>,
-                             firing: bool, crouched: bool, hip_turn: f32, flinch: Option<(&rogue_reborn::motion::Motion, f32, f32)>, body: &mut BodyState| -> bool {
+                             firing: bool, crouched: bool, hip_turn: f32, flinch: Option<(&rogue_reborn::motion::Motion, f32, f32)>,
+                             peek: Option<rogue_reborn::sim::peek::Peek>, body: &mut BodyState| -> bool {
                 let Some(Rig { skeleton: skel, skin }) = &chars.rig else { return false };
-                let moving = matches!(movement, Movement::Walk | Movement::Run | Movement::Back | Movement::StrafeLeft | Movement::StrafeRight | Movement::WalkLeft | Movement::WalkRight);
+                let peeking = peek.filter(|_| flinch.is_none()).and_then(|k| player_motions.peek(k.right, k.crouched).map(|m| (m, k.frame, k.right)));
+                let moving = peeking.is_none() && matches!(movement, Movement::Walk | Movement::Run | Movement::Back | Movement::StrafeLeft | Movement::StrafeRight | Movement::WalkLeft | Movement::WalkRight);
                 // Crouching down or standing up plays in place, at its own pace; moving cuts it short
                 let since = body.since_stance_change(crouched, game_time);
                 let changing = since.filter(|_| !moving)
@@ -1582,6 +1590,7 @@ fn main() {
                 let looping = |m: &'_ rogue_reborn::motion::Motion| (game_time * 30.0) % m.frames.max(1) as f32;
                 let (mot, frame) = match (flinch, changing, shuffle, movement, reload) {
                     (Some((m, f, _)), ..) => (m, f),
+                    _ if peeking.is_some() => peeking.map(|(m, f, _)| (m, f)).unwrap(),
                     (None, Some(change), ..) => change,
                     (None, None, Some((m, f, _)), ..) => (m, f),
                     (None, None, None, Movement::Reload, Some(shown)) => shown,
@@ -1599,8 +1608,8 @@ fn main() {
                 let aiming = (firing || movement == Movement::Fire) && reload.is_none() && flinch.is_none();
                 // Moving, kneeling or stepping round: the legs from the motion, and the upper body
                 // reloads, fires (the fire motion looping at its own pace), throws or keeps the gun hold
-                let shuffling = flinch.is_none() && shuffle.is_some();
-                if flinch.is_none() && (moving || arms_only || shuffling) {
+                let shuffling = flinch.is_none() && peeking.is_none() && shuffle.is_some();
+                if flinch.is_none() && peeking.is_none() && (moving || arms_only || shuffling) {
                     let fire = player_motions.get(Movement::Fire, crouched).filter(|_| aiming).map(|m| (m, looping(m)));
                     let throw = player_motions.get(Movement::Throw, crouched).filter(|_| (arms_only || shuffling) && movement == Movement::Throw).map(|m| (m, frame));
                     let upper = reload.or(fire).or(throw).or_else(|| player_motions.get(Movement::Idle, crouched).map(|hold| (hold, 0.0)));
@@ -1641,7 +1650,7 @@ fn main() {
                 // leave a gun still on its way up. Once firing, the legs still ease.
                 let raising = aiming && !body.fade.key().is_some_and(|k| k.aiming);
                 let ease = if raising { 0.0 } else { rogue_reborn::motion::CROSSFADE_SECONDS };
-                let key = BodyKey { movement, reload: reloading.map(|r| r.empty), aiming, crouched, changing: changing.is_some(), flinch: flinch.map(|f| f.2.to_bits()), shuffle: shuffle.filter(|_| shuffling).map(|s| s.2.to_bits()) };
+                let key = BodyKey { movement, reload: reloading.map(|r| r.empty), aiming, crouched, changing: changing.is_some(), flinch: flinch.map(|f| f.2.to_bits()), shuffle: shuffle.filter(|_| shuffling).map(|s| s.2.to_bits()), peek: peeking.map(|p| p.2) };
                 body.fade.apply(key, game_time, ease, &mut root, &mut rots);
                 let pose = skel.pose([0.0, root[1], 0.0], &rots);
                 let verts = skin.apply(&pose);
@@ -1702,7 +1711,7 @@ fn main() {
                         // Hidden, the animation still follows them
                         let flinch = flinch_at(chars, p, view_time);
                         let hip_turn = remote_anim.hip_turn(slot, yaw);
-                        if !visible || draw_body(chars, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, doing.reloading, doing.firing, doing.crouched, hip_turn, flinch, bodies.entry(slot).or_default()) {
+                        if !visible || draw_body(chars, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, doing.reloading, doing.firing, doing.crouched, hip_turn, flinch, p.peek, bodies.entry(slot).or_default()) {
                             continue;
                         }
                     } else {
@@ -1748,7 +1757,7 @@ fn main() {
                 let flash = !mine.equipped_grenade && game_time < mine.flash_until;
                 if mine.respawn_at.is_none() {
                     let flinch = flinch_at(chars, mine, game_time);
-                    draw_body(chars, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash, mine.reloading(game_time), sim.firing(me), mine.player.crouched, player_hip_turn, flinch, bodies.entry(me).or_default());
+                    draw_body(chars, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash, mine.reloading(game_time), sim.firing(me), mine.player.crouched, player_hip_turn, flinch, mine.peek, bodies.entry(me).or_default());
                 }
             }
 

@@ -2,7 +2,8 @@
 //! motions up to the frame it holds at for as long as the key is down (RogueSpear.exe
 //! 0x5cb6a0), and the eye goes where the head goes, to the side and up or down
 //! (0x5a9ba0, 0x5d67c0). Letting go plays the rest of the motion, which leans back; let go
-//! before the hold and it leans back from as far as it got. Peeking stands the player still.
+//! before the hold and it leans back from as far as it got, and pressed again while leaning
+//! back it leans out again from there. Peeking stands the player still.
 //! The lean stops short where a wall is in the way: the original moves the body's cylinder to
 //! the side as far as the head goes, and pauses the motion where that meets a wall (0x5d6670).
 
@@ -56,7 +57,7 @@ impl Motion {
     }
 
     /// The frame of the last key: let go on the way out, a peek leans back from this far before
-    /// it, which brings the head back the way it went
+    /// it, which brings the head back the way it went (and pressed again, out the same way)
     fn last_key(&self) -> f32 {
         (self.keys.len() - 1) as f32 * KEY_FRAMES
     }
@@ -94,16 +95,21 @@ impl Peek {
         let m = Motion::of(p.right, p.crouched);
         let held = if p.right { right } else { left };
         if held {
-            // Out to the hold and still there, unless a wall is in the way; pressed again while
-            // leaning back, it stops where it is
-            if !p.returning && p.frame < m.hold {
+            // Pressed again while leaning back, it leans out again from where it has got to
+            if p.returning {
+                p.returning = false;
+                if p.frame > m.hold {
+                    p.frame = (m.last_key() - p.frame).clamp(0.0, m.hold);
+                }
+            }
+            // Out to the hold and still there, unless a wall is in the way
+            if p.frame < m.hold {
                 let next = (p.frame + FPS * dt).min(m.hold);
                 let (now, then) = (clearance(m.moved(p.frame)[0]), clearance(m.moved(next)[0]));
                 if then >= 0.0 || then >= now {
                     p.frame = next;
                 }
             }
-            p.returning = false;
             return Some(p);
         }
         if !p.returning {
@@ -172,6 +178,16 @@ mod tests {
             p = Peek::step(p, false, true, false, DT, |side: f32| -5.0 + side);
         }
         assert_eq!(p.expect("peeking").frame, STANDING_RIGHT.hold);
+    }
+
+    #[test]
+    fn pressed_again_while_leaning_back_a_peek_leans_out_again_from_where_it_got() {
+        let out = hold(None, true, false, 2.0).expect("peeking");
+        let back = hold(Some(out), false, false, 0.2).expect("leaning back");
+        let again = Peek::step(Some(back), true, false, false, 0.0, |_| f32::INFINITY).expect("peeking");
+        assert!(!again.returning && again.frame < STANDING_LEFT.hold);
+        assert!((again.eye()[0] - back.eye()[0]).abs() < 4.0, "{:?} from {:?}", again.eye(), back.eye());
+        assert_eq!(hold(Some(again), true, false, 1.0).expect("peeking").frame, STANDING_LEFT.hold);
     }
 
     #[test]
