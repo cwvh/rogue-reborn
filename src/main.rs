@@ -606,6 +606,7 @@ fn main() {
     let mut was_free = false;
     let mut drawn_rooms: Vec<String> = Vec::new();
     let mut blink_enabled = !args.no_blink;
+    let mut show_hitboxes = false;
     // Sound is optional: no output device just means silence
     let mut sound = if args.no_sound { None } else { sound::Sound::open("data/sound") };
     if let Some(snd) = sound.as_mut() {
@@ -709,6 +710,9 @@ fn main() {
                             show_collisions = !show_collisions;
                         }
                         (Key::B, Action::Press) => {
+                            show_hitboxes = !show_hitboxes;
+                        }
+                        (Key::N, Action::Press) => {
                             blink_enabled = !blink_enabled;
                         }
                         (Key::F, Action::Press) => {
@@ -2046,6 +2050,44 @@ fn main() {
                     }
                 }
                 glColor3f(1.0, 1.0, 1.0); // restore default for next pass
+            }
+
+            // What bullets hit of each player, as yellow outlines: the player's own only when
+            // their body is seen, in third person or flying free
+            if show_hitboxes {
+                glDisable(0x0DE1); // GL_TEXTURE_2D
+                glColor3f(1.0, 0.85, 0.0);
+                let others = view.as_ref().map_or(&[][..], |v| &v.players[..]);
+                let mut standing: Vec<(usize, [f32; 3])> = others.iter().filter(|p| p.0 != me && p.3.is_none()).map(|p| (p.0, p.1)).collect();
+                if sim.players[me].respawn_at.is_none() && (third_person || !first_person) {
+                    standing.push((me, draw_feet));
+                }
+                const SIDES: usize = 24;
+                let ring = |c: [f32; 3], y: f32| {
+                    glBegin(0x0002); // GL_LINE_LOOP
+                    for k in 0..SIDES {
+                        let a = k as f32 / SIDES as f32 * std::f32::consts::TAU;
+                        glVertex3f(c[0] + a.cos() * sim::HIT_RADIUS, y, c[2] + a.sin() * sim::HIT_RADIUS);
+                    }
+                    glEnd();
+                };
+                for (slot, feet) in standing {
+                    let p = &sim.players[slot];
+                    for part in sim.hit_parts(feet, p.player.crouched, sim.peek_offset(slot)) {
+                        let b = part.bottom;
+                        ring(b, b[1]);
+                        ring(b, part.top);
+                        glBegin(0x0001); // GL_LINES
+                        for k in 0..4 {
+                            let a = k as f32 * std::f32::consts::FRAC_PI_2;
+                            let (x, z) = (b[0] + a.cos() * sim::HIT_RADIUS, b[2] + a.sin() * sim::HIT_RADIUS);
+                            glVertex3f(x, b[1], z);
+                            glVertex3f(x, part.top, z);
+                        }
+                        glEnd();
+                    }
+                }
+                glColor3f(1.0, 1.0, 1.0);
             }
 
             // Brushes and some collision hints that augment level geometry

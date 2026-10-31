@@ -38,15 +38,25 @@ pub const RELOAD_SECONDS: f32 = 2.2;
 /// A player's health at the start
 pub const PLAYER_HP: f32 = 100.0;
 
+/// The radius of each part of a player's body that bullets hit (see `Sim::hit_parts`)
+pub const HIT_RADIUS: f32 = 25.0;
+
+/// One of the parts of a player's body that bullets hit: an upright cylinder of `HIT_RADIUS`
+/// from the middle of its bottom up to the height `top`. The legs are no part (`None`): which
+/// one a bullet hits is the side it goes in.
+#[derive(Clone, Copy, Debug)]
+pub struct HitPart {
+    pub bottom: V3,
+    pub top: f32,
+    pub part: Option<combat::BodyPart>,
+}
+
 /// How long a dead player waits to come back. The body they fell with stays where it fell.
 pub const RESPAWN_SECONDS: f32 = 3.7;
 
 /// How long a wounded player's flinch is kept: longer than any flinch plays (the longest, 51
 /// frames, is 1.7 s), and short enough to send as a tick count in a byte (see net::proto)
 pub const FLINCH_SECONDS: f32 = 2.0;
-
-/// How wide a player is to a bullet
-const HIT_RADIUS: f32 = 25.0;
 
 /// How many ticks of where players have been are kept, to aim at where they were
 const PAST_TICKS: usize = 40;
@@ -1188,17 +1198,11 @@ impl Sim {
         (0..self.players.len())
             .filter(|&i| i != shooter && self.players[i].active && self.players[i].respawn_at.is_none())
             .filter_map(|i| {
-                // The body is an upright cylinder, where the shooter saw it, cut by height into
-                // the legs, belly, chest and head. A peek leans them toward where the head has
-                // gone: the legs stay, and each part above goes so much of the way.
+                // Where the shooter saw the body
                 let (feet, crouched, lean) = self.body_then(i, back)?;
-                let height = self.world.params().body_height(crouched);
                 let place = self.placement(i);
                 let right = place.to_world([1.0, 0.0, 0.0]);
-                let parts = [(0.0, 0.40, 0.0, None), (0.40, 0.55, 0.25, Some(combat::BodyPart::Abdomen)),
-                    (0.55, 0.88, 0.6, Some(combat::BodyPart::Torso)), (0.88, 1.0, 1.0, Some(combat::BodyPart::Head))];
-                parts.iter().filter_map(|&(lo, hi, follows, part)| {
-                    let at = [0, 1, 2].map(|k| feet[k] + lean[k] * follows);
+                self.hit_parts(feet, crouched, lean).into_iter().filter_map(|HitPart { bottom: at, top, part }| {
                     let (ox, oz) = (eye[0] - at[0], eye[2] - at[2]);
                     let b = 2.0 * (ox * dir[0] + oz * dir[2]);
                     let c = ox * ox + oz * oz - HIT_RADIUS * HIT_RADIUS;
@@ -1207,8 +1211,8 @@ impl Sim {
                         return None;
                     }
                     let t = (-b - disc.sqrt()) / (2.0 * a);
-                    let up = (eye[1] + dir[1] * t - at[1]) / height;
-                    if t <= 0.0 || !(lo..=hi).contains(&up) {
+                    let y = eye[1] + dir[1] * t;
+                    if t <= 0.0 || !(at[1]..=top).contains(&y) {
                         return None;
                     }
                     // Below the belly, the leg on the side of the body the bullet goes in
@@ -1218,6 +1222,20 @@ impl Sim {
                 }).min_by(|a, b| a.1.total_cmp(&b.1))
             })
             .min_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
+    /// What bullets hit of a player standing at `feet`: an upright cylinder of `HIT_RADIUS`, cut
+    /// by height into the legs, belly, chest and head. A peek's `lean` (see `peek_offset`) moves
+    /// them toward where the head has gone: the legs stay, and each part above goes so much of
+    /// the way.
+    pub fn hit_parts(&self, feet: V3, crouched: bool, lean: V3) -> [HitPart; 4] {
+        let height = self.world.params().body_height(crouched);
+        [(0.0, 0.40, 0.0, None), (0.40, 0.55, 0.25, Some(combat::BodyPart::Abdomen)),
+            (0.55, 0.88, 0.6, Some(combat::BodyPart::Torso)), (0.88, 1.0, 1.0, Some(combat::BodyPart::Head))]
+            .map(|(lo, hi, follows, part)| {
+                let at = [0, 1, 2].map(|k| feet[k] + lean[k] * follows);
+                HitPart { bottom: [at[0], at[1] + lo * height, at[2]], top: at[1] + hi * height, part }
+            })
     }
 
     /// Where a player stands and the way they face, as their body is drawn
