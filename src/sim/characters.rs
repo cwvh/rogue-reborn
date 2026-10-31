@@ -142,6 +142,52 @@ impl Characters {
     }
 }
 
+/// How far apart the members of a team stand, side by side across where it starts
+const TEAM_SPACING: f32 = 70.0;
+
+/// Stand each of a mission's terrorists where their team starts: at one of its places, picked
+/// with `seed`, facing its heading (256ths of a turn, 0 along +z, as examples/mission-headings.rs
+/// finds), the members side by side where there is room. Team members' faces are dealt out in
+/// turn, as `place_npcs` does.
+pub fn place_terrorists(
+    teams: &[crate::mission::Team],
+    seed: u64,
+    world: &CollisionWorld,
+    model: &Crp,
+    actors: &[Actor],
+) -> (Vec<Npc>, Vec<Option<usize>>) {
+    let feet_to_origin = -model.bounds().0[1];
+    let mut rng = seed | 1;
+    let (mut npcs, mut faces) = (Vec::new(), Vec::new());
+    for team in teams.iter().filter(|t| t.terrorists) {
+        let pick = (crate::util::next_rng(&mut rng) >> 33) as usize % team.starts.len();
+        let (at, heading) = team.starts[pick];
+        let yaw = heading * 360.0 / 256.0;
+        let (sin, cos) = yaw.to_radians().sin_cos();
+        let n = team.members.len();
+        for k in 0..n {
+            let across = (k as f32 - (n - 1) as f32 / 2.0) * TEAM_SPACING;
+            // Beside the place, unless a wall is there
+            let beside = [at[0] + cos * across, at[1], at[2] - sin * across];
+            let clear = |q: V3| world.wall_clearance(&crate::collision::Player::new([q[0], world.ground_at(q[0], q[2], q[1] + 100.0).unwrap_or(q[1]), q[2]])) >= 0.0;
+            let p = if clear(beside) || !clear(at) { beside } else { at };
+            let floor = world.ground_at(p[0], p[2], p[1] + 100.0).unwrap_or(p[1]);
+            let actor = (!actors.is_empty()).then(|| npcs.len() % actors.len());
+            let scale_y = actor.map_or(1.0, |a| actors[a].scale[1]);
+            npcs.push(Npc {
+                health: Health::new(),
+                pos: [p[0], floor + feet_to_origin * scale_y, p[2]],
+                floor,
+                yaw,
+                scale: actor.map_or([1.0; 3], |a| actors[a].scale),
+                stagger: npcs.len() as f32 * 0.73,
+            });
+            faces.push(actor);
+        }
+    }
+    (npcs, faces)
+}
+
 /// Stand a character at each spawn point (a point on the map's floor) but those in `skip`,
 /// dealing the team members' faces out in turn. `yaw` says which way the character at a
 /// spawn point faces, given its index and position. Also returns which team member each one is.
@@ -170,4 +216,36 @@ pub fn place_npcs(
         faces.push(actor);
     }
     (npcs, faces)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collision::{Params, Player};
+    use crate::mission::{self, Difficulty};
+
+    #[test]
+    fn every_missions_terrorists_stand_on_a_floor_clear_of_the_walls() {
+        let model = Path::new("data/character/team_hrt/blue_M_a.CRP");
+        let Ok(model) = crp::read(model) else { return };
+        let (mut placed, mut in_walls) = (0, Vec::new());
+        for level in 1..=19 {
+            let map_path = format!("data/map/rm{level:02}/rm{level:02}.map");
+            let Some((_, teams)) = mission::teams(Path::new(&map_path), Difficulty::Medium) else { continue };
+            let level_map = crate::map::read(Path::new(&map_path)).unwrap();
+            let world = CollisionWorld::from_map(&level_map, Params::default());
+            let (npcs, _) = place_terrorists(&teams, 7, &world, &model, &[]);
+            assert_eq!(npcs.len(), teams.iter().filter(|t| t.terrorists).map(|t| t.members.len()).sum::<usize>());
+            for n in &npcs {
+                let floor = world.ground_at(n.pos[0], n.pos[2], n.floor + 1.0);
+                assert!(floor.is_some_and(|f| (f - n.floor).abs() < 1.0), "rm{level:02}: no floor under {:?}", n.pos);
+                let feet = Player::new([n.pos[0], n.floor, n.pos[2]]);
+                if world.wall_clearance(&feet) < -5.0 {
+                    in_walls.push(format!("rm{level:02} {:?}", n.pos));
+                }
+                placed += 1;
+            }
+        }
+        assert!(placed == 0 || in_walls.len() * 50 < placed, "{} of {placed} in walls: {in_walls:?}", in_walls.len());
+    }
 }

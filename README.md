@@ -107,6 +107,7 @@ On other platforms, or without the aliases:
 | `--first-person` | start walking instead of in free-fly |
 | `--textured` | textured instead of wireframe |
 | `--spawn N` | start at the Nth mission spawn point (1-based) |
+| `--difficulty easy\|medium\|hard` | which of the mission's difficulty files places its terrorists (medium by default). On the 18 RM levels the terrorists stand where the mission starts them, a team at one of its places picked at random (`--seed` fixes it); elsewhere, characters stand at the spawn points |
 | `--max-fps N` | cap the frame rate (turns vsync off); the default is vsync |
 | `--realistic-decals` | per-surface bullet holes with splinters, sparks and dust, instead of the game's sprites |
 | `--no-sound`, `--volume 0.0-1.0` | sound off, master volume |
@@ -142,7 +143,8 @@ rr --connect 127.0.0.1:27960 --first-person --textured
 ```
 
 `rrsrv` listens on UDP port 27960 (`--port` changes it). It places `--npcs` characters for the box
-room, or the level's spawn points after the first `--max-players` for a level. Build `rr` and `rrsrv`
+room, a level's mission terrorists (medium difficulty) where it has a mission, or else characters at the
+level's spawn points after the first `--max-players`. Build `rr` and `rrsrv`
 together (the same `cargo build`): the server turns away a client built from a different commit,
 because the two must move a player the same way. Snapshots go out 30 times a second (`--snapshot-rate`
 changes it), and other players, the characters and grenades are drawn a little in the past, moving smoothly between them.

@@ -55,6 +55,8 @@ pub struct Args {
     pub info: bool,
     pub spawn_zone: Option<String>,
     pub seed: Option<u64>,
+    /// Which of the mission's difficulty files says where its terrorists are
+    pub difficulty: rogue_reborn::mission::Difficulty,
     pub model: Option<PathBuf>,
     pub no_models: bool,
     pub no_sound: bool,
@@ -195,6 +197,10 @@ pub fn parse_args() -> Args {
             "--spawn" => args.spawn = it.next().and_then(|v| v.parse().ok()),
             "--anim-frame" => args.anim_frame = it.next().and_then(|v| v.parse().ok()),
             "--seed" => args.seed = it.next().and_then(|v| v.parse().ok()),
+            "--difficulty" => match it.next().and_then(|v| rogue_reborn::mission::Difficulty::parse(&v)) {
+                Some(d) => args.difficulty = d,
+                None => eprintln!("--difficulty expects easy, medium or hard"),
+            },
             "--first-person" => args.first_person = true,
             "--walk" => {
                 args.walk = it.next().and_then(|v| v.parse().ok());

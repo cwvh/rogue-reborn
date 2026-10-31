@@ -18,7 +18,8 @@ use rogue_reborn::net::client::{Client, Status};
 use rogue_reborn::net::animation::Doing;
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
 use rogue_reborn::recording::{Playback, Recorder, Recording};
-use rogue_reborn::sim::characters::{Characters, Npc, Rig, place_npcs};
+use rogue_reborn::mission;
+use rogue_reborn::sim::characters::{Characters, Npc, Rig, place_npcs, place_terrorists};
 use rogue_reborn::sim::movement::{Movement, Reloading, crouched_speed, ground_speed, hip_turn, movement_from_keys};
 use rogue_reborn::collision::{CollisionWorld, Params};
 use rogue_reborn::impact::{self, Surface};
@@ -431,13 +432,22 @@ fn main() {
             s.npcs.iter().map(|n| Npc { health: combat::Health::new(), pos: n.pos, floor: n.floor, yaw: n.yaw, scale: n.scale, stagger: n.stagger }).collect(),
             s.npcs.iter().map(|n| n.actor.map(|a| a as usize)).collect(),
         ),
-        (None, Some(c), false) => place_npcs(&mission_spawns, own_spawn.as_slice(), &world, &c.model, &actors, &|i, p| {
-            args.model_yaw.unwrap_or_else(|| match mission_spawns.first() {
-                // In the demo room everyone faces the player
-                Some(player) if args.demo => (player[0] - p[0]).atan2(player[2] - p[2]).to_degrees(),
-                _ => i as f32 * 137.5,
-            })
-        }),
+        // The mission's terrorists where it puts them, or else characters at the spawn points
+        (None, Some(c), false) => match mission::teams(map_path, args.difficulty).filter(|_| !args.demo) {
+            Some((path, teams)) => {
+                let seed = args.seed.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64));
+                let placed = place_terrorists(&teams, seed, &world, &c.model, &actors);
+                println!("{} terrorists from {}", placed.0.len(), path.display());
+                placed
+            }
+            None => place_npcs(&mission_spawns, own_spawn.as_slice(), &world, &c.model, &actors, &|i, p| {
+                args.model_yaw.unwrap_or_else(|| match mission_spawns.first() {
+                    // In the demo room everyone faces the player
+                    Some(player) if args.demo => (player[0] - p[0]).atan2(player[2] - p[2]).to_degrees(),
+                    _ => i as f32 * 137.5,
+                })
+            }),
+        },
         _ => (Vec::new(), Vec::new()),
     };
 

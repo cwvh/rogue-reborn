@@ -28,3 +28,4 @@ pub mod recording;
 pub mod bytes;
 pub mod net;
 pub mod levels;
+pub mod mission;

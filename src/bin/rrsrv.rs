@@ -14,7 +14,8 @@ use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
 use rogue_reborn::net::proto::{NpcSetup, Setup};
 use rogue_reborn::net::server::Server;
 use rogue_reborn::net::setup::build_sim;
-use rogue_reborn::sim::characters::{Characters, place_npcs};
+use rogue_reborn::mission;
+use rogue_reborn::sim::characters::{Characters, place_npcs, place_terrorists};
 use rogue_reborn::sim::{Event, MAX_PLAYERS};
 use rogue_reborn::{actor, demo, map, weapon};
 
@@ -134,13 +135,20 @@ fn main() {
     let weapon_def = weapon::read(Path::new("data/kit/pw_mp5k.wpn")).ok();
     let characters = if args.no_models { None } else { Characters::load(&args.model, idle) };
     let actors = actor::read_all(Path::new("data/actor"));
-    let (npcs, faces) = match &characters {
-        Some(c) => place_npcs(&npc_spawns, &[], &world, &c.model, &actors, &|_, p| {
+    let teams = level_path.as_deref().and_then(|p| mission::teams(p, mission::Difficulty::Medium));
+    let (npcs, faces) = match (&characters, teams) {
+        // The mission's terrorists where it puts them
+        (Some(c), Some((path, teams))) => {
+            let placed = place_terrorists(&teams, args.seed, &world, &c.model, &actors);
+            eprintln!("rrsrv: {} terrorists from {}", placed.0.len(), path.display());
+            placed
+        }
+        (Some(c), None) => place_npcs(&npc_spawns, &[], &world, &c.model, &actors, &|_, p| {
             // In the box room they face the players; elsewhere they are dealt a facing
             let first = player_spawns[0];
             if level_path.is_none() { (first[0] - p[0]).atan2(first[2] - p[2]).to_degrees() } else { (p[0] * 7.0 + p[2] * 3.0) % 360.0 }
         }),
-        None => (Vec::new(), Vec::new()),
+        (None, _) => (Vec::new(), Vec::new()),
     };
     let (magazine, reserve) = weapon_def.map_or((30, 900), |w| (w.magazine, w.reserve));
     let setup = Setup {

@@ -156,7 +156,12 @@ from 1.7 degrees to 0.07 in 1.4 s, and it fires once that is 12 units wide at th
 Small enough to try out on the maps we play, and grow from:
 
 1. Terrorists from the mission files, where the mission puts them: the team's actor, kit, stance,
-   alertness and one of its starting spots (the characters we place now stand at spawn points).
+   alertness and one of its starting spots. Placed so far (mission.rs, characters::place_terrorists):
+   a team at one of its places, facing its heading (256ths of a turn from +z, which
+   examples/mission-headings.rs settles: that way 12 of 574 face a wall within 100 units, against
+   33 to 90 any other way), its members side by side. They still wear the one shared model and
+   idle standing; their own models (the kit names TER_arabturk/arab_cat1_a..c), stances and
+   alertness are next.
 2. Seeing, as above: field of view, range, glimpses, visibility and line of sight.
 3. Reacting to a player in view: turn toward them and fire, after a delay and with a spread to be
    read from the exe (and the skills); reload; take wounds and die as the characters do now.
