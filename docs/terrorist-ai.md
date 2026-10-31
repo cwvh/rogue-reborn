@@ -90,13 +90,62 @@ So with `fov = F`, an alert terrorist sees out to `Max LOS Distance` in a cone a
 a bored one sees a narrower cone (60% of the angle) but further (about twice as far for a 90 degree
 view), and a glimpse goes 1.75 times as far again.
 
+## Aiming and firing
+
+Players and terrorists aim the same way, through a spread that closes over time, as the
+original's reticle does. Our players' shots go straight, for now.
+
+The weapon file (read by 0x5dabf0) gives, after the ammo's name, the "Targetting" multipliers
+for each way of moving, then three more. `tw_ak47.wpn`:
+
+| Field | AK47 | |
+| --- | --- | --- |
+| +0x164 | 0.36 | Stopped |
+| +0x168 | 1.01 | Shuffle (a slow walk, backing up, a side step) |
+| +0x16c | 5.55 | Walk |
+| +0x170 | 8.80 | Walk fast |
+| +0x174 | 16.58 | Run |
+| +0x178 | 0.70 | Crouched (times the one for moving) |
+| +0x17c | 1.84 | recoil: the spread's growth at the first shot |
+| +0x180 | 2.84 | twice the time, in seconds, the spread takes to close |
+| +0x194 | 0.40 | (unread) |
+
+The spread's size, `m` (0x5a9160, at char+0x980), with `s` the shooter's skill (char method +0xd4)
+over 100:
+
+- `m = (6 - 5s)` times the weapon's multiplier for how they move (char+0x4c8) and Crouched if
+  crouched; times 8 while a flashbang stuns them (data+0x50 1 or 2, counting down, 0x5a9aa0) and
+  3 when wounded (data+0x4c 1).
+- The spread angle (char+0x970, 0x5a97d0) goes from `0.02 m` radians down to `0.00083 m`
+  (`0.0276 m` stunned) as `(1 - t/T)^2`, `t` the time since it began to close and `T` half the
+  weapon's +0x180 (0.5 s without a gun); times `1 + v^2`, `v` at char+0x550 (likely how fast they
+  turn). Never wider than 15 degrees.
+- It starts again from the widest when how they move or their stance changes, or a stun.
+- Each shot widens it by the recoil: the first by +0x17c, and each after by a growth that comes
+  down toward 1 (`g = (g - 1) * 0.7 + 1`); then it closes again.
+- A shot leaves within the spread (0x5a54e0): `r = (1 - u1 u2) * spread` off the aim, at a random
+  angle round it, `u1`, `u2` uniform in 0..1. So most shots go out toward its edge (on average at
+  3/4 of it), not into its middle.
+
+A terrorist (0x5a93e0) aims at its target's head (char+0x4f4) if its skill is over 74 and
+char+0x25e is at most 0.2 (unread), otherwise at the middle of the body (char+0x500, a fixed height
+over the feet). It pulls the trigger (0x601610) when the spread, as wide as it is at the target
+(the angle times the distance, char+0x994), is at most `15 - 7s` units, or the spread has nearly
+closed (`(1 - t/T)^2` at most `0.15 - 0.14s`); and never while it is wider than 180 units there,
+or while one of a list of things (unread) holds it back. `s` there is char+0x304, likely the same
+skill.
+
+For an AK in the hands of a terrorist with an Assault of 40, standing still: the spread closes
+from 1.7 degrees to 0.07 in 1.4 s, and it fires once that is 12 units wide at the target (at
+10 m, 1000 units, after about half a second), or nearly closed. Running: 15 degrees down to 3.2.
+
 ## Not read yet
 
 - How a sighting becomes a threat: what makes it Suspicious, Distant, Immediate or Deadly, and
   how awareness rises and falls (the brains stage, 0x53d030 and on).
-- How long a terrorist takes to react, how it turns and aims, how accurate it is (the skills, and
-  the weapon's numbers: `tw_ak47.wpn` lists 0.36, 1.01, 5.55, 8.80, 16.58, 0.70, 1.84, 2.84, 0.40,
-  likely its spread in each stance and pace), how it fires (bursts) and reloads.
+- How fast a terrorist turns to face a target, what holds back its trigger, how it fires
+  (bursts, the rate of fire) and reloads, and which skill it aims with (Assault, or Sniper with a
+  sniper rifle).
 - Hearing: how far each kind of sound carries and what it starts (the sound stage).
 - Moving: the path points, doors, and the ROE's speeds (Normal, Blitz).
 - The two values set at run time: the close radius and the normal view angle.
