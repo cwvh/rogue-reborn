@@ -13,13 +13,14 @@ use crate::grenade::Grenade;
 use crate::impact::Surface;
 use crate::net::link::MAX_PACKET;
 use crate::sim::characters::REACTION_MOTIONS;
+use crate::sim::aim::{Aim, Pace};
 use crate::sim::peek::Peek;
 use crate::sim::{Cause, Event, Input, MAX_PLAYERS, Sim, Struck, TICK, Throw};
 
 type V3 = [f32; 3];
 
 /// Bumped whenever the messages change, so that a client and server that disagree notice
-pub const PROTOCOL: u8 = 5;
+pub const PROTOCOL: u8 = 6;
 
 const MAGIC: u16 = 0x5252;
 
@@ -116,6 +117,8 @@ pub struct PlayerSnap {
     pub message: Option<(String, f32)>,
     pub target_hp: Option<f32>,
     pub peek: Option<Peek>,
+    /// The spread of the receiver's gun, only for their own player
+    pub aim: Option<Aim>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -183,6 +186,7 @@ impl Snapshot {
             message: (i == receiver && p.message.1 > sim.time).then(|| p.message.clone()),
             target_hp: if i == receiver { p.target_hp } else { None },
             peek: p.peek,
+            aim: (i == receiver).then_some(p.aim),
         }).collect();
         Snapshot {
             tick,
@@ -420,6 +424,50 @@ fn read_throw(r: &mut Reader) -> Result<Option<Throw>> {
     Ok(if r.bool()? { Some(Throw { start: r.f32()?, charge: r.f32()?, thrown: r.bool()? }) } else { None })
 }
 
+/// The widest a spread is sent as, in radians: 15 degrees, as wide as one can be
+const AIM_WIDEST: f32 = 0.2617994;
+
+/// The receiver's spread, as their screen shows it, in 7 bytes: the angles as fractions of
+/// `AIM_WIDEST`, how long it has closed in hundredths of a second, and the growth above 1 in
+/// hundredths. Their shots are the server's, so it need not be exact; what it closes to is
+/// worked out again each tick, and which way they face is the player's look, so neither is sent.
+fn write_aim(w: &mut Writer, a: &Aim) {
+    w.u8((a.pace as u8) | (a.crouched as u8) << 3 | (a.started as u8) << 4);
+    for v in [a.angle, a.from] {
+        w.u16((v / AIM_WIDEST * 65535.0).round().clamp(0.0, 65535.0) as u16);
+    }
+    w.u8((a.since * 100.0).round().clamp(0.0, 255.0) as u8);
+    w.u8(((a.growth - 1.0) * 100.0).round().clamp(0.0, 255.0) as u8);
+}
+
+fn read_aim(r: &mut Reader) -> Result<Aim> {
+    let b = r.u8()?;
+    ensure!(b < 32, "no such aim as {b:#x}");
+    let pace = match b & 7 {
+        0 => Pace::Stopped,
+        1 => Pace::Shuffle,
+        2 => Pace::Walk,
+        3 => Pace::WalkFast,
+        4 => Pace::Run,
+        p => bail!("no such pace as {p}"),
+    };
+    let mut angle = || -> Result<f32> { Ok(r.u16()? as f32 / 65535.0 * AIM_WIDEST) };
+    let (angle, from) = (angle()?, angle()?);
+    let (since, growth) = (r.u8()? as f32 / 100.0, r.u8()? as f32 / 100.0 + 1.0);
+    Ok(Aim { angle, from, to: 0.0, since, growth, pace, crouched: b & 8 != 0, started: b & 16 != 0, look: 0 })
+}
+
+fn write_opt_aim(w: &mut Writer, a: Option<Aim>) {
+    w.bool(a.is_some());
+    if let Some(a) = a {
+        write_aim(w, &a);
+    }
+}
+
+fn read_opt_aim(r: &mut Reader) -> Result<Option<Aim>> {
+    Ok(if r.bool()? { Some(read_aim(r)?) } else { None })
+}
+
 fn write_peek(w: &mut Writer, peek: Option<Peek>) {
     match peek {
         None => w.u8(0),
@@ -438,7 +486,7 @@ fn read_peek(r: &mut Reader) -> Result<Option<Peek>> {
 }
 
 fn flag_byte(p: &PlayerSnap) -> u8 {
-    [p.on_ground, p.controlled, p.gun_trigger, p.equipped_grenade, p.crouched].iter().enumerate().fold(0, |acc, (n, &b)| acc | (b as u8) << n)
+    [p.on_ground, p.controlled, p.gun_trigger, p.equipped_grenade, p.crouched, p.aim.is_some()].iter().enumerate().fold(0, |acc, (n, &b)| acc | (b as u8) << n)
 }
 
 fn write_message(w: &mut Writer, m: &Option<(String, f32)>) {
@@ -489,6 +537,9 @@ fn write_player(w: &mut Writer, p: &PlayerSnap) {
     w.f32(p.hp);
     write_opt_f32(w, p.respawn_at);
     write_peek(w, p.peek);
+    if let Some(a) = &p.aim {
+        write_aim(w, a);
+    }
 }
 
 fn read_player(r: &mut Reader, slot: u8) -> Result<PlayerSnap> {
@@ -510,10 +561,11 @@ fn read_player(r: &mut Reader, slot: u8) -> Result<PlayerSnap> {
     let target_hp = r.opt_f32()?;
     let (deaths, hp, respawn_at) = (r.u16()? as u32, r.f32()?, r.opt_f32()?);
     let peek = read_peek(r)?;
+    let aim = if on(5) { Some(read_aim(r)?) } else { None };
     Ok(PlayerSnap {
         slot, pos, vel_y, on_ground: on(0), crouched: on(4), look, controlled: on(1), ammo, reserve, reload_until,
         flash_until, gun_trigger: on(2), kills, deaths, hp, respawn_at, hit, equipped_grenade: on(3), grenades_left, charge_from,
-        throw, message, target_hp, peek,
+        throw, message, target_hp, peek, aim,
     })
 }
 
@@ -551,6 +603,7 @@ fn write_player_delta(w: &mut Writer, p: &PlayerSnap, base: &PlayerSnap) {
         bits(p.hp) != bits(base.hp),
         opt_bits(p.respawn_at) != opt_bits(base.respawn_at),
         p.peek.map(|k| (k.right, k.crouched, k.returning, bits(k.frame))) != base.peek.map(|k| (k.right, k.crouched, k.returning, bits(k.frame))),
+        p.aim.map(|a| (a.pace, a.crouched, a.started, [a.angle, a.from, a.to, a.since, a.growth].map(bits))) != base.aim.map(|a| (a.pace, a.crouched, a.started, [a.angle, a.from, a.to, a.since, a.growth].map(bits))),
     ];
     w.varint(changed.iter().enumerate().fold(0, |acc, (n, &c)| acc | (c as u32) << n));
     if changed[0] { w.v3(p.pos); }
@@ -572,11 +625,12 @@ fn write_player_delta(w: &mut Writer, p: &PlayerSnap, base: &PlayerSnap) {
     if changed[16] { w.f32(p.hp); }
     if changed[17] { write_opt_f32(w, p.respawn_at); }
     if changed[18] { write_peek(w, p.peek); }
+    if changed[19] { write_opt_aim(w, p.aim); }
 }
 
 /// The player `base` was, changed as the mask in the message says
 fn read_player_delta(r: &mut Reader, mask: u32, base: &PlayerSnap) -> Result<PlayerSnap> {
-    ensure!(mask < 1 << 19, "no such parts of a player as {mask:#x}");
+    ensure!(mask < 1 << 20, "no such parts of a player as {mask:#x}");
     let on = |n: u32| mask >> n & 1 != 0;
     let mut p = base.clone();
     if on(0) { p.pos = r.v3()?; }
@@ -602,6 +656,7 @@ fn read_player_delta(r: &mut Reader, mask: u32, base: &PlayerSnap) -> Result<Pla
     if on(16) { p.hp = r.f32()?; }
     if on(17) { p.respawn_at = r.opt_f32()?; }
     if on(18) { p.peek = read_peek(r)?; }
+    if on(19) { p.aim = read_opt_aim(r)?; }
     Ok(p)
 }
 
@@ -969,6 +1024,7 @@ mod tests {
             throw: Some(Throw { start: 1.0, charge: 0.5, thrown: false }),
             message: Some(("KILLED".to_string(), 9.0)), target_hp: Some(33.0),
             peek: Some(Peek { right: true, crouched: false, frame: 12.5, returning: true }),
+            aim: Some(Aim { angle: 0.0, from: AIM_WIDEST, to: 0.0, since: 0.25, growth: 1.25, pace: Pace::Run, crouched: true, started: true, look: 0 }),
         }
     }
 
@@ -1069,7 +1125,7 @@ mod tests {
     fn a_full_snapshot_fits_in_a_datagram() {
         let mut snap = snapshot();
         // Only the receiver's own player carries what is on their screen
-        snap.players = (0..MAX_PLAYERS as u8).map(|i| if i == 0 { player(0) } else { PlayerSnap { message: None, target_hp: None, ..player(i) } }).collect();
+        snap.players = (0..MAX_PLAYERS as u8).map(|i| if i == 0 { player(0) } else { PlayerSnap { message: None, target_hp: None, aim: None, ..player(i) } }).collect();
         snap.npcs = (0..16).map(|_| NpcSnap { pos: [1.0; 3], yaw: 1.0, hp: 1.0, state: NpcState::Reacting { motion: "thwu_bb", start: 1.0 } }).collect();
         snap.events.clear();
         let (bytes, _) = ToClient::Snapshot(snap).encode();

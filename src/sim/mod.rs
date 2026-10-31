@@ -7,6 +7,7 @@
 //! own generator, so the same inputs always give the same game. That is what lets a recorded
 //! run be played again, and lets a server and its clients agree.
 
+pub mod aim;
 pub mod characters;
 pub mod movement;
 pub mod peek;
@@ -43,6 +44,16 @@ const POSED_REACH: f32 = 120.0;
 
 /// The radius of each part of a player's body that bullets hit (see `Sim::hit_parts`)
 pub const HIT_RADIUS: f32 = 25.0;
+
+/// A unit direction turned `off` radians away from `dir`, toward the side `round` radians round it
+fn deflect(dir: V3, off: f32, round: f32) -> V3 {
+    let up = if dir[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] };
+    let side = unit3([up[1] * dir[2] - up[2] * dir[1], up[2] * dir[0] - up[0] * dir[2], up[0] * dir[1] - up[1] * dir[0]]);
+    let other = [dir[1] * side[2] - dir[2] * side[1], dir[2] * side[0] - dir[0] * side[2], dir[0] * side[1] - dir[1] * side[0]];
+    let (c, s) = (off.cos(), off.sin());
+    let (rc, rs) = (round.cos(), round.sin());
+    unit3([0, 1, 2].map(|k| dir[k] * c + (side[k] * rc + other[k] * rs) * s))
+}
 
 /// How players' bodies are animated as others see them: as fast against their feet as the
 /// viewer's default (its --anim-scale)
@@ -293,6 +304,8 @@ pub struct PlayerState {
     /// How fast the player moved in the last tick, in units per second
     pub moved_speed: f32,
     pub peek: Option<peek::Peek>,
+    /// The spread the gun's shots leave in
+    pub aim: aim::Aim,
 
     // Weapon
     pub ammo: u32,
@@ -435,6 +448,7 @@ impl Sim {
             controlled: true,
             moved_speed: 0.0,
             peek: None,
+            aim: aim::Aim::default(),
             ammo,
             reserve,
             reload_until: None,
@@ -562,6 +576,10 @@ impl Sim {
                     h.f32(k.frame);
                 }
             }
+            for v in [p.aim.angle, p.aim.from, p.aim.to, p.aim.since, p.aim.growth] {
+                h.f32(v);
+            }
+            h.u32(p.aim.pace as u32 + 8 * p.aim.crouched as u32 + 16 * p.aim.started as u32 + ((p.aim.look as u32) << 16));
             h.u32(p.ammo);
             h.u32(p.reserve);
             h.opt_f32(p.reload_until);
@@ -905,6 +923,13 @@ impl Sim {
         let yaw_rad = input.look().0.to_radians();
         let fwd_flat = [-yaw_rad.sin(), 0.0, -yaw_rad.cos()];
         let (w, a, s_, d, run) = (input.forward && !still, input.left && !still, input.back && !still, input.right && !still, input.run);
+        // The spread follows the motion the keys play: running forward, or else at a shuffle
+        // (the walk is the original's slow walk), as it does for a diagonal
+        let pace = if w && run && !s_ { aim::Pace::Run } else if w || a || s_ || d { aim::Pace::Shuffle } else { aim::Pace::Stopped };
+        let p = &mut self.players[slot];
+        let trigger = input.fire && !p.equipped_grenade;
+        let wounded = p.hp < PLAYER_HP;
+        p.aim.step(&aim::MP5K, aim::PLAYER_SKILL, pace, crouched, wounded, trigger, input.yaw, dt);
         let scale = self.speed_scale;
         let fwd_speed = scale * if w == s_ { 0.0 }
             else if w { speed(if run { movement::Movement::Run } else { movement::Movement::Walk }) }
@@ -998,7 +1023,15 @@ impl Sim {
 
         let eye = self.eye(slot);
         let f = forward_cam;
-        let dir = [f[0], f[1], -f[2]]; // camera space to MAP space
+        let aimed = [f[0], f[1], -f[2]]; // camera space to MAP space
+        // Somewhere within the spread, which the shot then opens
+        let mut u = [0.0; 3];
+        for v in &mut u {
+            *v = (next_rng(&mut self.rng) >> 40) as f32 / (1u64 << 24) as f32;
+        }
+        let (off, round) = self.players[slot].aim.throw(u);
+        self.players[slot].aim.fired();
+        let dir = deflect(aimed, off, round);
         // Through the faces bullets pass, such as a chain fence
         let mut wall = self.world.bullet_hit(eye, dir, 20000.0).map(|h| h.dist);
 
@@ -1689,6 +1722,10 @@ mod tests {
         sim.pvp = true;
         sim.spawns = vec![[0.0, 0.0, -350.0], [0.0, 0.0, 350.0]];
         sim.add_player([0.0, 0.0, -100.0]);
+        // Standing still a moment closes the spread their shots leave in
+        for _ in 0..30 {
+            sim.tick(&[holding(), holding()], TICK);
+        }
         sim
     }
 

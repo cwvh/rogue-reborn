@@ -76,7 +76,7 @@ On other platforms, or without the aliases:
 | Input | Action |
 | --- | --- |
 | W A S D, mouse | move, look |
-| Left mouse | fire (hold for full auto) |
+| Left mouse | fire (hold for full auto). Shots go within the crosshair, which opens when you start to move or change stance and then closes, wider on the run and narrower crouched, and while you turn; each shot opens it more, and it stays open while you hold the trigger |
 | Right mouse (hold) | walk instead of run |
 | Left Ctrl | crouch, or stand up again (where there is room overhead). Crouched you are lower and slower, and harder to hit |
 | Q / E (hold) | peek left / right round a corner, as the original's Peek Left and Right: the view leans out with the head, and you stand still until you lean back |

@@ -2077,7 +2077,10 @@ fn main() {
             let lines: Vec<(String, [f32; 3])> = feed.iter().map(|(_, text, color)| (text.clone(), *color)).collect();
             let dead = net.is_some() && sim.players[me].respawn_at.is_some();
             let meter = net.as_ref().filter(|_| lag_meter).map(|(client, _)| (&client.meter, net_clock.elapsed().as_secs_f64()));
-            draw_hud(w, h, &status, msg, marker, veil, concussion.daze(), &lines, dead, meter);
+            // The crosshair opens as wide as the gun's spread, in a view 60 degrees high
+            let p = &sim.players[me];
+            let spread = if p.equipped_grenade { 0.0 } else { p.aim.angle.tan() / 30f32.to_radians().tan() * h as f32 / 2.0 };
+            draw_hud(w, h, &status, msg, marker, spread, veil, concussion.daze(), &lines, dead, meter);
         }
         let rooms_text = if sim.culling {
             format!("ROOM: {} DRAWN: {}", current_rooms.join(" "), drawn_rooms.join(" "))

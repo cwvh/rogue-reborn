@@ -6,12 +6,13 @@ use rogue_reborn::sim::TICK;
 
 use crate::opengl::*;
 
-// Heads-up display: crosshair at the center, status lines bottom-left, the latest kills top-left
+// Heads-up display: crosshair at the center, open as wide as `spread` (in pixels from the middle)
+// says the gun's shots go, status lines bottom-left, the latest kills top-left
 // (each with its color, under the lag meter if it is shown, with the time now) and a message
 // under the crosshair. A dead player's view is tinted red. Leaves the 2D projection set; the
 // debug text that follows re-enables depth testing.
 #[allow(clippy::too_many_arguments)]
-pub fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_marker: bool, veil: f32, daze: f32, feed: &[(String, [f32; 3])], dead: bool, meter: Option<(&Meter, f64)>) {
+pub fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_marker: bool, spread: f32, veil: f32, daze: f32, feed: &[(String, [f32; 3])], dead: bool, meter: Option<(&Meter, f64)>) {
     unsafe {
         glMatrixMode(0x1701); // GL_PROJECTION
         glLoadIdentity();
@@ -84,9 +85,10 @@ pub fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_ma
         let (cx, cy) = (win_w as f32 / 2.0, win_h as f32 / 2.0);
         if hit_marker { glColor3f(1.0, 0.2, 0.2); } else { glColor3f(1.0, 1.0, 1.0); }
         glBegin(0x0001); // GL_LINES
-        for (dx0, dy0, dx1, dy1) in [(-12.0, 0.0, -4.0, 0.0), (4.0, 0.0, 12.0, 0.0), (0.0, -12.0, 0.0, -4.0), (0.0, 4.0, 0.0, 12.0)] {
-            glVertex3f(cx + dx0, cy + dy0, 0.0);
-            glVertex3f(cx + dx1, cy + dy1, 0.0);
+        let gap = spread.max(4.0);
+        for (x, y) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+            glVertex3f(cx + x * gap, cy + y * gap, 0.0);
+            glVertex3f(cx + x * (gap + 8.0), cy + y * (gap + 8.0), 0.0);
         }
         glEnd();
 

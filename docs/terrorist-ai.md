@@ -93,7 +93,8 @@ view), and a glimpse goes 1.75 times as far again.
 ## Aiming and firing
 
 Players and terrorists aim the same way, through a spread that closes over time, as the
-original's reticle does. Our players' shots go straight, for now.
+original's reticle does. Ours does it for players (sim/aim.rs), with the MP5K's numbers and a
+skill of 90, and `v` the yaw turned in the tick over its length (0x59eb30: radians a second, times the view angle over the normal one); not yet the stun, or other guns.
 
 The weapon file (read by 0x5dabf0) gives, after the ammo's name, the "Targetting" multipliers
 for each way of moving, then three more. `tw_ak47.wpn`:
@@ -118,8 +119,8 @@ over 100:
   3 when wounded (data+0x4c 1).
 - The spread angle (char+0x970, 0x5a97d0) goes from `0.02 m` radians down to `0.00083 m`
   (`0.0276 m` stunned) as `(1 - t/T)^2`, `t` the time since it began to close and `T` half the
-  weapon's +0x180 (0.5 s without a gun); times `1 + v^2`, `v` at char+0x550 (likely how fast they
-  turn). Never wider than 15 degrees.
+  weapon's +0x180 (0.5 s without a gun); times `1 + v^2`, `v` at char+0x550 how fast they turn,
+  in radians a second. Never wider than 15 degrees.
 - It starts again from the widest when how they move or their stance changes, or a stun.
 - Each shot widens it by the recoil: the first by +0x17c, and each after by a growth that comes
   down toward 1 (`g = (g - 1) * 0.7 + 1`); then it closes again.
