@@ -1,0 +1,15 @@
+# Built by the Makefile and rustc
+*.o
+*.exe
+mapdump
+mapdump2
+mapbench
+mapbench2
+mapk*dump
+mapk*bench
+maptool
+maptool2
+maptool3
+tags
+gcc_eh/
+*.pdb
