@@ -27,7 +27,7 @@ use crate::opengl::*;
 use crate::args::parse_args;
 use crate::camera::{Camera, listener_of, apply_camera};
 use rogue_reborn::util::unit3;
-use crate::player::{BodyKey, BodyState, PlayerMotions, is_upper_body};
+use crate::player::{BodyKey, BodyState, PlayerMotions, is_arm, is_upper_body};
 use crate::draw::{WeaponDraw, CharacterArrays, draw_weapon, draw_character, draw_glass, draw_fracture, build_mesh, Which, draw_plan, wipe_opening, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
@@ -1588,6 +1588,7 @@ fn main() {
                 let arms_only = kneeling || (changing.is_some() && movement != Movement::Idle);
                 // A motion that loops on its own clock, whatever the body's frame
                 let looping = |m: &'_ rogue_reborn::motion::Motion| (game_time * 30.0) % m.frames.max(1) as f32;
+                let movement_frame = frame;
                 let (mot, frame) = match (flinch, changing, shuffle, movement, reload) {
                     (Some((m, f, _)), ..) => (m, f),
                     _ if peeking.is_some() => peeking.map(|(m, f, _)| (m, f)).unwrap(),
@@ -1629,6 +1630,20 @@ fn main() {
                                 if let (Some(r), Some(h)) = (rots.get_mut(b.anim_index), hold_rots.get(b.anim_index)) {
                                     *r = if b.name == "Chest" { quat_mul(undo, quat_mul(from, *h)) } else { *h };
                                 }
+                            }
+                        }
+                    }
+                }
+                // Leaning, the arms alone still reload, fire and throw, from the leaned chest, as
+                // the original plays those on the arms
+                if let (Some(_), None) = (peeking, flinch) {
+                    let fire = player_motions.get(Movement::Fire, crouched).filter(|_| aiming).map(|m| (m, looping(m)));
+                    let throw = player_motions.get(Movement::Throw, crouched).filter(|_| movement == Movement::Throw).map(|m| (m, movement_frame));
+                    if let Some((arms, at)) = reload.or(fire).or(throw) {
+                        let (_, arm_rots) = arms.sample(at);
+                        for b in skel.bones.iter().filter(|b| is_arm(&b.name)) {
+                            if let (Some(r), Some(a)) = (rots.get_mut(b.anim_index), arm_rots.get(b.anim_index)) {
+                                *r = *a;
                             }
                         }
                     }

@@ -190,6 +190,10 @@ impl BodyState {
 }
 
 // Bones driven by the weapon hold rather than the locomotion cycle
+pub fn is_arm(name: &str) -> bool {
+    matches!(name, "LeftCollar" | "RightCollar" | "LeftUpArm" | "LeftLowArm" | "LeftHand" | "RightUpArm" | "RightLowArm" | "RightHand")
+}
+
 pub fn is_upper_body(name: &str) -> bool {
     matches!(name, "Chest" | "LeftCollar" | "RightCollar" | "LeftUpArm" | "LeftLowArm" | "LeftHand"
         | "RightUpArm" | "RightLowArm" | "RightHand" | "Neck" | "Head")
