@@ -850,6 +850,8 @@ fn main() {
             right: keys.contains(&Key::D),
             run: !walk_held,
             crouch: crouch_wanted,
+            peek_left: keys.contains(&Key::Q),
+            peek_right: keys.contains(&Key::E),
             fire: trigger,
             use_key: use_pressed,
             reload: reload_pressed,
@@ -931,7 +933,8 @@ fn main() {
             let feet = [a[0] * (1.0 - alpha) + b[0] * alpha, a[1] * (1.0 - alpha) + b[1] * alpha, a[2] * (1.0 - alpha) + b[2] * alpha];
             let eye_target = if sim.players[me].player.crouched { crouch_eye_height } else { eye_height };
             eye_now += (eye_target - eye_now) * (1.0 - (-step_dt * 15.0).exp());
-            camera.position = [feet[0], feet[1] + eye_now, -feet[2]];
+            let peek = sim.peek_offset(me);
+            camera.position = [feet[0] + peek[0], feet[1] + eye_now + peek[1], -(feet[2] + peek[2])];
             feet
         } else {
             sim.players[me].player.pos

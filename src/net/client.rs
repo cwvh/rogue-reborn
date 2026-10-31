@@ -294,6 +294,7 @@ impl Client {
         }
         let p = &mut sim.players[self.slot];
         p.player = Player { pos: mine.pos, vel_y: mine.vel_y, on_ground: mine.on_ground, crouched: mine.crouched };
+        p.peek = mine.peek;
         let inputs: Vec<Input> = self.pending.iter().map(|(_, i)| *i).collect();
         for input in &inputs {
             sim.predict(self.slot, input, TICK);

@@ -13,12 +13,13 @@ use crate::grenade::Grenade;
 use crate::impact::Surface;
 use crate::net::link::MAX_PACKET;
 use crate::sim::characters::REACTION_MOTIONS;
+use crate::sim::peek::Peek;
 use crate::sim::{Cause, Event, Input, MAX_PLAYERS, Sim, Struck, TICK, Throw};
 
 type V3 = [f32; 3];
 
 /// Bumped whenever the messages change, so that a client and server that disagree notice
-pub const PROTOCOL: u8 = 4;
+pub const PROTOCOL: u8 = 5;
 
 const MAGIC: u16 = 0x5252;
 
@@ -114,6 +115,7 @@ pub struct PlayerSnap {
     /// What the receiver sees on screen, only for their own player
     pub message: Option<(String, f32)>,
     pub target_hp: Option<f32>,
+    pub peek: Option<Peek>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -180,6 +182,7 @@ impl Snapshot {
             throw: p.throw,
             message: (i == receiver && p.message.1 > sim.time).then(|| p.message.clone()),
             target_hp: if i == receiver { p.target_hp } else { None },
+            peek: p.peek,
         }).collect();
         Snapshot {
             tick,
@@ -237,6 +240,9 @@ impl Snapshot {
             p.grenades_left = s.grenades_left;
             p.charge_from = s.charge_from;
             p.throw = s.throw;
+            if slot != me {
+                p.peek = s.peek;
+            }
             if slot == me {
                 if let Some(m) = &s.message {
                     p.message = m.clone();
@@ -414,6 +420,23 @@ fn read_throw(r: &mut Reader) -> Result<Option<Throw>> {
     Ok(if r.bool()? { Some(Throw { start: r.f32()?, charge: r.f32()?, thrown: r.bool()? }) } else { None })
 }
 
+fn write_peek(w: &mut Writer, peek: Option<Peek>) {
+    match peek {
+        None => w.u8(0),
+        Some(p) => {
+            w.u8(1 | (p.right as u8) << 1 | (p.crouched as u8) << 2 | (p.returning as u8) << 3);
+            // A peek moves on by half frames (30 a second, ticks of 1/60), so this is exact
+            w.u8((p.frame * 2.0).round() as u8);
+        }
+    }
+}
+
+fn read_peek(r: &mut Reader) -> Result<Option<Peek>> {
+    let b = r.u8()?;
+    ensure!(b < 16, "no such peek as {b:#x}");
+    Ok(if b & 1 == 0 { None } else { Some(Peek { right: b & 2 != 0, crouched: b & 4 != 0, returning: b & 8 != 0, frame: r.u8()? as f32 / 2.0 }) })
+}
+
 fn flag_byte(p: &PlayerSnap) -> u8 {
     [p.on_ground, p.controlled, p.gun_trigger, p.equipped_grenade, p.crouched].iter().enumerate().fold(0, |acc, (n, &b)| acc | (b as u8) << n)
 }
@@ -465,6 +488,7 @@ fn write_player(w: &mut Writer, p: &PlayerSnap) {
     w.u16(p.deaths as u16);
     w.f32(p.hp);
     write_opt_f32(w, p.respawn_at);
+    write_peek(w, p.peek);
 }
 
 fn read_player(r: &mut Reader, slot: u8) -> Result<PlayerSnap> {
@@ -485,10 +509,11 @@ fn read_player(r: &mut Reader, slot: u8) -> Result<PlayerSnap> {
     let message = read_message(r)?;
     let target_hp = r.opt_f32()?;
     let (deaths, hp, respawn_at) = (r.u16()? as u32, r.f32()?, r.opt_f32()?);
+    let peek = read_peek(r)?;
     Ok(PlayerSnap {
         slot, pos, vel_y, on_ground: on(0), crouched: on(4), look, controlled: on(1), ammo, reserve, reload_until,
         flash_until, gun_trigger: on(2), kills, deaths, hp, respawn_at, hit, equipped_grenade: on(3), grenades_left, charge_from,
-        throw, message, target_hp,
+        throw, message, target_hp, peek,
     })
 }
 
@@ -525,6 +550,7 @@ fn write_player_delta(w: &mut Writer, p: &PlayerSnap, base: &PlayerSnap) {
         p.deaths as u16 != base.deaths as u16,
         bits(p.hp) != bits(base.hp),
         opt_bits(p.respawn_at) != opt_bits(base.respawn_at),
+        p.peek.map(|k| (k.right, k.crouched, k.returning, bits(k.frame))) != base.peek.map(|k| (k.right, k.crouched, k.returning, bits(k.frame))),
     ];
     w.varint(changed.iter().enumerate().fold(0, |acc, (n, &c)| acc | (c as u32) << n));
     if changed[0] { w.v3(p.pos); }
@@ -545,11 +571,12 @@ fn write_player_delta(w: &mut Writer, p: &PlayerSnap, base: &PlayerSnap) {
     if changed[15] { w.u16(p.deaths as u16); }
     if changed[16] { w.f32(p.hp); }
     if changed[17] { write_opt_f32(w, p.respawn_at); }
+    if changed[18] { write_peek(w, p.peek); }
 }
 
 /// The player `base` was, changed as the mask in the message says
 fn read_player_delta(r: &mut Reader, mask: u32, base: &PlayerSnap) -> Result<PlayerSnap> {
-    ensure!(mask < 1 << 18, "no such parts of a player as {mask:#x}");
+    ensure!(mask < 1 << 19, "no such parts of a player as {mask:#x}");
     let on = |n: u32| mask >> n & 1 != 0;
     let mut p = base.clone();
     if on(0) { p.pos = r.v3()?; }
@@ -574,6 +601,7 @@ fn read_player_delta(r: &mut Reader, mask: u32, base: &PlayerSnap) -> Result<Pla
     if on(15) { p.deaths = r.u16()? as u32; }
     if on(16) { p.hp = r.f32()?; }
     if on(17) { p.respawn_at = r.opt_f32()?; }
+    if on(18) { p.peek = read_peek(r)?; }
     Ok(p)
 }
 
@@ -940,6 +968,7 @@ mod tests {
             equipped_grenade: true, grenades_left: 2, charge_from: None,
             throw: Some(Throw { start: 1.0, charge: 0.5, thrown: false }),
             message: Some(("KILLED".to_string(), 9.0)), target_hp: Some(33.0),
+            peek: Some(Peek { right: true, crouched: false, frame: 12.5, returning: true }),
         }
     }
 

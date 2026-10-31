@@ -79,6 +79,7 @@ On other platforms, or without the aliases:
 | Left mouse | fire (hold for full auto) |
 | Right mouse (hold) | walk instead of run |
 | Left Ctrl | crouch, or stand up again (where there is room overhead). Crouched you are lower and slower, and harder to hit |
+| Q / E (hold) | peek left / right round a corner, as the original's Peek Left and Right: the view leans out with the head, and you stand still until you lean back |
 | Space or Backspace | open or close the door you are looking at (within about 2 m) |
 | R | reload |
 | 1 / 3 | the gun / a frag grenade (3 of them). With a grenade out, hold left mouse to wind up and let go to throw: the longer the hold, the harder the throw. It bounces, goes off after 3 s, kills characters within about 3 m (hurts them out to about 6 m, walls shield them), breaks glass, and shakes and deafens you if close |

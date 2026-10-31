@@ -9,6 +9,7 @@
 
 pub mod characters;
 pub mod movement;
+pub mod peek;
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -85,6 +86,9 @@ pub struct Input {
     pub run: bool,
     /// Wanting to be crouched. The player stands up again only where there is room.
     pub crouch: bool,
+    /// Peeking round a corner to the left or right (see `peek`)
+    pub peek_left: bool,
+    pub peek_right: bool,
     /// The trigger is held
     pub fire: bool,
     /// Pressed since the last tick: use (open or close a door), reload, take out the gun,
@@ -249,6 +253,7 @@ pub struct PlayerState {
     pub controlled: bool,
     /// How fast the player moved in the last tick, in units per second
     pub moved_speed: f32,
+    pub peek: Option<peek::Peek>,
 
     // Weapon
     pub ammo: u32,
@@ -388,6 +393,7 @@ impl Sim {
             last_observer: None,
             controlled: true,
             moved_speed: 0.0,
+            peek: None,
             ammo,
             reserve,
             reload_until: None,
@@ -469,7 +475,16 @@ impl Sim {
     /// Where a player's eyes are
     pub fn eye(&self, slot: usize) -> V3 {
         let p = &self.players[slot].player;
-        [p.pos[0], p.pos[1] + self.world.params().eye(p.crouched), p.pos[2]]
+        let peek = self.peek_offset(slot);
+        [p.pos[0] + peek[0], p.pos[1] + self.world.params().eye(p.crouched) + peek[1], p.pos[2] + peek[2]]
+    }
+
+    /// How far a peek moves the player's eye, in map space
+    pub fn peek_offset(&self, slot: usize) -> V3 {
+        let p = &self.players[slot];
+        let Some([side, up]) = p.peek.map(|k| k.eye()) else { return [0.0; 3] };
+        let r = right(Input { yaw: p.look.0, ..Input::default() }.look().0);
+        [r[0] * side, up, -r[2] * side]
     }
 
     /// Set every door this far open (0 shut, 1 open)
@@ -499,6 +514,13 @@ impl Sim {
             h.f32(p.player.vel_y);
             h.u32(p.player.on_ground as u32);
             h.u32(p.player.crouched as u32);
+            match p.peek {
+                None => h.u32(0),
+                Some(k) => {
+                    h.u32(1 + k.right as u32 + 2 * k.crouched as u32 + 4 * k.returning as u32);
+                    h.f32(k.frame);
+                }
+            }
             h.u32(p.ammo);
             h.u32(p.reserve);
             h.opt_f32(p.reload_until);
@@ -798,10 +820,15 @@ impl Sim {
         }
         let crouched = body.crouched;
         let speed = |m| if crouched { crouched_speed(m) } else { ground_speed(m) };
+        let alive = self.players[slot].respawn_at.is_none();
+        let peek = &mut self.players[slot].peek;
+        *peek = peek::Peek::step(*peek, input.peek_left && alive, input.peek_right && alive, crouched, dt);
+        // Peeking stands the player still
+        let still = peek.is_some();
 
         let yaw_rad = input.look().0.to_radians();
         let fwd_flat = [-yaw_rad.sin(), 0.0, -yaw_rad.cos()];
-        let (w, a, s_, d, run) = (input.forward, input.left, input.back, input.right, input.run);
+        let (w, a, s_, d, run) = (input.forward && !still, input.left && !still, input.back && !still, input.right && !still, input.run);
         let scale = self.speed_scale;
         let fwd_speed = scale * if w == s_ { 0.0 }
             else if w { speed(if run { movement::Movement::Run } else { movement::Movement::Walk }) }
@@ -1580,6 +1607,19 @@ mod tests {
             // To the side the key says, ahead or behind as the other one does
             assert_eq!(dx > 0.0, input.right, "{dx}");
         }
+    }
+
+    #[test]
+    fn a_peek_moves_the_eye_to_the_side_and_stands_the_player_still() {
+        let mut sim = demo();
+        let (feet, eye) = (sim.players[0].player.pos, sim.eye(0));
+        run(&mut sim, &Input { peek_left: true, forward: true, ..holding() }, 1.0);
+        assert_eq!(sim.players[0].player.pos, feet, "moved while peeking");
+        let peeked = sim.eye(0);
+        // Facing along -z, the left is -x
+        assert!(peeked[0] - eye[0] < -50.0 && peeked[1] < eye[1], "{peeked:?} from {eye:?}");
+        run(&mut sim, &holding(), 1.0);
+        assert_eq!(sim.eye(0), eye);
     }
 
     #[test]
