@@ -95,6 +95,8 @@ const SAME_PLACE: f32 = 500.0;
 /// How many ways are looked for in a tick, among all of them: the rest wait their turn, so
 /// that a shot many hear does not hold up the game (five on rm16 set off within 0.15 seconds)
 const SEARCHES_PER_TICK: usize = 1;
+/// How fast terrorists too close together are pushed apart, in units a second
+const PUSH_SPEED: f32 = 150.0;
 /// Seconds they keep to a target they no longer see
 pub const FORGET: f32 = 5.0;
 /// How near where they face a player must be for them to take aim, in degrees either side:
@@ -501,6 +503,13 @@ impl super::Sim {
             // How long it takes to get its weapon up, from what it was doing
             let frames = |m: &str| self.characters.as_ref().map_or(RAISE_SECONDS * 30.0, |c| c.frames(m));
             let (_, raise_seconds) = raise(self.npcs[i].stance, frames);
+            // Someone else stands on the next point of its way
+            let width = 2.0 * self.world.params().radius;
+            let on = |feet: V3, at: V3| (feet[1] - at[1]).abs() < 100.0 && ((feet[0] - at[0]).powi(2) + (feet[2] - at[2]).powi(2)).sqrt() < width;
+            let taken = mind.path.first().is_some_and(|&(next, _)| {
+                self.npcs.iter().enumerate().any(|(k, o)| k != i && !o.health.is_dead() && on([o.pos[0], o.floor, o.pos[2]], next))
+                    || self.players.iter().any(|p| p.active && p.respawn_at.is_none() && on(p.player.pos, next))
+            });
             let npc = &mut self.npcs[i];
             // Its weapon up for someone it sees, or toward what it heard
             let listening = mind.heard.filter(|&(_, t)| now - t < HEARD_SECONDS);
@@ -572,7 +581,7 @@ impl super::Sim {
                         ev.push(super::Event::Log(format!("t={now:.2} character {i} opens door {}", d.name)));
                     }
                     npc.yaw = turn_toward(npc.yaw, dx.atan2(dz).to_degrees(), TURN_RATE * dt);
-                } else if left < ARRIVE {
+                } else if left < ARRIVE || (taken && left < width + ARRIVE) {
                     mind.path.remove(0);
                 } else {
                     npc.yaw = turn_toward(npc.yaw, dx.atan2(dz).to_degrees(), TURN_RATE * dt);
@@ -644,6 +653,66 @@ impl super::Sim {
             } else {
                 self.npcs[i].mind = Some(mind);
             }
+        }
+        self.keep_apart(dt);
+    }
+
+    /// Pushes apart terrorists that stand closer than two bodies' width. Teammates walk the
+    /// same way, and everyone sent to see a noise walks to the same point. Players and other
+    /// characters stay put and push them away too. A push that would take a terrorist into a
+    /// wall or off its floor does not happen.
+    fn keep_apart(&mut self, dt: f32) {
+        let width = 2.0 * self.world.params().radius;
+        // Every body: where its feet are, and whether it can be pushed
+        let mut bodies: Vec<(V3, bool)> = self.npcs.iter().filter(|n| !n.health.is_dead())
+            .map(|n| ([n.pos[0], n.floor, n.pos[2]], n.mind.is_some())).collect();
+        let movers: Vec<usize> = self.npcs.iter().enumerate().filter(|(_, n)| !n.health.is_dead()).map(|(i, _)| i).collect();
+        bodies.extend(self.players.iter().filter(|p| p.active && p.respawn_at.is_none()).map(|p| (p.player.pos, false)));
+        let mut push = vec![[0.0f32; 2]; movers.len()];
+        for a in 0..bodies.len() {
+            for b in a + 1..bodies.len() {
+                let ((p, a_moves), (q, b_moves)) = (bodies[a], bodies[b]);
+                if (p[1] - q[1]).abs() > 100.0 || !(a_moves || b_moves) {
+                    continue;
+                }
+                let (dx, dz) = (p[0] - q[0], p[2] - q[2]);
+                let d = (dx * dx + dz * dz).sqrt();
+                if d >= width {
+                    continue;
+                }
+                // Right on top of each other, apart a way of their own
+                let (ux, uz) = if d > 1e-3 { (dx / d, dz / d) } else { let t = a as f32 * 2.4; (t.cos(), t.sin()) };
+                let share = if a_moves && b_moves { 0.5 } else { 1.0 };
+                let by = ((width - d) * share).min(PUSH_SPEED * dt);
+                if a_moves {
+                    push[a][0] += ux * by;
+                    push[a][1] += uz * by;
+                }
+                if b_moves {
+                    push[b][0] -= ux * by;
+                    push[b][1] -= uz * by;
+                }
+            }
+        }
+        for (k, &i) in movers.iter().enumerate() {
+            let [px, pz] = push[k];
+            if px == 0.0 && pz == 0.0 {
+                continue;
+            }
+            let n = &self.npcs[i];
+            let feet = [n.pos[0] + px, n.floor, n.pos[2] + pz];
+            let Some(floor) = self.world.ground_at(feet[0], feet[2], n.floor + STEP).filter(|f| (f - n.floor).abs() <= STEP) else { continue };
+            // No nearer a wall than it was, in any room it would be in
+            let clearance = |at: V3| self.rooms_at(at, None).iter().map(|&r| self.world.wall_clearance_in(&crate::collision::Player::new(at), r)).fold(f32::INFINITY, f32::min);
+            let to = [feet[0], floor, feet[2]];
+            if clearance(to) < clearance([n.pos[0], n.floor, n.pos[2]]).min(0.0) {
+                continue;
+            }
+            let n = &mut self.npcs[i];
+            n.pos[0] = to[0];
+            n.pos[2] = to[2];
+            n.pos[1] += floor - n.floor;
+            n.floor = floor;
         }
     }
 }
@@ -1229,6 +1298,83 @@ mod tests {
             went.extend(std::iter::repeat_n(k, now));
         }
         assert!(went.len() >= 5, "{went:?}");
+    }
+
+    /// The distance across the floor between two characters
+    fn apart(sim: &crate::sim::Sim, a: usize, b: usize) -> f32 {
+        let (p, q) = (sim.npcs[a].pos, sim.npcs[b].pos);
+        ((p[0] - q[0]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()
+    }
+
+    #[test]
+    fn two_terrorists_on_one_spot_step_apart() {
+        let mut sim = standoff([0.0, 0.0, 300.0], 180.0);
+        sim.npcs.push(sim.npcs[0].clone());
+        wait(&mut sim, 1.0);
+        assert!(apart(&sim, 0, 1) >= 59.0, "{:?} {:?}", sim.npcs[0].pos, sim.npcs[1].pos);
+    }
+
+    #[test]
+    fn a_terrorist_on_a_player_steps_off_and_the_player_stays() {
+        let mut sim = standoff([0.0, 0.0, -340.0], 180.0);
+        sim.god = true;
+        wait(&mut sim, 1.0);
+        let (n, p) = (sim.npcs[0].pos, sim.players[0].player.pos);
+        assert_eq!(p, [0.0, 0.0, -350.0]);
+        assert!(((n[0] - p[0]).powi(2) + (n[2] - p[2]).powi(2)).sqrt() >= 59.0, "{n:?}");
+    }
+
+    #[test]
+    fn terrorists_against_a_wall_step_apart_along_it() {
+        let x = crate::demo::WIDTH / 2.0 - 31.0;
+        let mut sim = standoff([x, 0.0, 0.0], 270.0);
+        sim.npcs.push(sim.npcs[0].clone());
+        wait(&mut sim, 1.0);
+        assert!(apart(&sim, 0, 1) >= 59.0, "{:?} {:?}", sim.npcs[0].pos, sim.npcs[1].pos);
+        for n in &sim.npcs {
+            assert!(sim.world.wall_clearance(&crate::collision::Player::new(n.pos)) >= -1.0, "in the wall at {:?}", n.pos);
+        }
+    }
+
+    #[test]
+    fn terrorists_sent_to_one_noise_stand_apart_there() {
+        // rm16: the first shot once had ten of them stand inside each other where it was heard
+        use crate::collision::{CollisionWorld, Params};
+        use crate::mission::{self, Difficulty};
+        let map_path = std::path::Path::new("data/map/rm16/rm16.map");
+        let Some((file, teams)) = mission::teams(map_path, Difficulty::Easy) else { return };
+        let Some(mut chars) = crate::sim::characters::Characters::load(std::path::Path::new("data/character/team_hrt/blue_M_a.CRP"), "up_none_cyc") else { return };
+        let level = std::sync::Arc::new(crate::map::read(map_path).unwrap());
+        let world = CollisionWorld::from_map(&level, Params::default());
+        let npcs = crate::sim::characters::place_terrorists(&teams, 7, &mission::setting(&file), &world, &mut chars);
+        let config = crate::sim::Config { magazine: 30, ammo: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };
+        let mut sim = crate::sim::Sim::new(level, world, config, None, npcs);
+        let at = [30537.0, 33167.0, 34967.0];
+        sim.add_player(at);
+        sim.god = true;
+        wait(&mut sim, 0.1);
+        sim.noises.push(([at[0], at[1] + 150.0, at[2]], 6000.0, true));
+        wait(&mut sim, 20.0);
+        let near: Vec<usize> = (0..sim.npcs.len()).filter(|&i| {
+            let p = sim.npcs[i].pos;
+            !sim.npcs[i].health.is_dead() && ((p[0] - at[0]).powi(2) + (p[2] - at[2]).powi(2)).sqrt() < 600.0
+        }).collect();
+        assert!(near.len() >= 4, "only {near:?} came");
+        for &i in &near {
+            let n = &sim.npcs[i];
+            let feet = [n.pos[0], n.floor, n.pos[2]];
+            for r in sim.rooms_at(feet, None) {
+                let c = sim.world.wall_clearance_in(&crate::collision::Player::new(feet), r);
+                assert!(c >= -3.0, "#{i} in room {r}'s wall by {:.0} at {feet:?}", -c);
+            }
+        }
+        for (k, &a) in near.iter().enumerate() {
+            for &b in &near[k + 1..] {
+                assert!(apart(&sim, a, b) >= 55.0, "#{a} and #{b}: {:?} {:?}
+{}
+{}", sim.npcs[a].pos, sim.npcs[b].pos, sim.terrorist_report(0)[a], sim.terrorist_report(0)[b]);
+            }
+        }
     }
 
     #[test]

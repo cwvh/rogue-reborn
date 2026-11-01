@@ -271,6 +271,12 @@ zones that finds no way to a room tries another a second later. Guesses, to keep
 at every shot. They walk a way at a player's speed, on their feet, keeping to the floor and up
 stairs.
 
+Terrorists closer than two bodies' width (60 units) push apart, at up to 150 units a second.
+Players and unarmed characters stay put and push them away. A push never takes a terrorist
+nearer a wall or off its floor. When someone stands on the next point of a terrorist's way, the
+terrorist counts as there once it is close. Our own rule: we have not read how the original
+keeps characters apart.
+
 Doors on the way they open, as the original does: its MoveTo step (0x5fc4f0) adds an OpenDoor step
 (0x5fc1b0) when the next point of the way has a door, and OpenDoor (0x5fed60) goes to the door's
 handle, works it, and waits until it is open. Ours stop where the way meets the doorway, open the
