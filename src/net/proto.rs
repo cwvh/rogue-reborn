@@ -266,6 +266,10 @@ impl Snapshot {
             npc.yaw = s.yaw;
             npc.health.hp = s.hp;
             npc.health.state = s.state;
+            // Taking aim, it raises its weapon from here
+            if s.aiming && !npc.aiming {
+                npc.aim_since = sim.time;
+            }
             npc.aiming = s.aiming;
         }
 

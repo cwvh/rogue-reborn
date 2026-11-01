@@ -160,7 +160,12 @@ where the body faces. The swing is at most `t / T * (1.3 - s) * 10 pi` radians a
 Assault skill, `t` how long it has been swinging at this target, up to `T`, half the weapon's
 +0x180 (0.5 s without one). Once the aim is on them (char+0x555) the trigger rule below may fire.
 The sight stage tests every pair every frame (0x53d140; 0x54bcf0 only leaves out the same side),
-and what is seen one frame can be the target that frame: nothing more holds a terrorist back.
+and what is seen one frame can be the target that frame: nothing in the code read so far holds a
+terrorist back. Yet in the game there is a clear pause before one facing you fires: raising its
+weapon from waiting. The original blends into its weapon's hold by a length set at run time
+(0x816b14); from leaning and slouching it has motions for standing up with the rifle (`rmt_llup`,
+36 frames, `rmt_slup`, 51). Ours plays those, or eases into aiming over half a second (a guess),
+and holds fire until it is done.
 
 The gun's skill (char method +0xd4, 0x5af310) is Assault, or toward Sniper as a scope zooms in.
 The trigger's `s` (char+0x304) is Self-control. The actor's skills sit in the character from

@@ -13,8 +13,16 @@ type V3 = [f32; 3];
 pub const NORMAL_VIEW: f32 = 90.0;
 /// Within this they see a player whichever way they face (0x8169a0, set at run time: a guess)
 pub const CLOSE: f32 = 200.0;
-/// Degrees a second they turn toward a target (not read yet: a guess)
+/// Degrees a second they turn toward a target (not read yet: a guess), and faster when they
+/// were already alert
 pub const TURN_RATE: f32 = 180.0;
+pub const ALERT_TURN_RATE: f32 = 270.0;
+/// How long a terrorist standing, squatting or kneeling takes to raise its weapon before it can
+/// fire, easing from waiting into aiming. The original plays this by a blend whose length it
+/// sets at run time (RogueSpear.exe 0x816b14): a guess, to be timed against it.
+pub const RAISE_SECONDS: f32 = 0.5;
+/// The original's motions for standing up with the rifle from leaning and from slouching
+pub const RAISE_MOTIONS: [&str; 2] = ["rmt_llup", "rmt_slup"];
 /// Seconds they keep to a target they no longer see
 pub const FORGET: f32 = 5.0;
 /// How near where they face a player must be for them to take aim, in degrees either side:
@@ -39,6 +47,8 @@ pub struct Mind {
     /// long it has been swinging toward them
     pub aim_dir: Option<V3>,
     pub swing: f32,
+    /// Whether they were already alert when they took this target, which they turn to faster
+    pub quick: bool,
     pub gun: Gun,
     pub ammo: u32,
     /// Full magazines left
@@ -51,7 +61,7 @@ pub struct Mind {
 impl Mind {
     pub fn new(alertness: Alertness, skill: f32, self_control: f32, sight: f32, gun: Gun, magazine: u32, magazines: u32) -> Mind {
         Mind {
-            alertness, skill, self_control, sight, target: None, seen_at: 0.0, aim: Aim::default(), aim_dir: None, swing: 0.0, gun,
+            alertness, skill, self_control, sight, target: None, seen_at: 0.0, aim: Aim::default(), aim_dir: None, swing: 0.0, quick: false, gun,
             ammo: magazine, magazines: magazines.saturating_sub(1), magazine, reload_until: None, next_shot: 0.0,
         }
     }
@@ -182,6 +192,7 @@ impl super::Sim {
                         mind.aim = Aim::default();
                         mind.aim_dir = None;
                         mind.swing = 0.0;
+                        mind.quick = mind.alertness == Alertness::Alert;
                     }
                     mind.target = Some(slot);
                     mind.seen_at = now;
@@ -196,8 +207,15 @@ impl super::Sim {
                     }
                 }
             }
+            // How long it takes to get its weapon up, from what it was doing
+            let frames = |m: &str| self.characters.as_ref().map_or(RAISE_SECONDS * 30.0, |c| c.frames(m));
+            let (_, raise_seconds) = raise(self.npcs[i].stance, frames);
             let npc = &mut self.npcs[i];
+            if mind.target.is_some() && !npc.aiming {
+                npc.aim_since = now;
+            }
             npc.aiming = mind.target.is_some();
+            let raised = now >= npc.aim_since + raise_seconds;
             if mind.reload_until.is_some_and(|t| now >= t) {
                 mind.ammo = mind.magazine;
                 mind.magazines -= 1;
@@ -212,11 +230,11 @@ impl super::Sim {
             let mut fire = None;
             if let Some((_, to, dist)) = seen {
                 let want = (to[0] - eye[0]).atan2(to[2] - eye[2]).to_degrees();
-                npc.yaw = turn_toward(npc.yaw, want, TURN_RATE * dt);
+                npc.yaw = turn_toward(npc.yaw, want, if mind.quick { ALERT_TURN_RATE } else { TURN_RATE } * dt);
                 let facing = [npc.yaw.to_radians().sin(), 0.0, npc.yaw.to_radians().cos()];
                 let d = super::dist3(eye, to).max(1e-3);
                 let on_target = mind.swing_aim(facing, [0, 1, 2].map(|k| (to[k] - eye[k]) / d), dt);
-                let ready = mind.ammo > 0 && mind.reload_until.is_none();
+                let ready = raised && mind.ammo > 0 && mind.reload_until.is_none();
                 fire = (ready && on_target && mind.would_fire(dist)).then_some(to);
             }
             let wounded = npc.health.hp < crate::combat::Health::new().hp;
@@ -253,6 +271,18 @@ impl super::Sim {
             }
         }
     }
+}
+
+/// How a terrorist waiting in `stance` raises its weapon to aim: with the original's motion for
+/// standing up with it, from leaning or slouching, or else easing into aiming over
+/// `RAISE_SECONDS`; and how long that takes, by `frames` of each motion
+pub fn raise(stance: Option<Stance>, frames: impl Fn(&str) -> f32) -> (Option<&'static str>, f32) {
+    let motion = match stance {
+        Some(Stance::Lean) => Some(RAISE_MOTIONS[0]),
+        Some(Stance::Slouch) => Some(RAISE_MOTIONS[1]),
+        _ => None,
+    };
+    (motion, motion.map_or(RAISE_SECONDS, |m| frames(m) / 30.0))
 }
 
 /// Whether a stance aims kneeling
@@ -341,8 +371,8 @@ mod tests {
     fn a_terrorist_facing_a_player_waits_for_its_aim_then_shoots_them() {
         let mut sim = standoff([0.0, 0.0, 300.0], 180.0);
         let shots = wait(&mut sim, 3.0);
-        // Not at once: the spread opens wide when it first sees them, and closes
-        assert!(shots.first().is_some_and(|&t| t > 0.2), "{shots:?}");
+        // Not at once: it raises its weapon, and its spread opens wide when it first sees them
+        assert!(shots.first().is_some_and(|&t| t >= RAISE_SECONDS), "{shots:?}");
         let died = sim.players[0].respawn_at.expect("the player still stands") - crate::sim::RESPAWN_SECONDS;
         // And not at the dead
         assert!(shots.iter().all(|&t| t <= died + crate::sim::TICK), "{shots:?} died at {died}");

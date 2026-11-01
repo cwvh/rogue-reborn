@@ -37,6 +37,8 @@ pub struct Npc {
     /// Aiming at a player, which it stands (or kneels) to do, and when it last fired
     pub aiming: bool,
     pub last_shot: f32,
+    /// When it began to aim, raising its weapon (see `terrorist::raise`)
+    pub aim_since: f32,
     /// What it knows and holds, as a terrorist: only the game's own copy keeps it
     pub mind: Option<super::terrorist::Mind>,
 }
@@ -45,7 +47,7 @@ impl Default for Npc {
     fn default() -> Npc {
         Npc {
             health: Health::new(), pos: [0.0; 3], floor: 0.0, yaw: 0.0, scale: [1.0; 3], stagger: 0.0,
-            body: None, stance: None, weapon: None, aiming: false, last_shot: f32::NEG_INFINITY, mind: None,
+            body: None, stance: None, weapon: None, aiming: false, last_shot: f32::NEG_INFINITY, aim_since: 0.0, mind: None,
         }
     }
 }
@@ -137,7 +139,8 @@ impl Characters {
         println!("loaded {} ({} vertices, {} triangles)", model.name, model.vertices.len(),
             model.parts.iter().map(|p| p.triangles.len()).sum::<usize>());
         let mut motions = HashMap::new();
-        for name in std::iter::once(idle).chain(REACTION_MOTIONS).chain(super::idle::motions()) {
+        let raises = super::terrorist::RAISE_MOTIONS;
+        for name in std::iter::once(idle).chain(REACTION_MOTIONS).chain(super::idle::motions()).chain(raises) {
             if motions.contains_key(name) {
                 continue;
             }
@@ -226,17 +229,50 @@ impl Characters {
     /// skeleton, or a motion to play.
     pub fn bones(&self, npc: &Npc, now: f32, idle_frame: f32) -> Option<Vec<skeleton::Transform>> {
         let skeleton = &self.body(npc).1?.skeleton;
-        // Aiming, the gun up as a player's is when they fire, still between shots
-        if npc.aiming && matches!(npc.health.state, NpcState::Idle) {
-            let firing = now - npc.last_shot < 0.15;
-            let doing = crate::body::Doing {
-                movement: crate::sim::movement::Movement::Fire,
-                frame: 0.0, crouched: super::terrorist::kneels(npc.stance), reloading: None, firing: true, flinch: None, peek: None,
-                hip_turn: 0.0, changing: None, shuffle: None, clock: if firing { now } else { 0.0 },
-            };
-            let pose = crate::body::pose(&self.player, skeleton, &doing)?;
-            return Some(skeleton.pose([0.0, pose.root[1], 0.0], &pose.rotations));
+        let (root, rots) = if npc.aiming && matches!(npc.health.state, NpcState::Idle) {
+            self.aiming_pose(npc, skeleton, now, idle_frame)?
+        } else {
+            self.waiting_pose(npc, now, idle_frame)?
+        };
+        Some(skeleton.pose(root, &rots))
+    }
+
+    /// Aiming, the gun up as a player's is when they fire, still between shots; first raising
+    /// it (see `terrorist::raise`), standing up with it or easing into aiming from waiting
+    fn aiming_pose(&self, npc: &Npc, skeleton: &Skeleton, now: f32, idle_frame: f32) -> Option<(V3, Vec<[f32; 4]>)> {
+        let firing = now - npc.last_shot < 0.15;
+        let doing = crate::body::Doing {
+            movement: crate::sim::movement::Movement::Fire,
+            frame: 0.0, crouched: super::terrorist::kneels(npc.stance), reloading: None, firing: true, flinch: None, peek: None,
+            hip_turn: 0.0, changing: None, shuffle: None, clock: if firing { now } else { 0.0 },
+        };
+        let pose = crate::body::pose(&self.player, skeleton, &doing)?;
+        let up = ([0.0, pose.root[1], 0.0], pose.rotations);
+        let (motion, seconds) = super::terrorist::raise(npc.stance, |m| self.frames(m));
+        let t = now - npc.aim_since;
+        if t >= seconds {
+            return Some(up);
         }
+        match motion.and_then(|m| self.motions.get(m)) {
+            Some(m) => {
+                let (root, rots) = m.sample((t * 30.0).min(m.frames.max(1) as f32 - 1.0));
+                Some(([0.0, root[1], 0.0], rots))
+            }
+            None => {
+                let (mut root, mut rots) = self.waiting_pose(npc, now, idle_frame)?;
+                let w = t / seconds;
+                for (q, a) in rots.iter_mut().zip(&up.1) {
+                    *q = motion::slerp(*q, *a, w);
+                }
+                root[1] += (up.0[1] - root[1]) * w;
+                Some(([0.0, root[1], 0.0], rots))
+            }
+        }
+    }
+
+    /// Waiting in its stance or idling, reacting to a hit or dead: where the root goes and how
+    /// each bone turns
+    fn waiting_pose(&self, npc: &Npc, now: f32, idle_frame: f32) -> Option<(V3, Vec<[f32; 4]>)> {
         let playing = |motion, frame, looping| super::idle::Playing { motion, frame, looping };
         let (now_playing, from) = match (npc.health.state, npc.stance) {
             (NpcState::Idle, Some(stance)) => super::idle::at(stance, npc.stagger.to_bits() as u64, now, |m| self.frames(m)),
@@ -262,7 +298,7 @@ impl Characters {
         // Hit and death motions carry the body along with them; waiting stays in place
         let waiting = matches!(npc.health.state, NpcState::Idle);
         let (dx, dz) = if now_playing.looping || waiting { (0.0, 0.0) } else { (root[0] - k0[0], root[2] - k0[2]) };
-        Some(skeleton.pose([dx, root[1], dz], &rots))
+        Some(([dx, root[1], dz], rots))
     }
 
     /// Where a shot from `origin` along the unit vector `dir` strikes the character, if it does
