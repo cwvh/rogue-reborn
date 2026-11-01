@@ -223,7 +223,16 @@ footsteps are heard by the terrorists within that reach, and through walls withi
 guess). Footsteps, four a second, are heard half as far as they sound for light gear (walking
 400, running 500), never through walls, and creeping not at all: heard to the sounds' full reach,
 every step made the terrorists far too sharp. One that hears something becomes alert and turns toward it with
-its weapon up, for ten seconds (a guess), so it is quicker to fire on whoever comes.
+its weapon up, for ten seconds (a guess), so it is quicker to fire on whoever comes. With no one
+to fight, it walks to where it heard it.
+
+## Walking
+
+The original's path points are not found in our reading of the level files yet. Ours finds its way
+through the rooms' doorways (`Visibility::path`): the shortest way from portal to portal standing
+upright, not shut by a closed door, walking straight across each room, at a player's walking speed
+(514 units a second), on its feet, keeping to the floor and up stairs. It does not yet keep clear
+of furniture, open doors, or play a walk of its own weapon's.
 
 ## Not read yet
 

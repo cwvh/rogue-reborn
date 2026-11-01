@@ -39,6 +39,8 @@ pub struct Npc {
     pub last_shot: f32,
     /// When it began to aim, raising its weapon (see `terrorist::raise`)
     pub aim_since: f32,
+    /// Walking somewhere
+    pub walking: bool,
     /// What it knows and holds, as a terrorist: only the game's own copy keeps it
     pub mind: Option<super::terrorist::Mind>,
 }
@@ -47,7 +49,7 @@ impl Default for Npc {
     fn default() -> Npc {
         Npc {
             health: Health::new(), pos: [0.0; 3], floor: 0.0, yaw: 0.0, scale: [1.0; 3], stagger: 0.0,
-            body: None, stance: None, weapon: None, aiming: false, last_shot: f32::NEG_INFINITY, aim_since: 0.0, mind: None,
+            body: None, stance: None, weapon: None, aiming: false, last_shot: f32::NEG_INFINITY, aim_since: 0.0, walking: false, mind: None,
         }
     }
 }
@@ -229,7 +231,10 @@ impl Characters {
     /// skeleton, or a motion to play.
     pub fn bones(&self, npc: &Npc, now: f32, idle_frame: f32) -> Option<Vec<skeleton::Transform>> {
         let skeleton = &self.body(npc).1?.skeleton;
-        let (root, rots) = if npc.aiming && matches!(npc.health.state, NpcState::Idle) {
+        let standing = matches!(npc.health.state, NpcState::Idle);
+        let (root, rots) = if npc.walking && standing {
+            self.walking_pose(npc, skeleton, now)?
+        } else if npc.aiming && standing {
             self.aiming_pose(npc, skeleton, now, idle_frame)?
         } else {
             self.waiting_pose(npc, now, idle_frame)?
@@ -268,6 +273,17 @@ impl Characters {
                 Some(([0.0, root[1], 0.0], rots))
             }
         }
+    }
+
+    /// Walking as a player does, its weapon up if it is alert
+    fn walking_pose(&self, npc: &Npc, skeleton: &Skeleton, now: f32) -> Option<(V3, Vec<[f32; 4]>)> {
+        let doing = crate::body::Doing {
+            movement: crate::sim::movement::Movement::Walk,
+            frame: now * 30.0, crouched: false, reloading: None, firing: npc.aiming, flinch: None, peek: None,
+            hip_turn: 0.0, changing: None, shuffle: None, clock: 0.0,
+        };
+        let pose = crate::body::pose(&self.player, skeleton, &doing)?;
+        Some(([0.0, pose.root[1], 0.0], pose.rotations))
     }
 
     /// Waiting in its stance or idling, reacting to a hit or dead: where the root goes and how

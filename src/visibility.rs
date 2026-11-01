@@ -227,6 +227,80 @@ impl Visibility {
         to.is_empty().then_some(seen)
     }
 
+    /// A way to walk from `from`, in one of the rooms `start`, to `to`, in one of the rooms
+    /// `end`: the points to head for in turn, through the middle of each doorway on the way (a
+    /// portal standing upright, not one `blocked` by a closed door), `to` last. The shortest
+    /// such way, walking straight across each room. None when no doorway leads there.
+    pub fn path(&self, from: [f32; 3], start: &[u32], to: [f32; 3], end: &[u32], blocked: &[bool]) -> Option<Vec<[f32; 3]>> {
+        if start.iter().any(|r| end.contains(r)) {
+            return Some(vec![to]);
+        }
+        let dist = |a: [f32; 3], b: [f32; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+        // Where a doorway is walked through: the middle of its opening, at its foot
+        let door = |i: usize| -> Option<[f32; 3]> {
+            let c = &self.corners[i];
+            let n = plane_normal(c)?;
+            if n[1].abs() > 0.5 || blocked.get(i).copied().unwrap_or(false) {
+                return None;
+            }
+            let k = c.len() as f32;
+            let low = c.iter().map(|p| p[1]).fold(f32::MAX, f32::min);
+            Some([c.iter().map(|p| p[0]).sum::<f32>() / k, low, c.iter().map(|p| p[2]).sum::<f32>() / k])
+        };
+        let rooms_of = |i: usize| self.sides[i].map(|(r, _)| r);
+        let doors_of = |room: u32| self.by_room.get(&room).map(Vec::as_slice).unwrap_or_default();
+        // Shortest ways to each doorway, from `from`
+        let mut best: HashMap<usize, (f32, Option<usize>)> = HashMap::new();
+        let mut open: Vec<(f32, usize)> = Vec::new();
+        for &room in start {
+            for &i in doors_of(room) {
+                if let Some(p) = door(i) {
+                    let d = dist(from, p);
+                    if best.get(&i).is_none_or(|b| d < b.0) {
+                        best.insert(i, (d, None));
+                        open.push((d, i));
+                    }
+                }
+            }
+        }
+        let mut done: HashSet<usize> = HashSet::new();
+        let mut finish: Option<(f32, usize)> = None;
+        while let Some(k) = (0..open.len()).min_by(|&a, &b| open[a].0.total_cmp(&open[b].0)) {
+            let (d, i) = open.swap_remove(k);
+            if !done.insert(i) || finish.is_some_and(|f| d >= f.0) {
+                continue;
+            }
+            let here = door(i)?;
+            for room in rooms_of(i) {
+                if end.contains(&room) {
+                    let total = d + dist(here, to);
+                    if finish.is_none_or(|f| total < f.0) {
+                        finish = Some((total, i));
+                    }
+                }
+                for &j in doors_of(room) {
+                    let Some(p) = door(j).filter(|_| !done.contains(&j)) else { continue };
+                    let e = d + dist(here, p);
+                    if best.get(&j).is_none_or(|b| e < b.0) {
+                        best.insert(j, (e, Some(i)));
+                        open.push((e, j));
+                    }
+                }
+            }
+        }
+        let (_, mut i) = finish?;
+        let mut way = vec![to];
+        loop {
+            way.push(door(i)?);
+            match best.get(&i)?.1 {
+                Some(before) => i = before,
+                None => break,
+            }
+        }
+        way.reverse();
+        Some(way)
+    }
+
     /// Whether the map has a room with this number
     pub fn is_room(&self, number: u32) -> bool {
         self.index.contains_key(&number)

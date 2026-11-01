@@ -27,6 +27,12 @@ pub const RAISE_MOTIONS: [&str; 2] = ["rmt_llup", "rmt_slup"];
 pub const MUFFLED: f32 = 0.5;
 /// Seconds a terrorist who heard something keeps its weapon up toward it (a guess)
 pub const HEARD_SECONDS: f32 = 10.0;
+/// How fast they walk, as a player does (units a second)
+pub const WALK_SPEED: f32 = 514.0;
+/// How near a point on its way it must come before it heads for the next
+const ARRIVE: f32 = 30.0;
+/// The highest step up it takes walking, from one tick to the next
+const STEP: f32 = 60.0;
 
 /// How far a terrorist hears a player's footsteps at a pace: half as far as the original's
 /// sounds carry for an operative with light gear on a hard floor (soundvol.txt's F_TWLEQ and
@@ -67,6 +73,8 @@ pub struct Mind {
     pub quick: bool,
     /// The nearest thing they last heard, and when
     pub heard: Option<(V3, f32)>,
+    /// The points they are walking to in turn, through doorways (see `Visibility::path`)
+    pub path: Vec<V3>,
     pub gun: Gun,
     pub ammo: u32,
     /// Full magazines left
@@ -79,7 +87,7 @@ pub struct Mind {
 impl Mind {
     pub fn new(alertness: Alertness, skill: f32, self_control: f32, sight: f32, gun: Gun, magazine: u32, magazines: u32) -> Mind {
         Mind {
-            alertness, skill, self_control, sight, target: None, seen_at: 0.0, aim: Aim::default(), aim_dir: None, swing: 0.0, quick: false, heard: None, gun,
+            alertness, skill, self_control, sight, target: None, seen_at: 0.0, aim: Aim::default(), aim_dir: None, swing: 0.0, quick: false, heard: None, path: Vec::new(), gun,
             ammo: magazine, magazines: magazines.saturating_sub(1), magazine, reload_until: None, next_shot: 0.0,
         }
     }
@@ -183,15 +191,25 @@ impl super::Sim {
 
             // The nearest noise it hears: in reach, and through walls only half as far. Not its own.
             let hears = noises.iter().zip(&noise_rooms).filter_map(|(&(at, reach, through_walls), rooms_there)| {
+                let rooms_there: &Vec<u32> = rooms_there;
                 let d = super::dist3(eye, at);
                 let across = ((at[0] - eye[0]).powi(2) + (at[2] - eye[2]).powi(2)).sqrt();
                 let muffled = through_walls && d <= reach * MUFFLED;
                 let heard = across > 60.0 && d <= reach && (muffled || self.line_clear(eye, &rooms, at, rooms_there));
-                heard.then_some((at, d))
+                heard.then_some((at, d, rooms_there))
             }).min_by(|a, b| a.1.total_cmp(&b.1));
-            if let Some((at, _)) = hears {
+            if let Some((at, _, rooms_there)) = hears {
                 mind.heard = Some((at, now));
                 mind.alertness = Alertness::Alert;
+                // With no one to fight, it goes to see: unless it is on its way there already
+                let going = mind.path.last().is_some_and(|&end| super::dist3(end, at) < 200.0);
+                if mind.target.is_none() && !going {
+                    let feet = [npc.pos[0], npc.floor, npc.pos[2]];
+                    mind.path = self.visibility.path(feet, &rooms, at, rooms_there, &self.blocked_portals).unwrap_or_default();
+                    if !mind.path.is_empty() {
+                        ev.push(super::Event::Log(format!("t={now:.2} character {i} goes to see at ({:.0}, {:.0}, {:.0}), {} legs", at[0], at[1], at[2], mind.path.len())));
+                    }
+                }
             }
 
             // The players it sees: where it would aim at each, and how far that is
@@ -221,6 +239,8 @@ impl super::Sim {
             let seen = sees.iter().find(|s| mind.target == Some(s.0)).or_else(|| sees.iter().min_by(|a, b| a.2.total_cmp(&b.2))).copied();
             match seen {
                 Some((slot, _, _)) => {
+                    // It stops where it is to fight
+                    mind.path.clear();
                     if mind.target != Some(slot) {
                         // A new target: its spread opens afresh, and its aim starts again from
                         // where it faces
@@ -264,11 +284,31 @@ impl super::Sim {
                 npc.mind = Some(mind);
                 continue;
             }
-            // Without a target, turn toward what it heard
-            if let (None, Some((at, _))) = (seen, listening) {
-                let want = (at[0] - eye[0]).atan2(at[2] - eye[2]).to_degrees();
-                npc.yaw = turn_toward(npc.yaw, want, TURN_RATE * dt);
+            // Without a target, walk its way to where it heard something, then turn toward it
+            if seen.is_none() && !mind.path.is_empty() {
+                let next = mind.path[0];
+                let (dx, dz) = (next[0] - npc.pos[0], next[2] - npc.pos[2]);
+                let left = (dx * dx + dz * dz).sqrt();
+                if left < ARRIVE {
+                    mind.path.remove(0);
+                } else {
+                    npc.yaw = turn_toward(npc.yaw, dx.atan2(dz).to_degrees(), TURN_RATE * dt);
+                    let step = (WALK_SPEED * dt).min(left);
+                    npc.pos[0] += dx / left * step;
+                    npc.pos[2] += dz / left * step;
+                    let floor = self.world.ground_at(npc.pos[0], npc.pos[2], npc.floor + STEP).unwrap_or(npc.floor);
+                    npc.pos[1] += floor - npc.floor;
+                    npc.floor = floor;
+                    // On its feet to walk
+                    npc.stance = Some(Stance::Stand);
+                }
+            } else if let (None, Some((at, _))) = (seen, listening) {
+                if ((at[0] - eye[0]).powi(2) + (at[2] - eye[2]).powi(2)).sqrt() > 60.0 {
+                    let want = (at[0] - eye[0]).atan2(at[2] - eye[2]).to_degrees();
+                    npc.yaw = turn_toward(npc.yaw, want, TURN_RATE * dt);
+                }
             }
+            npc.walking = seen.is_none() && !mind.path.is_empty();
             // Turn toward the target, swing the aim onto them, and fire when the spread lets it
             let mut fire = None;
             if let Some((_, to, dist)) = seen {
@@ -493,6 +533,36 @@ mod tests {
         assert!(sim.npcs[0].mind.as_ref().unwrap().heard.is_some());
         let shots = wait(&mut sim, 3.0);
         assert!(sim.npcs[0].aiming && !shots.is_empty());
+    }
+
+    #[test]
+    fn a_terrorist_walks_to_what_it_heard_and_stops_there() {
+        let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
+        sim.noises.push(([200.0, 50.0, 300.0], 1000.0, true));
+        let mut walked = false;
+        for _ in 0..60 {
+            wait(&mut sim, crate::sim::TICK);
+            walked |= sim.npcs[0].walking;
+        }
+        let n = &sim.npcs[0];
+        assert!(walked && !n.walking, "still walking at {:?}", n.pos);
+        assert!((n.pos[0] - 200.0).abs() <= 30.0 + 1.0 && (n.pos[2] - 300.0).abs() < 1.0, "{:?}", n.pos);
+        assert_eq!(n.stance, Some(Stance::Stand));
+    }
+
+    #[test]
+    fn a_way_across_a_level_goes_through_doorways_and_up_its_stairs() {
+        let Ok(level) = crate::map::read(std::path::Path::new("data/map/rm05/rm05.map")) else { return };
+        let vis = crate::visibility::Visibility::new(&level);
+        // From the spawn in the cabin to the upper deck at the front
+        let (a, b) = ([37813.4, 32817.0, 33285.3], [37607.0, 33170.0, 36478.0]);
+        let (ra, rb) = (vis.player_rooms(&level, a, None), vis.player_rooms(&level, b, None));
+        let way = vis.path(a, &ra, b, &rb, &[]).expect("a way there");
+        assert!(way.len() > 3 && way.last() == Some(&b));
+        assert!(way.iter().any(|p| p[1] > 33000.0), "{way:?}");
+        // A closed door on the way, and there is none
+        let blocked: Vec<bool> = (0..level.portals.portals.len()).map(|_| true).collect();
+        assert!(vis.path(a, &ra, b, &rb, &blocked).is_none());
     }
 
     #[test]

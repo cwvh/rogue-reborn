@@ -648,7 +648,7 @@ impl Sim {
             h.f32(n.floor);
             h.f32(n.yaw);
             h.f32(n.health.hp);
-            h.u32(n.aiming as u32);
+            h.u32(n.aiming as u32 + 2 * n.walking as u32);
             h.f32(n.last_shot);
             if let Some(m) = &n.mind {
                 h.u32(m.target.map_or(u32::MAX, |t| t as u32));
@@ -657,6 +657,7 @@ impl Sim {
                 h.u32(m.ammo + (m.magazines << 16));
                 h.opt_f32(m.reload_until);
                 h.f32(m.next_shot);
+                h.u32(m.path.len() as u32);
             }
             match n.health.state {
                 combat::NpcState::Idle => h.u32(0),

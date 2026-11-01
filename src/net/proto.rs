@@ -20,7 +20,7 @@ use crate::sim::{Cause, Event, Input, MAX_PLAYERS, Sim, Struck, TICK, Throw};
 type V3 = [f32; 3];
 
 /// Bumped whenever the messages change, so that a client and server that disagree notice
-pub const PROTOCOL: u8 = 8;
+pub const PROTOCOL: u8 = 9;
 
 const MAGIC: u16 = 0x5252;
 
@@ -132,6 +132,9 @@ pub struct NpcSnap {
     pub state: NpcState,
     /// Aiming at a player
     pub aiming: bool,
+    /// Whether it is walking, and its stance
+    pub walking: bool,
+    pub stance: Option<crate::mission::Stance>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -199,7 +202,7 @@ impl Snapshot {
             ack_seq,
             culling: sim.culling,
             players,
-            npcs: sim.npcs.iter().map(|n| NpcSnap { pos: n.pos, yaw: n.yaw, hp: n.health.hp, state: n.health.state, aiming: n.aiming }).collect(),
+            npcs: sim.npcs.iter().map(|n| NpcSnap { pos: n.pos, yaw: n.yaw, hp: n.health.hp, state: n.health.state, aiming: n.aiming, walking: n.walking, stance: n.stance }).collect(),
             thrown: sim.thrown.iter().map(|t| ThrownSnap {
                 owner: t.owner as u8,
                 pos: t.grenade.pos,
@@ -261,8 +264,12 @@ impl Snapshot {
         }
 
         for (npc, s) in sim.npcs.iter_mut().zip(&self.npcs) {
-            npc.pos[0] = s.pos[0];
-            npc.pos[2] = s.pos[2];
+            // Its feet stay as far below its middle as they were placed, up and down stairs
+            let above = npc.pos[1] - npc.floor;
+            npc.pos = s.pos;
+            npc.floor = s.pos[1] - above;
+            npc.walking = s.walking;
+            npc.stance = s.stance;
             npc.yaw = s.yaw;
             npc.health.hp = s.hp;
             npc.health.state = s.state;
@@ -720,8 +727,9 @@ fn write_npc(w: &mut Writer, n: &NpcSnap) {
     w.v3(n.pos);
     w.f32(n.yaw);
     w.f32(n.hp);
-    // Aiming is the state's top bit
-    let aiming = if n.aiming { 0x80 } else { 0 };
+    // The state's top bit is aiming, the next walking, and the four below them the stance
+    let stance = n.stance.map_or(0, |s| 1 + crate::mission::Stance::ALL.iter().position(|&t| t == s).unwrap_or(0) as u8);
+    let aiming = if n.aiming { 0x80 } else { 0 } | if n.walking { 0x40 } else { 0 } | stance << 2;
     match n.state {
         NpcState::Idle => w.u8(aiming),
         NpcState::Reacting { motion, start } => { w.u8(1 | aiming); w.u8(motion_byte(motion)); w.f32(start); }
@@ -732,14 +740,18 @@ fn write_npc(w: &mut Writer, n: &NpcSnap) {
 fn read_npc(r: &mut Reader) -> Result<NpcSnap> {
     let (pos, yaw, hp) = (r.v3()?, r.f32()?, r.f32()?);
     let byte = r.u8()?;
-    let aiming = byte & 0x80 != 0;
-    let state = match byte & 0x7f {
+    let (aiming, walking) = (byte & 0x80 != 0, byte & 0x40 != 0);
+    let stance = match (byte >> 2) & 0xf {
+        0 => None,
+        s => crate::mission::Stance::ALL.get(s as usize - 1).copied(),
+    };
+    let state = match byte & 0x3 {
         0 => NpcState::Idle,
         1 => NpcState::Reacting { motion: motion_from(r.u8()?)?, start: r.f32()? },
         2 => NpcState::Dead { motion: motion_from(r.u8()?)?, start: r.f32()? },
         s => bail!("no such state as {s}"),
     };
-    Ok(NpcSnap { pos, yaw, hp, state, aiming })
+    Ok(NpcSnap { pos, yaw, hp, state, aiming, walking, stance })
 }
 
 fn write_thrown(w: &mut Writer, t: &ThrownSnap) {
@@ -1056,9 +1068,9 @@ mod tests {
             tick: 900, time: 15.0, ack_seq: 777, culling: true,
             players: vec![player(0), PlayerSnap { message: None, target_hp: None, ..player(3) }],
             npcs: vec![
-                NpcSnap { pos: [1.0, 0.0, 2.0], yaw: 30.0, hp: 100.0, state: NpcState::Idle, aiming: true },
-                NpcSnap { pos: [2.0, 0.0, 2.0], yaw: 60.0, hp: 40.0, state: NpcState::Reacting { motion: "thwu_bf", start: 14.5 }, aiming: true },
-                NpcSnap { pos: [3.0, 0.0, 2.0], yaw: 90.0, hp: 0.0, state: NpcState::Dead { motion: "hw_bk_up2", start: 12.0 }, aiming: false },
+                NpcSnap { pos: [1.0, 0.0, 2.0], yaw: 30.0, hp: 100.0, state: NpcState::Idle, aiming: true, walking: true, stance: Some(crate::mission::Stance::Stand) },
+                NpcSnap { pos: [2.0, 0.0, 2.0], yaw: 60.0, hp: 40.0, state: NpcState::Reacting { motion: "thwu_bf", start: 14.5 }, aiming: true, walking: false, stance: Some(crate::mission::Stance::SitInChair) },
+                NpcSnap { pos: [3.0, 0.0, 2.0], yaw: 90.0, hp: 0.0, state: NpcState::Dead { motion: "hw_bk_up2", start: 12.0 }, aiming: false, walking: false, stance: None },
             ],
             thrown: vec![ThrownSnap { owner: 1, pos: [5.0; 3], vel: [1.0, 2.0, 3.0], fuse: 1.5, spin: 40.0, at_rest: false }],
             doors: vec![(0.0, false), (0.5, true), (1.0, true)],
@@ -1151,7 +1163,7 @@ mod tests {
         let mut snap = snapshot();
         // Only the receiver's own player carries what is on their screen
         snap.players = (0..MAX_PLAYERS as u8).map(|i| if i == 0 { player(0) } else { PlayerSnap { message: None, target_hp: None, aim: None, ..player(i) } }).collect();
-        snap.npcs = (0..16).map(|_| NpcSnap { pos: [1.0; 3], yaw: 1.0, hp: 1.0, state: NpcState::Reacting { motion: "thwu_bb", start: 1.0 }, aiming: true }).collect();
+        snap.npcs = (0..16).map(|_| NpcSnap { pos: [1.0; 3], yaw: 1.0, hp: 1.0, state: NpcState::Reacting { motion: "thwu_bb", start: 1.0 }, aiming: true, walking: true, stance: Some(crate::mission::Stance::Slouch) }).collect();
         snap.events.clear();
         let (bytes, _) = ToClient::Snapshot(snap).encode();
         assert!(bytes.len() < MAX_PACKET - 40, "{} bytes before any events", bytes.len());
