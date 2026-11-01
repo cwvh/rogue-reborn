@@ -551,7 +551,11 @@ impl CollisionWorld {
     fn nearest_where(&self, origin: V3, dir: V3, max_dist: f32, through: u8, counts: impl Fn(&Tri) -> bool) -> Option<(f32, &Tri)> {
         let mut stops: Vec<(f32, &Tri)> = Vec::new();
         let mut passed: Vec<(f32, &Tri)> = Vec::new();
-        for (i, t) in self.tris.iter().enumerate().filter(|(_, t)| counts(t)) {
+        for i in self.tris_along(origin, dir, max_dist) {
+            let (i, t) = (i as usize, &self.tris[i as usize]);
+            if !counts(t) {
+                continue;
+            }
             let Some(d) = crate::combat::ray_triangle(origin, dir, t.a, t.b, t.c).filter(|&d| d <= max_dist) else { continue };
             let passes = if self.door_tris.contains(&i) { self.door_passes(i) } else { t.passes | self.passes.get(t.material).copied().unwrap_or(0) };
             if passes & through != 0 { passed.push((d, t)) } else { stops.push((d, t)) }
@@ -563,6 +567,63 @@ impl CollisionWorld {
         // both, does. A different surface laid over one (the rail on rm06's railing) still stops it.
         let copy = |(d, t): &(f32, &Tri)| passed.iter().any(|(e, p)| (d - e).abs() < 1.0 && p.material == t.material && p.room != t.room);
         stops.into_iter().filter(|h| !copy(h)).min_by(|a, b| a.0.total_cmp(&b.0))
+    }
+
+    /// The triangles in the grid cells the ray from `origin` along `dir` crosses within
+    /// `max_dist`, each once: those it can meet
+    fn tris_along(&self, origin: V3, dir: V3, max_dist: f32) -> Vec<u32> {
+        let (dx, dz) = (dir[0] * max_dist, dir[2] * max_dist);
+        // The part of the ray over the grid, a cell wider all round, as a share of it
+        let (w, h) = (self.cols as f32 * self.cell, self.rows as f32 * self.cell);
+        let (mut t0, mut t1) = (0.0f32, 1.0f32);
+        for (o, d, lo, hi) in [(origin[0], dx, self.min_x - self.cell, self.min_x + w + self.cell), (origin[2], dz, self.min_z - self.cell, self.min_z + h + self.cell)] {
+            if d.abs() < 1e-6 {
+                if o < lo || o > hi {
+                    return Vec::new();
+                }
+                continue;
+            }
+            let (a, b) = ((lo - o) / d, (hi - o) / d);
+            t0 = t0.max(a.min(b));
+            t1 = t1.min(a.max(b));
+        }
+        if t0 > t1 {
+            return Vec::new();
+        }
+        // From cell to cell, crossing whichever side comes first
+        let (x, z) = (origin[0] + dx * t0, origin[2] + dz * t0);
+        let (mut c, mut r) = (self.col(x) as i64, self.row(z) as i64);
+        let (ec, er) = (self.col(origin[0] + dx * t1) as i64, self.row(origin[2] + dz * t1) as i64);
+        let side = |o: f32, d: f32, lo: f32, at: i64| -> (i64, f32, f32) {
+            if d.abs() < 1e-6 {
+                return (0, f32::INFINITY, f32::INFINITY);
+            }
+            let step = if d > 0.0 { 1 } else { -1 };
+            let edge = lo + (at + if d > 0.0 { 1 } else { 0 }) as f32 * self.cell;
+            (step, (edge - o) / d, self.cell / d.abs())
+        };
+        let (sc, mut tc, dc) = side(origin[0], dx, self.min_x, c);
+        let (sr, mut tr, dr) = side(origin[2], dz, self.min_z, r);
+        let mut out = Vec::new();
+        for _ in 0..self.cols + self.rows + 2 {
+            out.extend_from_slice(&self.cells[r as usize * self.cols + c as usize]);
+            if (c == ec && r == er) || tc.min(tr) > t1 {
+                break;
+            }
+            if tc < tr {
+                c += sc;
+                tc += dc;
+            } else {
+                r += sr;
+                tr += dr;
+            }
+            if c < 0 || r < 0 || c >= self.cols as i64 || r >= self.rows as i64 {
+                break;
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     /// Distance along the unit vector `dir` from `origin` to the nearest
@@ -1021,6 +1082,47 @@ mod tests {
         }
         let level = map::read(path).expect("rm11 loads");
         Some(CollisionWorld::from_map(&level, Params::default()))
+    }
+
+    #[test]
+    fn rays_through_the_grid_meet_what_rays_against_every_face_do() {
+        for name in ["rm11", "rm16", "rm05"] {
+            let path = format!("data/map/{name}/{name}.map");
+            let Ok(level) = map::read(Path::new(&path)) else { continue };
+            let world = CollisionWorld::from_map(&level, Params::default());
+            let every = |origin: V3, dir: V3, max: f32| world.tris.iter().filter(|t| world.stops_rays(t))
+                .filter_map(|t| crate::combat::ray_triangle(origin, dir, t.a, t.b, t.c)).filter(|&d| d <= max).reduce(f32::min);
+            // Rays from all over the level, every way, short and long; half of them at a face
+            let (x0, z0) = (world.min_x, world.min_z);
+            let (w, h) = (world.cols as f32 * world.cell, world.rows as f32 * world.cell);
+            let mut rng = 7u64;
+            let mut u = || (crate::util::next_rng(&mut rng) >> 40) as f32 / (1u64 << 24) as f32;
+            let (y0, y1) = world.tris.iter().fold((f32::MAX, f32::MIN), |(a, b), t| (a.min(t.a[1]), b.max(t.a[1])));
+            let (mut met, mut tried, mut tested) = (0, 0, 0);
+            for k in 0..3000 {
+                let mut origin = [x0 + u() * w, y0 + u() * (y1 - y0), z0 + u() * h];
+                let (yaw, pitch) = (u() * std::f32::consts::TAU, (u() - 0.5) * if k % 10 == 0 { 3.1 } else { 0.6 });
+                let mut dir = [yaw.sin() * pitch.cos(), pitch.sin(), yaw.cos() * pitch.cos()];
+                if k % 2 == 1 {
+                    let t = &world.tris[(u() * world.tris.len() as f32) as usize % world.tris.len()];
+                    let mid = [0, 1, 2].map(|c| (t.a[c] + t.b[c] + t.c[c]) / 3.0);
+                    origin = [0, 1, 2].map(|c| mid[c] - dir[c] * 1500.0);
+                    dir = [0, 1, 2].map(|c| (mid[c] - origin[c]) / 1500.0);
+                }
+                let max = if k % 4 < 2 { 300.0 } else { 20000.0 };
+                let (fast, slow) = (world.raycast(origin, dir, max), every(origin, dir, max));
+                tested += world.tris_along(origin, dir, max).len();
+                assert_eq!(fast.is_some(), slow.is_some(), "{name}: {origin:?} along {dir:?} for {max}: {fast:?} {slow:?}");
+                if let (Some(a), Some(b)) = (fast, slow) {
+                    assert!((a - b).abs() < 0.01, "{name}: {origin:?} along {dir:?}: {a} {b}");
+                    met += 1;
+                }
+                tried += 1;
+            }
+            assert!(met > tried / 10, "{name}: only {met} of {tried} met anything");
+            // And a ray tests only the faces near it, not the whole level
+            assert!(tested / tried < world.tris.len() / 10, "{name}: {} of {} faces a ray", tested / tried, world.tris.len());
+        }
     }
 
     // On rm11 the stairs of room 121 climb through the ceiling of room 119 (y 33127, facing
