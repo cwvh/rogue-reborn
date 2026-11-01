@@ -87,6 +87,14 @@ pub fn footstep_reach(pace: Pace) -> f32 {
         Pace::WalkFast | Pace::Run => 500.0,
     }
 }
+/// Seconds before a terrorist looks for a way to what it heard again, and again toward much
+/// the same place (it remembers where it found none), unless a door opens or shuts
+const ASK_AGAIN: f32 = 1.0;
+const ASK_SAME: f32 = 5.0;
+const SAME_PLACE: f32 = 500.0;
+/// How many ways are looked for in a tick, among all of them: the rest wait their turn, so
+/// that a shot many hear does not hold up the game (five on rm16 set off within 0.15 seconds)
+const SEARCHES_PER_TICK: usize = 1;
 /// Seconds they keep to a target they no longer see
 pub const FORGET: f32 = 5.0;
 /// How near where they face a player must be for them to take aim, in degrees either side:
@@ -115,8 +123,13 @@ pub struct Mind {
     pub quick: bool,
     /// The nearest thing they last heard, and when
     pub heard: Option<(V3, f32)>,
-    /// The points they are walking to in turn, through doorways (see `Visibility::path`), and how
-    pub path: Vec<V3>,
+    /// Where it last looked for a way to something it heard, and when; and where it means
+    /// to go and see, how, while it waits its turn to look for the way
+    pub asked: Option<(V3, f32)>,
+    pub seek: Option<(V3, Gait)>,
+    /// The points they are walking to in turn, each with the doorway on the way there (see
+    /// `nav::Grid::path`), and how
+    pub path: Vec<(V3, Option<u32>)>,
     pub gait: Gait,
     /// Their team, its orders, which of its trigger plans it has turned to (the last of them
     /// leads) and which have gone off
@@ -148,7 +161,7 @@ pub struct Mind {
 impl Mind {
     pub fn new(alertness: Alertness, skill: f32, self_control: f32, sight: f32, gun: Gun, magazine: u32, magazines: u32) -> Mind {
         Mind {
-            alertness, skill, self_control, sight, target: None, seen_at: 0.0, aim: Aim::default(), aim_dir: None, swing: 0.0, quick: false, heard: None, path: Vec::new(), gait: Gait::Walk,
+            alertness, skill, self_control, sight, target: None, seen_at: 0.0, aim: Aim::default(), aim_dir: None, swing: 0.0, quick: false, heard: None, asked: None, seek: None, path: Vec::new(), gait: Gait::Walk,
             team: 0, orders: Arc::new(Orders::default()), active: None, fired: Vec::new(), threat: Threat::None, heard_gunfire: false,
             step: 0, loop_at: None, errand: None, speed: None, zones: Vec::new(), pause_until: 0.0, gun,
             ammo: magazine, magazines: magazines.saturating_sub(1), magazine, reload_until: None, next_shot: 0.0,
@@ -345,7 +358,7 @@ impl super::Sim {
                 .chain(self.spawns.iter().copied())
                 .chain(self.players.iter().filter(|p| p.active).map(|p| p.player.pos));
             let seeds: Vec<(V3, Vec<u32>)> = feet.map(|f| (f, self.rooms_at(f, None))).collect();
-            self.nav = Some(Arc::new(super::nav::Grid::new(&self.world, &self.visibility, &seeds)));
+            self.nav = Some(Arc::new(super::nav::Grid::new(&self.world, &self.level, &self.visibility, &seeds)));
         }
         let noise_rooms: Vec<Vec<u32>> = noises.iter().map(|&(at, _, _)| self.visibility.player_rooms(&self.level, at, None)).collect();
         let now = self.time;
@@ -379,6 +392,7 @@ impl super::Sim {
                 ev.push(super::Event::Log(format!("t={now:.2} character {i} turns to \"{}\": {:?} {:?}", r.name, r.plan.roe, r.plan.speed)));
             }
         }
+        let mut searches = SEARCHES_PER_TICK;
         for i in 0..self.npcs.len() {
             let npc = &self.npcs[i];
             let Some(mut mind) = npc.mind.clone() else { continue };
@@ -399,7 +413,7 @@ impl super::Sim {
                 let heard = across > 60.0 && d <= reach && (muffled || self.line_clear(eye, &rooms, at, rooms_there));
                 heard.then_some((at, d, rooms_there, reach))
             }).min_by(|a, b| a.1.total_cmp(&b.1));
-            if let Some((at, _, rooms_there, reach)) = hears {
+            if let Some((at, _, _, reach)) = hears {
                 mind.heard = Some((at, now));
                 mind.alertness = Alertness::Alert;
                 let loud = reach >= LOUD;
@@ -407,17 +421,29 @@ impl super::Sim {
                 mind.heard_gunfire |= loud;
                 // With no one to fight, it goes to see if its plan says to: unless it is on its
                 // way there already. Otherwise it stays put, its weapon up toward it.
-                let going = mind.path.last().is_some_and(|&end| super::dist3(end, at) < 200.0);
-                if let (None, false, Some(gait)) = (mind.target, going, mind.goes_to_see()) {
-                    mind.gait = gait;
-                    // Off its plan's way for now: it comes back to the step it left
-                    mind.errand = None;
-                    mind.speed = None;
-                    let feet = [npc.pos[0], npc.floor, npc.pos[2]];
-                    mind.path = self.nav.as_ref().and_then(|g| g.path(feet, &rooms, at, rooms_there, &self.blocked_portals)).unwrap_or_default();
-                    if !mind.path.is_empty() {
-                        ev.push(super::Event::Log(format!("t={now:.2} character {i} goes to see at ({:.0}, {:.0}, {:.0}), {} legs, {gait:?}", at[0], at[1], at[2], mind.path.len())));
-                    }
+                let going = mind.path.last().map(|w| w.0).or(mind.seek.map(|s| s.0)).is_some_and(|end| super::dist3(end, at) < 200.0);
+                // Nor when it looked for a way just now, or toward there not long ago
+                let asked = mind.asked.is_some_and(|(there, t)| {
+                    t >= self.doors_moved && (now - t < ASK_AGAIN || (now - t < ASK_SAME && super::dist3(there, at) < SAME_PLACE))
+                });
+                if let (None, false, false, Some(gait)) = (mind.target, going, asked, mind.goes_to_see()) {
+                    mind.asked = Some((at, now));
+                    mind.seek = Some((at, gait));
+                }
+            }
+            // Its turn to look for the way there
+            if let Some((at, gait)) = mind.seek.filter(|_| mind.target.is_none() && searches > 0) {
+                searches -= 1;
+                mind.seek = None;
+                mind.gait = gait;
+                // Off its plan's way for now: it comes back to the step it left
+                mind.errand = None;
+                mind.speed = None;
+                let feet = [npc.pos[0], npc.floor, npc.pos[2]];
+                let there = self.visibility.player_rooms(&self.level, at, None);
+                mind.path = self.nav.as_ref().and_then(|g| g.path(&self.world, feet, &rooms, at, &there, &self.blocked_portals)).unwrap_or_default();
+                if !mind.path.is_empty() {
+                    ev.push(super::Event::Log(format!("t={now:.2} character {i} goes to see at ({:.0}, {:.0}, {:.0}), {} legs, {gait:?}", at[0], at[1], at[2], mind.path.len())));
                 }
             }
 
@@ -485,7 +511,7 @@ impl super::Sim {
             npc.aiming = aiming;
             let raised = now >= npc.aim_since + raise_seconds;
             // With nothing else to do, it takes its plan's way, a step at a time
-            if mind.target.is_none() && listening.is_none() && mind.path.is_empty() && now >= mind.pause_until {
+            if mind.target.is_none() && listening.is_none() && mind.path.is_empty() && now >= mind.pause_until && searches > 0 {
                 if mind.errand.take() == Some(mind.step) {
                     // Patrolling zones, it stays a while in each room, and goes on to another
                     if mind.plan().route.get(mind.step) == Some(&Step::PatrolZones) {
@@ -501,16 +527,17 @@ impl super::Sim {
                     Place::Room(room) => self.visibility.center(room),
                 });
                 if let Some(to) = to {
+                    searches -= 1;
                     let feet = [npc.pos[0], npc.floor, npc.pos[2]];
                     let there = self.visibility.player_rooms(&self.level, to, None);
-                    match self.nav.as_ref().and_then(|g| g.path(feet, &rooms, to, &there, &self.blocked_portals)) {
+                    match self.nav.as_ref().and_then(|g| g.path(&self.world, feet, &rooms, to, &there, &self.blocked_portals)) {
                         Some(path) => {
                             mind.path = path;
                             mind.errand = Some(mind.step);
                             mind.gait = mind.plan_gait().0;
                         }
-                        // No way there: on to the next step, or another room
-                        None if matches!(place, Some(Place::Room(_))) => {}
+                        // No way there: on to the next step, or another room in a while
+                        None if matches!(place, Some(Place::Room(_))) => mind.pause_until = now + ASK_AGAIN,
                         None => mind.step += 1,
                     }
                 }
@@ -526,11 +553,26 @@ impl super::Sim {
                 continue;
             }
             // Without a target, walk its way to where it heard something, then turn toward it
+            let mut at_door = false;
             if seen.is_none() && !mind.path.is_empty() {
-                let next = mind.path[0];
+                let (next, doorway) = mind.path[0];
                 let (dx, dz) = (next[0] - npc.pos[0], next[2] - npc.pos[2]);
                 let left = (dx * dx + dz * dz).sqrt();
-                if left < ARRIVE {
+                // A door on the way it opens, and waits for, as the original's OpenDoor step does
+                // (0x5fed60)
+                let door = doorway.and_then(|p| self.doors.iter().position(|d| d.portal == Some(p as usize)));
+                if let Some(k) = door.filter(|&k| self.door_states[k].open < 1.0) {
+                    at_door = true;
+                    if !self.door_states[k].opening {
+                        self.door_states[k].opening = true;
+                        let d = &self.doors[k];
+                        if !d.open_sound.eq_ignore_ascii_case("none") {
+                            ev.push(super::Event::Sound { name: d.open_sound.clone(), at: Some(d.center(self.door_states[k].open)), gain: 1.0 });
+                        }
+                        ev.push(super::Event::Log(format!("t={now:.2} character {i} opens door {}", d.name)));
+                    }
+                    npc.yaw = turn_toward(npc.yaw, dx.atan2(dz).to_degrees(), TURN_RATE * dt);
+                } else if left < ARRIVE {
                     mind.path.remove(0);
                 } else {
                     npc.yaw = turn_toward(npc.yaw, dx.atan2(dz).to_degrees(), TURN_RATE * dt);
@@ -555,7 +597,7 @@ impl super::Sim {
                     npc.yaw = turn_toward(npc.yaw, want, TURN_RATE * dt);
                 }
             }
-            npc.walking = seen.is_none() && !mind.path.is_empty();
+            npc.walking = seen.is_none() && !mind.path.is_empty() && !at_door;
             npc.gait = mind.gait;
             // Turn toward the target, swing the aim onto them, and fire when the spread lets it
             let mut fire = None;
@@ -595,12 +637,61 @@ impl super::Sim {
                 if let Some(name) = sound {
                     ev.push(super::Event::Sound { name, at: Some(npc_pos), gain: 1.0 });
                 }
+                ev.push(super::Event::Log(format!("t={now:.2} character {i} fires at player {} from ({:.0}, {:.0}, {:.0}) along ({:.2}, {:.2}, {:.2})",
+                    mind.target.map_or("?".to_string(), |t| t.to_string()), eye[0], eye[1], eye[2], dir[0], dir[1], dir[2])));
                 self.npcs[i].mind = Some(mind);
                 self.bullet(eye, dir, super::Shooter::Character(i), ev);
             } else {
                 self.npcs[i].mind = Some(mind);
             }
         }
+    }
+}
+
+impl super::Sim {
+    /// A line about each terrorist for the debug dump: where it is and faces, what it knows and
+    /// is doing, and whether it could see player `slot` now
+    pub fn terrorist_report(&self, slot: usize) -> Vec<String> {
+        let now = self.time;
+        let params = self.world.params();
+        let player = self.players.get(slot).filter(|p| p.active);
+        let theirs = player.map(|p| self.rooms_at(p.player.pos, p.current_room)).unwrap_or_default();
+        self.npcs.iter().enumerate().filter_map(|(i, n)| {
+            let m = n.mind.as_ref()?;
+            let feet = [n.pos[0], n.floor, n.pos[2]];
+            let rooms = self.rooms_at(feet, None);
+            let eye = [n.pos[0], n.floor + if kneels(n.stance) { params.crouch_eye_height } else { params.eye_height }, n.pos[2]];
+            let mut t = format!("#{i} team {}: ", m.team);
+            if n.health.is_dead() {
+                t += &format!("dead at ({:.0}, {:.0}, {:.0})", feet[0], feet[1], feet[2]);
+                return Some(t);
+            }
+            let (s, c) = n.yaw.to_radians().sin_cos();
+            t += &format!("at ({:.0}, {:.0}, {:.0}) rooms {rooms:?}, yaw {:.0} facing ({s:.2}, 0, {c:.2}), {:?}, hp {:.0} {:?}",
+                feet[0], feet[1], feet[2], n.yaw, n.stance, n.health.hp, n.health.state);
+            if let Some(p) = player {
+                let body = [p.player.pos[0], p.player.pos[1] + 0.65 * params.body_height(p.player.crouched), p.player.pos[2]];
+                let head = [p.player.pos[0], p.player.pos[1] + 0.94 * params.body_height(p.player.crouched), p.player.pos[2]];
+                let clear = |to| self.line_clear(eye, &rooms, to, &theirs);
+                t += &format!("\n    you: {:.0} units away, in its view {}, clear line to body {} head {}",
+                    super::dist3(eye, body), m.could_see(eye, n.yaw, body, 1.0), clear(body), clear(head));
+            }
+            let active = m.active.and_then(|k| m.orders.reactions.get(k)).map_or("its plan", |r| r.name.as_str());
+            t += &format!("\n    {:?}, threat {:?}, following {active} ({:?}, {:?}), step {}",
+                m.alertness, m.threat, m.plan().roe, m.plan().speed, m.step);
+            t += &format!("\n    target {:?}, last seen {:.1}s ago, aiming {}, ammo {}/{} and {} magazines{}",
+                m.target, now - m.seen_at, n.aiming, m.ammo, m.magazine, m.magazines, if m.reload_until.is_some() { ", reloading" } else { "" });
+            if let Some((at, when)) = m.heard {
+                t += &format!("\n    heard something at ({:.0}, {:.0}, {:.0}) {:.1}s ago", at[0], at[1], at[2], now - when);
+            }
+            if let Some(&(next, door)) = m.path.first() {
+                let end = m.path.last().map_or(next, |w| w.0);
+                t += &format!("\n    walking ({:?}) {} points to ({:.0}, {:.0}, {:.0}), next ({:.0}, {:.0}, {:.0}){}",
+                    m.gait, m.path.len(), end[0], end[1], end[2], next[0], next[1], next[2],
+                    door.map_or(String::new(), |p| format!(" through doorway {}", self.level.portals.portals[p as usize].name)));
+            }
+            Some(t)
+        }).collect()
     }
 }
 
@@ -905,12 +996,12 @@ mod tests {
         let vis = crate::visibility::Visibility::new(&level);
         let rooms = |p: V3| vis.player_rooms(&level, [p[0], p[1] + 50.0, p[2]], None);
         let (from, to) = ([28906.0, 34567.0, 31008.0], [39295.4, 32767.0, 32056.6]);
-        let grid = super::super::nav::Grid::new(&world, &vis, &[(from, rooms(from))]);
+        let grid = super::super::nav::Grid::new(&world, &level, &vis, &[(from, rooms(from))]);
         assert!(grid.len() > 1000 && grid.len() < 200_000, "{} places", grid.len());
-        let way = grid.path(from, &rooms(from), to, &rooms(to), &[]).expect("a way to the deck");
+        let way = grid.path(&world, from, &rooms(from), to, &rooms(to), &[]).expect("a way to the deck");
         // Every leg clear of the walls of the rooms it is in, but doors, which open
         let mut prev = from;
-        for &p in &way {
+        for &(p, _) in &way {
             let (a, b) = ([prev[0], prev[1] + 80.0, prev[2]], [p[0], p[1] + 80.0, p[2]]);
             let d = super::super::dist3(a, b);
             if d > 1.0 {
@@ -947,6 +1038,200 @@ mod tests {
     }
 
     #[test]
+    fn a_way_into_a_room_with_its_doors_shut_goes_through_a_door() {
+        // rm16: room 205, whose doors are shut, from the grounds outside the house
+        use crate::collision::{CollisionWorld, Params};
+        let Ok(level) = crate::map::read(std::path::Path::new("data/map/rm16/rm16.map")) else { return };
+        let world = CollisionWorld::from_map(&level, Params::default());
+        let vis = crate::visibility::Visibility::new(&level);
+        let rooms = |p: V3| vis.player_rooms(&level, [p[0], p[1] + 50.0, p[2]], None);
+        let outside = [30098.0, world.ground_at(30098.0, 34276.0, 32979.0).unwrap(), 34276.0];
+        let inside = [30828.8, 33167.0, 35006.4];
+        let grid = super::super::nav::Grid::new(&world, &level, &vis, &[(outside, rooms(outside)), (inside, rooms(inside))]);
+        let shut: Vec<bool> = level.portals.portals.iter().map(|p| p.name.contains("205")).collect();
+        let started = std::time::Instant::now();
+        let way = grid.path(&world, outside, &rooms(outside), inside, &rooms(inside), &shut).expect("a way in");
+        assert!(started.elapsed().as_millis() < 100, "{:?} over {} places", started.elapsed(), grid.len());
+        let doorways: Vec<&str> = way.iter().filter_map(|w| w.1).map(|p| level.portals.portals[p as usize].name.as_str()).collect();
+        assert!(doorways.iter().any(|n| n.contains("205")), "{doorways:?}");
+        // Nowhere near the grid, there is none
+        assert!(grid.path(&world, outside, &rooms(outside), [outside[0] + 100_000.0, outside[1], outside[2]], &[], &shut).is_none());
+    }
+
+    /// A terrorist outside rm16's house that goes to see what it hears, facing away from room 205
+    fn outside_205() -> Option<crate::sim::Sim> {
+        use crate::collision::{CollisionWorld, Params};
+        let level = std::sync::Arc::new(crate::map::read(std::path::Path::new("data/map/rm16/rm16.map")).ok()?);
+        let world = CollisionWorld::from_map(&level, Params::default());
+        let floor = world.ground_at(30098.0, 34276.0, 32979.0).unwrap();
+        let orders = Orders { plan: Plan { roe: Roe::Investigate, ..Plan::default() }, ..Orders::default() };
+        let npc = crate::sim::characters::Npc {
+            pos: [30098.0, floor, 34276.0], floor, yaw: 225.0, stance: Some(Stance::Stand),
+            mind: Some(Mind::new(Alertness::Alert, 0.4, 0.3, 4000.0, MP5K, 30, 3).with_orders(0, Arc::new(orders))),
+            ..Default::default()
+        };
+        let config = crate::sim::Config { magazine: 30, ammo: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };
+        let mut sim = crate::sim::Sim::new(level, world, config, None, vec![npc]);
+        sim.add_player([30828.8, 33167.0, 35006.4]);
+        // The doors settle shut
+        wait(&mut sim, 0.1);
+        Some(sim)
+    }
+
+    #[test]
+    fn a_terrorist_remembers_it_found_no_way_to_shots_and_does_not_look_at_each() {
+        let Some(mut sim) = outside_205() else { return };
+        // Somewhere no way goes
+        let shot = [130_000.0, 33332.0, 35006.4];
+        let asked = |sim: &crate::sim::Sim| sim.npcs[0].mind.as_ref().unwrap().asked.map(|(_, t)| t);
+        let mut ev = Vec::new();
+        sim.terrorists(0.1, &[(shot, 1e6, true)], &mut ev);
+        let first = asked(&sim).expect("looked for a way");
+        assert!(sim.npcs[0].mind.as_ref().unwrap().path.is_empty());
+        // Ten shots a second from the same place: it does not look again for a while
+        for _ in 0..40 {
+            sim.time += 0.1;
+            sim.terrorists(0.1, &[(shot, 1e6, true)], &mut ev);
+        }
+        assert_eq!(asked(&sim), Some(first));
+        // Later, it does
+        sim.time += ASK_SAME;
+        sim.terrorists(0.1, &[(shot, 1e6, true)], &mut ev);
+        assert!(asked(&sim) > Some(first));
+    }
+
+    #[test]
+    fn the_debug_dump_says_where_each_terrorist_is_and_whether_it_sees_the_player() {
+        let Some(sim) = outside_205() else { return };
+        let report = sim.terrorist_report(0);
+        assert_eq!(report.len(), 1);
+        assert!(report[0].starts_with("#0 team 0: at (30098, "), "{}", report[0]);
+        assert!(report[0].contains("clear line to body false head false"), "{}", report[0]);
+    }
+
+    #[test]
+    fn a_terrorist_opens_a_shut_door_to_go_and_see_a_shot() {
+        let Some(mut sim) = outside_205() else { return };
+        let shut = |sim: &crate::sim::Sim| sim.doors.iter().zip(&sim.door_states)
+            .filter(|(d, _)| d.portal.is_some_and(|p| sim.level.portals.portals[p].name.contains("205")))
+            .all(|(_, s)| s.closed());
+        assert!(shut(&sim));
+        let mut ev = Vec::new();
+        sim.terrorists(0.1, &[([30828.8, 33332.0, 35006.4], 10_000.0, true)], &mut ev);
+        assert!(!sim.npcs[0].mind.as_ref().unwrap().path.is_empty());
+        let mut opened = false;
+        for _ in 0..(20.0 / crate::sim::TICK) as usize {
+            wait(&mut sim, crate::sim::TICK);
+            opened |= !shut(&sim);
+            if sim.npcs[0].mind.as_ref().unwrap().target.is_some() {
+                break;
+            }
+        }
+        assert!(opened, "no door of 205 opened; at {:?}", sim.npcs[0].pos);
+        assert_eq!(sim.npcs[0].mind.as_ref().unwrap().target, Some(0), "never saw the player; at {:?}", sim.npcs[0].pos);
+    }
+
+    #[test]
+    fn none_of_rm16s_terrorists_outside_sees_into_the_house() {
+        // Well inside the grounds (room 1) but near the wall of room 205, the player was once
+        // only in room 1, and three terrorists outside saw them through 205's walls. In room
+        // 201, the line from outside stayed in room 1, and missed the walls of the rooms between.
+        use crate::collision::{CollisionWorld, Params};
+        use crate::mission::{self, Difficulty};
+        let map_path = std::path::Path::new("data/map/rm16/rm16.map");
+        let Some((file, teams)) = mission::teams(map_path, Difficulty::Easy) else { return };
+        let Some(mut chars) = crate::sim::characters::Characters::load(std::path::Path::new("data/character/team_hrt/blue_M_a.CRP"), "up_none_cyc") else { return };
+        let level = std::sync::Arc::new(crate::map::read(map_path).unwrap());
+        let world = CollisionWorld::from_map(&level, Params::default());
+        let npcs = crate::sim::characters::place_terrorists(&teams, 7, &mission::setting(&file), &world, &mut chars);
+        let config = crate::sim::Config { magazine: 30, ammo: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };
+        let sim = crate::sim::Sim::new(level, world, config, None, npcs);
+        for (feet, room) in [([30580.2, 33167.0, 34953.0], 205), ([29784.1, 33169.0, 35005.5], 201), ([29810.4, 33169.0, 35125.2], 201)] {
+            let theirs = sim.rooms_at(feet, None);
+            assert!(theirs.contains(&room), "{theirs:?}");
+            for n in &sim.npcs {
+                let (eye, rooms) = ([n.pos[0], n.floor + 160.0, n.pos[2]], sim.rooms_at([n.pos[0], n.floor, n.pos[2]], None));
+                for up in [0.65, 0.94] {
+                    assert!(!sim.line_clear(eye, &rooms, [feet[0], feet[1] + up * 180.0, feet[2]], &theirs), "{feet:?} seen from {:?}", n.pos);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rm16s_terrorists_ways_into_room_205_keep_clear_of_the_walls() {
+        // A terrorist cut across the corner of a wall in room 205: a straight leg between
+        // places where a body fits passed too near it. And a leg across rm16's grounds went
+        // through the wall of a room inside them, whose walls the grounds' places did not heed.
+        use crate::collision::{CollisionWorld, Params};
+        use crate::mission::{self, Difficulty};
+        let map_path = std::path::Path::new("data/map/rm16/rm16.map");
+        let Some((file, teams)) = mission::teams(map_path, Difficulty::Easy) else { return };
+        let Some(mut chars) = crate::sim::characters::Characters::load(std::path::Path::new("data/character/team_hrt/blue_M_a.CRP"), "up_none_cyc") else { return };
+        let level = std::sync::Arc::new(crate::map::read(map_path).unwrap());
+        let world = CollisionWorld::from_map(&level, Params::default());
+        let npcs = crate::sim::characters::place_terrorists(&teams, 7, &mission::setting(&file), &world, &mut chars);
+        let config = crate::sim::Config { magazine: 30, ammo: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };
+        let mut sim = crate::sim::Sim::new(level, world, config, None, npcs);
+        let to = [30537.0, 33167.0, 34967.0];
+        sim.add_player(to);
+        let started = std::time::Instant::now();
+        sim.terrorists(0.01, &[], &mut Vec::new());
+        eprintln!("the grid took {:?}", started.elapsed());
+        let grid = sim.nav.clone().unwrap();
+        let there = sim.rooms_at(to, None);
+        for (i, n) in sim.npcs.iter().enumerate() {
+            let feet = [n.pos[0], n.floor, n.pos[2]];
+            let way = grid.path(&sim.world, feet, &sim.rooms_at(feet, None), to, &there, &sim.blocked_portals).expect("a way");
+            // Between the points of the way: the first is near its feet, and the last is the
+            // player's, where a player stands
+            for leg in way[..way.len() - 1].windows(2) {
+                let ((a, _), (b, door)) = (leg[0], leg[1]);
+                let n = (crate::sim::dist3(a, b) / 5.0).ceil() as usize;
+                for k in 1..n {
+                    let t = k as f32 / n as f32;
+                    let at = [0, 1, 2].map(|c| a[c] + (b[c] - a[c]) * t);
+                    let Some(y) = sim.world.ground_at(at[0], at[2], at[1] + 60.0) else { continue };
+                    let foot = [at[0], y, at[2]];
+                    for r in sim.rooms_at(foot, None) {
+                        let c = sim.world.wall_clearance_in(&crate::collision::Player::new(foot), r);
+                        assert!(door.is_some() || c > -3.0, "#{i}: {a:?} -> {b:?} into room {r}'s wall by {:.0} at {foot:?}", -c);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_shot_many_hear_sets_them_off_one_search_a_tick() {
+        // The first shot in rm16 once had five of them look for their ways in the same tick
+        use crate::collision::{CollisionWorld, Params};
+        use crate::mission::{self, Difficulty};
+        let map_path = std::path::Path::new("data/map/rm16/rm16.map");
+        let Some((file, teams)) = mission::teams(map_path, Difficulty::Easy) else { return };
+        let Some(mut chars) = crate::sim::characters::Characters::load(std::path::Path::new("data/character/team_hrt/blue_M_a.CRP"), "up_none_cyc") else { return };
+        let level = std::sync::Arc::new(crate::map::read(map_path).unwrap());
+        let world = CollisionWorld::from_map(&level, Params::default());
+        let npcs = crate::sim::characters::place_terrorists(&teams, 7, &mission::setting(&file), &world, &mut chars);
+        let config = crate::sim::Config { magazine: 30, ammo: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };
+        let mut sim = crate::sim::Sim::new(level, world, config, None, npcs);
+        let at = [30537.0, 33167.0, 34967.0];
+        sim.add_player(at);
+        sim.terrorists(crate::sim::TICK, &[], &mut Vec::new());
+        let mut went = Vec::new();
+        for k in 0..30 {
+            let mut ev = Vec::new();
+            let shot = [([at[0], at[1] + 150.0, at[2]], 6000.0, true)];
+            sim.terrorists(crate::sim::TICK, if k == 0 { &shot } else { &[] }, &mut ev);
+            sim.time += crate::sim::TICK;
+            let now = ev.iter().filter(|e| matches!(e, crate::sim::Event::Log(l) if l.contains("goes to see"))).count();
+            assert!(now <= SEARCHES_PER_TICK, "{now} in tick {k}");
+            went.extend(std::iter::repeat_n(k, now));
+        }
+        assert!(went.len() >= 5, "{went:?}");
+    }
+
+    #[test]
     fn turning_takes_the_short_way_round() {
         assert_eq!(turn_toward(350.0, 10.0, 5.0), 355.0);
         assert_eq!(turn_toward(10.0, 350.0, 5.0), 5.0);
@@ -954,3 +1239,7 @@ mod tests {
         assert!(facing(359.0, 2.0) && !facing(0.0, 90.0));
     }
 }
+
+
+
+

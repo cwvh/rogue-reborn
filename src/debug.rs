@@ -42,6 +42,10 @@ pub struct DebugReport<'a> {
     pub render_rooms: &'a [u32],
     /// Doors within reach, and how open they are
     pub doors: &'a [String],
+    /// Each terrorist: where it is, what it knows and does, and whether it sees the player
+    pub terrorists: &'a [String],
+    /// The game's latest log lines (shots, hits, doors, what terrorists turn to)
+    pub log: &'a [String],
 }
 
 // The seconds since the epoch, to name dumps and clips by
@@ -122,6 +126,18 @@ pub fn write_debug_dump(r: &DebugReport, rgb: &[u8], width: u32, height: u32, st
     }
     if r.sprite_mode != 0 {
         repro.push_str(&format!(" --sprite-mode {}", r.sprite_mode));
+    }
+    if !r.terrorists.is_empty() {
+        writeln!(t, "\nterrorists:")?;
+        for line in r.terrorists {
+            writeln!(t, "  {line}")?;
+        }
+    }
+    if !r.log.is_empty() {
+        writeln!(t, "\nlatest log:")?;
+        for line in r.log {
+            writeln!(t, "  {line}")?;
+        }
     }
     writeln!(t, "\nreproduce: {repro}")?;
     writeln!(t, "git commit: {}", option_env!("GIT_HASH").unwrap_or("unknown"))?;

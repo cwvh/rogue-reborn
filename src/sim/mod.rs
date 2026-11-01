@@ -394,6 +394,8 @@ pub struct Sim {
     speed_scale: f32,
     /// Whether players can hurt each other (a server's game: it is off when playing alone)
     pub pvp: bool,
+    /// Players take no harm, but flinch as they would (--god)
+    pub god: bool,
     /// Where players come back after they die
     pub spawns: Vec<V3>,
     /// For each player, how many ticks back in time the others were when they took their shot,
@@ -420,8 +422,9 @@ pub struct Sim {
 
     pub doors: Vec<Door>,
     pub door_states: Vec<DoorState>,
-    /// Whether each portal is shut by a closed door
+    /// Whether each portal is shut by a closed door, and when one last opened or shut
     pub blocked_portals: Vec<bool>,
+    pub doors_moved: f32,
     pub panes: Vec<Pane>,
     /// When each pane broke
     pub broken_at: Vec<Option<f32>>,
@@ -445,6 +448,7 @@ impl Sim {
             visibility,
             door_states: vec![DoorState::default(); doors.len()],
             blocked_portals: vec![false; level.portals.portals.len()],
+            doors_moved: 0.0,
             doors,
             broken_at: vec![None; panes.len()],
             panes,
@@ -455,6 +459,7 @@ impl Sim {
             culling: config.culling,
             speed_scale: config.speed_scale,
             pvp: false,
+            god: false,
             rewind: Vec::new(),
             past: VecDeque::new(),
             animators: Default::default(),
@@ -800,6 +805,9 @@ impl Sim {
                 self.world.set_door_open(i, s.open);
             }
             if let Some(p) = d.portal {
+                if self.blocked_portals[p] != s.closed() {
+                    self.doors_moved = self.time;
+                }
                 self.blocked_portals[p] = s.closed();
             }
         }
@@ -1130,7 +1138,8 @@ impl Sim {
         let flown = far_wall(self);
         // Reaching a body in `rooms`: among the walls of the rooms flown through, and of its own
         let reaches = |rooms: &[u32], d: f32| {
-            let walls: Vec<u32> = crossed.iter().chain(rooms).copied().collect();
+            let mut walls: Vec<u32> = crossed.iter().chain(rooms).copied().collect();
+            walls.extend(self.rooms_crossing(eye, [0, 1, 2].map(|k| eye[k] + dir[k] * d)));
             rooms.iter().any(|r| crossed.contains(r)) && flown.is_none_or(|w| w >= d - 1.0)
                 && self.world.bullet_hit_in(eye, dir, d, &walls).is_none_or(|h| h.dist >= d - 1.0)
         };
@@ -1261,9 +1270,15 @@ impl Sim {
         self.reaches.get(&name.to_ascii_lowercase()).copied().unwrap_or(0.0)
     }
 
-    /// The rooms a person standing at `feet` is in (`hint` is the one they were last in)
+    /// The rooms a person standing at `feet` is in (`hint` is the one they were last in), every
+    /// one whose walls have to stop sight and bullets
     fn rooms_at(&self, feet: V3, hint: Option<usize>) -> Vec<u32> {
-        self.visibility.player_rooms(&self.level, [feet[0], feet[1] + 50.0, feet[2]], hint)
+        self.visibility.rooms_holding(&self.level, [feet[0], feet[1] + 50.0, feet[2]], hint)
+    }
+
+    /// The rooms whose volumes the segment from `a` to `b` passes through
+    fn rooms_crossing(&self, a: V3, b: V3) -> Vec<u32> {
+        self.level.rooms.crossing(a, b).into_iter().filter_map(|i| self.level.rooms.rooms[i].section_name.parse().ok()).collect()
     }
 
     /// The rooms a bullet from `eye` along `dir`, starting in the rooms `from`, flies into
@@ -1279,9 +1294,11 @@ impl Sim {
     fn line_clear(&self, a: V3, from: &[u32], b: V3, to: &[u32]) -> bool {
         let d = dist3(a, b);
         let Some(mut rooms) = self.visibility.rooms_along(from, to, a, b, &self.blocked_portals) else { return false };
-        // Both ends' rooms' walls too: a room that holds the whole level (rm16's grounds) is
-        // one both ends are in, and would leave out the walls of the room inside it
+        // Both ends' rooms' walls too, and those of every room the line passes through: in a
+        // room that holds the whole level (rm16's grounds) the line goes from room to room
+        // without leaving it, and would leave out the walls of the rooms inside
         rooms.extend(from.iter().chain(to));
+        rooms.extend(self.rooms_crossing(a, b));
         let dir = [(b[0] - a[0]) / d, (b[1] - a[1]) / d, (b[2] - a[2]) / d];
         self.world.bullet_hit_in(a, dir, d, &rooms).is_none_or(|h| h.dist >= d - 1.0)
     }
@@ -1566,7 +1583,9 @@ impl Sim {
         if p.respawn_at.is_some() {
             return;
         }
-        p.hp = (p.hp - amount).max(0.0);
+        if !self.god {
+            p.hp = (p.hp - amount).max(0.0);
+        }
         let killed = p.hp <= 0.0;
         let hp = p.hp;
         let pos = p.player.pos;
@@ -1703,6 +1722,18 @@ mod tests {
 
     fn holding() -> Input {
         Input { run: true, ..Input::default() }
+    }
+
+    #[test]
+    fn a_god_takes_no_harm_but_flinches() {
+        let mut sim = demo();
+        sim.god = true;
+        let mut ev = Vec::new();
+        let wound = Wound::Shot(combat::BodyPart::Torso, combat::Facing::Front);
+        sim.hurt_player(0, None, PLAYER_HP * 2.0, [0.0, 100.0, -350.0], wound, Cause::Terrorist, &mut ev);
+        let p = &sim.players[0];
+        assert_eq!(p.hp, PLAYER_HP);
+        assert!(p.respawn_at.is_none() && p.hit.is_some());
     }
 
     /// Run `seconds` of ticks with the same input, keeping every event

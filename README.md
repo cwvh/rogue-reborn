@@ -112,6 +112,7 @@ On other platforms, or without the aliases:
 | `--realistic-decals` | per-surface bullet holes with splinters, sparks and dust, instead of the game's sprites |
 | `--no-sound`, `--volume 0.0-1.0` | sound off, master volume |
 | `--doors-open 0..1` | start with every door that far open (they start shut) |
+| `--god` | take no harm, but flinch at hits as usual (playing alone or a recording, not on a server) |
 | `--viewmodel` | draw the gun in front of the camera (the original didn't) |
 | `--record FILE` | record the game (a byte a tick when the mouse is still, a few when it moves) to FILE when you quit |
 | `--play FILE` | play a recording back; it starts as the game did, and checks the game against the recording every second |

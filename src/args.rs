@@ -52,6 +52,8 @@ pub struct Args {
     /// How the level's soft sprites (shadows, light pools) are drawn: 0 as shipped, see `SPRITE_MODES`
     pub sprite_mode: u8,
     pub first_person: bool,
+    /// Take no harm from anything, but flinch at hits as usual
+    pub god: bool,
     pub info: bool,
     pub spawn_zone: Option<String>,
     pub seed: Option<u64>,
@@ -202,6 +204,7 @@ pub fn parse_args() -> Args {
                 None => eprintln!("--difficulty expects easy, medium or hard"),
             },
             "--first-person" => args.first_person = true,
+            "--god" => args.god = true,
             "--walk" => {
                 args.walk = it.next().and_then(|v| v.parse().ok());
                 args.first_person = true;

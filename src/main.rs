@@ -44,6 +44,8 @@ const BENCH_WARMUP: u32 = 30;
 
 // How long F4 records, in seconds
 const CLIP_SECONDS: f32 = 2.0;
+/// How many of the latest log lines a debug dump shows
+const RECENT_LOG: usize = 60;
 
 /// The ways to draw the level's soft sprites (H cycles them, `--sprite-mode` starts one), for
 /// finding why a shadow flickers: whether it writes depth, and whether it is pulled toward the
@@ -97,6 +99,7 @@ fn main() {
         args.speed_scale = Some(h.speed_scale);
         args.no_cull = !h.culling;
         args.doors_open = h.doors_open;
+        args.god = h.god;
         args.model = Some(PathBuf::from(&h.model));
         args.no_models = h.no_models;
         args.model_yaw = h.model_yaw;
@@ -535,6 +538,7 @@ fn main() {
         model_yaw: args.model_yaw,
         actor: args.actor.clone(),
         mission: mission_file.as_ref().map(|p| p.display().to_string()),
+        god: args.god,
     }));
     let mut sim = sim::Sim::new(
         level.clone(),
@@ -564,8 +568,10 @@ fn main() {
     if let Some(open) = args.doors_open {
         sim.set_doors_open(open);
     }
+    sim.god = args.god;
 
     let mut last_cursor_pos = None;
+    let mut recent_log: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     window.set_cursor_mode(CursorMode::Disabled);
 
     let mut render_time = Instant::now();
@@ -1008,7 +1014,14 @@ fn main() {
                         }
                     }
                 }
-                sim::Event::Log(line) => println!("{line}"),
+                sim::Event::Log(line) => {
+                    println!("{line}");
+                    // The latest, for the debug dump
+                    if recent_log.len() >= RECENT_LOG {
+                        recent_log.pop_front();
+                    }
+                    recent_log.push_back(line);
+                }
                 sim::Event::Shot { player, start, end, hit_character } => {
                     if player == me {
                         tracer = Some((start, end, hit_character, game_time + 0.1));
@@ -1515,7 +1528,7 @@ fn main() {
             // and on rm05 a character on the plane's upper deck pokes out of the top of the hull.
             // `feet` in map space; with no rooms drawn (culling off) everyone shows.
             let shown = |feet: [f32; 3]| visible_rooms.is_empty()
-                || sim.visibility.player_rooms(&level, [feet[0], feet[1] + 10.0, feet[2]], None).iter().any(|r| visible_rooms.contains(r));
+                || sim.visibility.rooms_holding(&level, [feet[0], feet[1] + 10.0, feet[2]], None).iter().any(|r| visible_rooms.contains(r));
 
             // The light of a blast on a character standing at `feet`: nothing when there is none
             let glow_on = |feet: [f32; 3]| -> [f32; 3] {
@@ -2218,6 +2231,7 @@ fn main() {
                 map_path, map_num: &map_num, level: &level, eye, feet, yaw: camera.yaw, pitch: camera.pitch, dir,
                 hit, first_person, third_person, textured, room_debug, show_portals, show_collisions, sprite_mode, depth_bits,
                 fps, render_ms, culling: sim.culling, portal_paths: args.portal_paths, room: current_rooms.first().copied(), drawn: &drawn_rooms, collision: &sim.players[me].collision_rooms, player_rooms: &sim.players[me].player_rooms, render_rooms: &sim.players[me].render_rooms, doors: &nearby_doors,
+                terrorists: &sim.terrorist_report(me), log: recent_log.make_contiguous(),
             };
             let clipping = stem.is_some();
             if let Err(e) = std::fs::create_dir_all(stem.as_deref().and_then(|s| Path::new(s).parent()).unwrap_or(Path::new("debug"))) {

@@ -7,6 +7,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 
 use crate::collision::{CollisionWorld, Player};
+use crate::map::Map;
 use crate::visibility::Visibility;
 
 type V3 = [f32; 3];
@@ -17,10 +18,17 @@ const CELL: f32 = 40.0;
 const STEP: f32 = 45.0;
 /// The most places a level has, in case one spreads out of hand
 const MAX_PLACES: usize = 600_000;
+/// How often along a straight leg a body is made sure to fit
+const FIT_EVERY: f32 = 10.0;
+/// How much further a way may go to keep from opening a door (a guess: about as far as a
+/// terrorist walks while a door opens)
+const SHUT_DOOR: f32 = 400.0;
 
 struct Place {
     at: V3,
     room: u32,
+    /// Every room that holds it, whose walls a body passing it must keep clear of
+    walls: Vec<u32>,
 }
 
 pub struct Grid {
@@ -30,6 +38,8 @@ pub struct Grid {
     links: Vec<Vec<(u32, f32, Option<u32>)>>,
     /// The places at each spot across the floor
     columns: HashMap<(i32, i32), Vec<u32>>,
+    /// The places joined to each place share its group
+    group: Vec<u32>,
 }
 
 fn column(x: f32, z: f32) -> (i32, i32) {
@@ -44,8 +54,8 @@ impl Grid {
     /// The places a body can walk to from `seeds` (where characters stand, and their rooms),
     /// spreading out from place to place: so the sea round a ship, and floors no one can reach,
     /// have none
-    pub fn new(world: &CollisionWorld, visibility: &Visibility, seeds: &[(V3, Vec<u32>)]) -> Grid {
-        let mut grid = Grid { places: Vec::new(), links: Vec::new(), columns: HashMap::new() };
+    pub fn new(world: &CollisionWorld, map: &Map, visibility: &Visibility, seeds: &[(V3, Vec<u32>)]) -> Grid {
+        let mut grid = Grid { places: Vec::new(), links: Vec::new(), columns: HashMap::new(), group: Vec::new() };
         let mut index: HashMap<(u32, i32, i32, i32), u32> = HashMap::new();
         // A place in `room` over a column, a floor near `near` in height, if a body fits there
         let mut place = |grid: &mut Grid, room: u32, (cx, cz): (i32, i32), near: f32, reach: f32| -> Option<u32> {
@@ -59,9 +69,18 @@ impl Grid {
             if grid.places.len() >= MAX_PLACES || world.wall_clearance_in(&Player::new([x, y, z]), room) < 0.0 {
                 return None;
             }
+            // Clear of the walls of the other rooms that hold it too, as a room inside another
+            let mut walls: Vec<u32> = map.rooms.containing([x, y + 50.0, z]).into_iter()
+                .filter_map(|r| map.rooms.rooms[r].section_name.parse().ok()).collect();
+            if !walls.contains(&room) {
+                walls.push(room);
+            }
+            if walls.iter().any(|&r| world.wall_clearance_in(&Player::new([x, y, z]), r) < 0.0) {
+                return None;
+            }
             let i = grid.places.len() as u32;
             index.insert(key, i);
-            grid.places.push(Place { at: [x, y, z], room });
+            grid.places.push(Place { at: [x, y, z], room, walls });
             grid.links.push(Vec::new());
             grid.columns.entry((cx, cz)).or_default().push(i);
             Some(i)
@@ -90,7 +109,12 @@ impl Grid {
             // Beside it in its room
             for (dx, dz) in [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)] {
                 if let Some(j) = place(&mut grid, room, (cx + dx, cz + dz), at[1], STEP) {
-                    next.push((j, None));
+                    // A step across a corner only where a body fits halfway
+                    let to = grid.places[j as usize].at;
+                    let half = Player::new([0, 1, 2].map(|k| (at[k] + to[k]) / 2.0));
+                    if dx == 0 || dz == 0 || grid.places[i as usize].walls.iter().all(|&r| world.wall_clearance_in(&half, r) >= 0.0) {
+                        next.push((j, None));
+                    }
                 }
             }
             // Through a doorway near it, into the room beyond
@@ -113,7 +137,28 @@ impl Grid {
                 todo.push(j);
             }
         }
+        grid.join();
         grid
+    }
+
+    /// Which places are joined to which, through doorways shut or open, so a way to somewhere
+    /// nothing joins is found to be none at once
+    fn join(&mut self) {
+        let mut parent: Vec<u32> = (0..self.places.len() as u32).collect();
+        fn root(parent: &mut [u32], mut i: u32) -> u32 {
+            while parent[i as usize] != i {
+                parent[i as usize] = parent[parent[i as usize] as usize];
+                i = parent[i as usize];
+            }
+            i
+        }
+        for (i, links) in self.links.iter().enumerate() {
+            for &(j, _, _) in links {
+                let (a, b) = (root(&mut parent, i as u32), root(&mut parent, j));
+                parent[a as usize] = b;
+            }
+        }
+        self.group = (0..self.places.len() as u32).map(|i| root(&mut parent, i)).collect();
     }
 
     pub fn len(&self) -> usize {
@@ -144,69 +189,117 @@ impl Grid {
     }
 
     /// A way to walk from `from` (in the rooms `start`) to `to` (in `end`): the places to make
-    /// for in turn, as few as a straight walk between them allows, `to` last. None when the
-    /// grid has nowhere near either, or no way between that is not `blocked` by a shut door.
-    pub fn path(&self, from: V3, start: &[u32], to: V3, end: &[u32], blocked: &[bool]) -> Option<Vec<V3>> {
+    /// for in turn, as few as a straight walk between them allows, `to` last, each with the
+    /// doorway (a portal) its leg goes through, if it does. A way stops before each doorway,
+    /// to open its door if it is shut; a door `shut` costs a little more walk than an open
+    /// way, which it takes when it is not much longer. None when the grid has nowhere near
+    /// either, or nothing joins them.
+    pub fn path(&self, world: &CollisionWorld, from: V3, start: &[u32], to: V3, end: &[u32], shut: &[bool]) -> Option<Vec<(V3, Option<u32>)>> {
         let (a, b) = (self.nearest(from, start)?, self.nearest(to, end)?);
+        if self.group[a as usize] != self.group[b as usize] {
+            return None;
+        }
         let goal = self.places[b as usize].at;
         // A* across the places
-        let mut came: HashMap<u32, u32> = HashMap::new();
-        let mut cost: HashMap<u32, f32> = HashMap::from([(a, 0.0)]);
-        let mut open = BinaryHeap::from([(Reverse(Key(dist(self.places[a as usize].at, goal))), a)]);
-        while let Some((_, i)) = open.pop() {
+        let mut came = vec![(u32::MAX, None); self.places.len()];
+        let mut cost = vec![f32::INFINITY; self.places.len()];
+        cost[a as usize] = 0.0;
+        let mut open = BinaryHeap::from([(Reverse(Key(dist(self.places[a as usize].at, goal))), Key(0.0), a)]);
+        while let Some((_, Key(here), i)) = open.pop() {
             if i == b {
                 break;
             }
-            let here = cost[&i];
+            // Already reached a shorter way
+            if here > cost[i as usize] {
+                continue;
+            }
             for &(j, d, door) in &self.links[i as usize] {
-                if door.is_some_and(|p| blocked.get(p as usize).copied().unwrap_or(false)) {
-                    continue;
-                }
-                let c = here + d;
-                if cost.get(&j).is_none_or(|&old| c < old) {
-                    cost.insert(j, c);
-                    came.insert(j, i);
-                    open.push((Reverse(Key(c + dist(self.places[j as usize].at, goal))), j));
+                let opening = door.is_some_and(|p| shut.get(p as usize).copied().unwrap_or(false));
+                let c = here + d + if opening { SHUT_DOOR } else { 0.0 };
+                if c < cost[j as usize] {
+                    cost[j as usize] = c;
+                    came[j as usize] = (i, door);
+                    open.push((Reverse(Key(c + dist(self.places[j as usize].at, goal))), Key(c), j));
                 }
             }
         }
-        if a != b && !came.contains_key(&b) {
+        if a != b && came[b as usize].0 == u32::MAX {
             return None;
         }
-        let mut way = vec![b];
-        while let Some(&before) = came.get(way.last()?) {
-            way.push(before);
+        // Back from the end: each place, and the doorway on the way into it
+        let mut way = vec![(b, None)];
+        loop {
+            let (before, door) = came[way.last()?.0 as usize];
+            if before == u32::MAX {
+                break;
+            }
+            way.last_mut()?.1 = door;
+            way.push((before, None));
         }
         way.reverse();
-        // Straight on as far as there is floor all the way, in the rooms the way goes through
+        let places: Vec<u32> = way.iter().map(|w| w.0).collect();
+        // Straight on as far as there is floor all the way, in the rooms the way goes through,
+        // and up to each doorway, found by doubling the reach and then halving; then back,
+        // until a body fits all along (only the last leg is made sure of, as that takes longer)
         let mut points = Vec::new();
         let mut i = 0;
         while i + 1 < way.len() {
             let mut j = i + 1;
-            while j + 1 < way.len() && self.walkable(&way[i..=j + 1]) {
-                j += 1;
+            if way[j].1.is_none() {
+                let last = (i + 2..way.len()).find(|&k| way[k].1.is_some()).map_or(way.len() - 1, |k| k - 1);
+                let floored = |k: usize| self.walkable(None, &places[i..=k]);
+                let mut step = 1;
+                while j + step <= last && floored(j + step) {
+                    j += step;
+                    step *= 2;
+                }
+                let mut beyond = (j + step).min(last + 1);
+                while beyond - j > 1 {
+                    let mid = (j + beyond) / 2;
+                    if floored(mid) {
+                        j = mid;
+                    } else {
+                        beyond = mid;
+                    }
+                }
+                while j > i + 1 && !self.walkable(Some(world), &places[i..=j]) {
+                    j -= 1;
+                }
             }
-            points.push(self.places[way[j] as usize].at);
+            points.push((self.places[way[j].0 as usize].at, way[j].1));
             i = j;
         }
-        points.push(to);
+        points.push((to, None));
         Some(points)
     }
 
     /// Whether the straight line from the first of `way` to its last has a place of the rooms
-    /// along the way under it all along, at about the height between
-    fn walkable(&self, way: &[u32]) -> bool {
+    /// along the way under it all along, at about the height between; and with the `world`, a
+    /// body fits all along it: places are only where a body fits at the middle of each column,
+    /// and a line between them can cut the corner of a wall
+    fn walkable(&self, world: Option<&CollisionWorld>, way: &[u32]) -> bool {
         let (p, q) = (self.places[way[0] as usize].at, self.places[*way.last().unwrap() as usize].at);
         let rooms: Vec<u32> = way.iter().map(|&i| self.places[i as usize].room).collect();
-        let n = (dist(p, q) / (CELL * 0.5)).ceil() as usize;
-        (1..n).all(|k| {
-            let t = k as f32 / n as f32;
+        let rooms = &rooms;
+        // Those under the line at `t` of the way along it
+        let under = |t: f32| {
             let at = [0, 1, 2].map(|c| p[c] + (q[c] - p[c]) * t);
-            let (cx, cz) = column(at[0], at[2]);
-            self.columns.get(&(cx, cz)).is_some_and(|there| there.iter().any(|&i| {
-                let s = &self.places[i as usize];
-                rooms.contains(&s.room) && (s.at[1] - at[1]).abs() <= STEP
-            }))
+            let there = self.columns.get(&column(at[0], at[2])).map(Vec::as_slice).unwrap_or_default();
+            (at, there.iter().map(|&i| &self.places[i as usize]).filter(move |s| rooms.contains(&s.room) && (s.at[1] - at[1]).abs() <= STEP))
+        };
+        let n = (dist(p, q) / (CELL * 0.5)).ceil() as usize;
+        if !(1..n).all(|k| under(k as f32 / n as f32).1.next().is_some()) {
+            return false;
+        }
+        let Some(world) = world else { return true };
+        let n = (dist(p, q) / FIT_EVERY).ceil() as usize;
+        (1..n).all(|k| {
+            let (at, places) = under(k as f32 / n as f32);
+            let mut any = false;
+            places.into_iter().all(|s| {
+                any = true;
+                s.walls.iter().all(|&r| world.wall_clearance_in(&Player::new([at[0], s.at[1], at[2]]), r) >= 0.0)
+            }) && any
         })
     }
 }

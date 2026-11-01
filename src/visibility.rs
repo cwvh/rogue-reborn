@@ -382,6 +382,19 @@ impl Visibility {
         rooms
     }
 
+    /// `player_rooms`, and every room whose volume holds `p`: one well inside rm16's grounds
+    /// near the wall of a room of the house is in both, and is seen, and seen from, in either
+    pub fn rooms_holding(&self, map: &Map, p: [f32; 3], prev: Option<usize>) -> Vec<u32> {
+        let mut rooms = self.player_rooms(map, p, prev);
+        for n in map.rooms.containing(p).into_iter().filter_map(|i| self.numbers[i]) {
+            if !rooms.contains(&n) {
+                rooms.push(n);
+            }
+        }
+        rooms.sort();
+        rooms
+    }
+
     /// The rooms that stop the player and bullets: the rooms drawing starts from, whole;
     /// the rooms their portals lead to, only beyond the portal (a neighbor overlaps the
     /// player's room, and its walls on this side are not really there); and the other

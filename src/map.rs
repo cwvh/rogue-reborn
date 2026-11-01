@@ -1414,6 +1414,13 @@ impl Rooms {
         }).collect()
     }
 
+    /// Every room with a volume the segment from `a` to `b` passes through, as indices into `rooms`
+    pub fn crossing(&self, a: [f32; 3], b: [f32; 3]) -> Vec<usize> {
+        (0..self.rooms.len()).filter(|&i| {
+            self.rooms[i].sherman_levels.iter().flat_map(|l| &l.tm_with_aabb).any(|v| v.crossed(a, b))
+        }).collect()
+    }
+
     /// Every room with a volume that contains the point, as indices into `rooms`
     pub fn containing(&self, p: [f32; 3]) -> Vec<usize> {
         (0..self.rooms.len()).filter(|&i| {
@@ -1667,6 +1674,38 @@ impl TransformationWithAABB {
         }
         let depth = (l[0] - a[0]).min(a[3] - l[0]).min(l[2] - a[2]).min(a[5] - l[2]);
         (depth >= 0.0).then_some(depth)
+    }
+
+    /// Whether the segment from `a` to `b` (map space) passes through the box
+    pub fn crossed(&self, a: [f32; 3], b: [f32; 3]) -> bool {
+        let o = &self.tm.position;
+        let local = |p: [f32; 3]| {
+            let d = [p[0] - o.x, p[1] - o.y, p[2] - o.z];
+            let dot = |v: &Vec3f| d[0] * v.x + d[1] * v.y + d[2] * v.z;
+            [dot(&self.tm.x_axis), dot(&self.tm.y_axis), dot(&self.tm.z_axis)]
+        };
+        let (p, q) = (local(a), local(b));
+        let (mut t0, mut t1) = (0.0f32, 1.0f32);
+        for i in 0..3 {
+            let d = q[i] - p[i];
+            let (lo, hi) = (self.aabb[i], self.aabb[i + 3]);
+            if d.abs() < 1e-9 {
+                if p[i] < lo || p[i] > hi {
+                    return false;
+                }
+                continue;
+            }
+            let (mut u, mut w) = ((lo - p[i]) / d, (hi - p[i]) / d);
+            if u > w {
+                std::mem::swap(&mut u, &mut w);
+            }
+            t0 = t0.max(u);
+            t1 = t1.min(w);
+            if t0 > t1 {
+                return false;
+            }
+        }
+        true
     }
 
     /// The smaller of the box's two sideways sizes

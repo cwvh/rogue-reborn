@@ -254,13 +254,29 @@ and on. `Cover` and the rest are not taken yet.
 The original's path points are not found in our reading of the level files yet. Ours walk a grid
 (sim::nav): places 40 units apart across each room's floors where a body fits among that room's
 own walls (the rooms overlap, so each room's are found among its own), each joined to those beside
-it a step (45 units) up or down away, and to the next room's through the doorways between, shut
-when a door is. It spreads out from where the characters and the players' spawns are, so the sea
-round a ship gets none: rm02 has 17000 places, made in a fifth of a second the first time a
-terrorist is about. A way is the shortest across the places, made straight where there is floor
-all along. They walk it at a player's speed, on their feet, keeping to the floor and up stairs.
-They do not yet open doors (a shut door is no way through), keep clear of furniture with flat tops
-(a table's top counts as floor), or walk as their own weapon's hold.
+it a step (45 units) up or down away, and to the next room's through the doorways between. It
+spreads out from where the characters and the players' spawns are, so the sea round a ship gets
+none: rm02 has 17000 places, made in a fifth of a second the first time a terrorist is about. A
+way is the shortest across the places, made straight where there is floor all along and a body
+fits all along (checked every 10 units: a line between places can cut a wall's corner), and
+stopping before each doorway. A place, and a step across a corner to the next, keeps clear of the
+walls of every room whose volume holds it, not only its own: rm16's grounds hold rooms whose walls
+their places once walked through. That makes rm16's grid take 0.6 seconds instead of 0.45. A shut door costs 400 units more (a guess), so an open way is taken when it is
+not much longer. Places nothing joins have no way between them, found at once without a search. A
+terrorist looks for a way to what it hears at most once a second, and once in five seconds toward
+much the same place (within 500 units), unless a door has opened or shut since; and only one
+of them looks in a tick, the rest waiting their turn (a search on rm16 takes a few
+milliseconds, and the first shot once set five searching at once); one patrolling its
+zones that finds no way to a room tries another a second later. Guesses, to keep them from looking
+at every shot. They walk a way at a player's speed, on their feet, keeping to the floor and up
+stairs.
+
+Doors on the way they open, as the original does: its MoveTo step (0x5fc4f0) adds an OpenDoor step
+(0x5fc1b0) when the next point of the way has a door, and OpenDoor (0x5fed60) goes to the door's
+handle, works it, and waits until it is open. Ours stop where the way meets the doorway, open the
+door as a player does (its sound plays), face it, and go on once it is all the way open. They do
+not close doors behind them, keep clear of furniture with flat tops (a table's top counts as
+floor), or walk as their own weapon's hold.
 
 ## Not read yet
 
@@ -270,7 +286,7 @@ They do not yet open doors (a shut door is no way through), keep clear of furnit
   (bursts, the rate of fire) and reloads, and which skill it aims with (Assault, or Sniper with a
   sniper rifle).
 - Hearing: how far each kind of sound carries to a character, and what it starts without a trigger.
-- Moving: the path points, doors, and the ROE's speeds (Normal, Blitz).
+- Moving: the path points, locked doors, and the ROE's speeds (Normal, Blitz).
 - The two values set at run time: the close radius and the normal view angle.
 
 ## A first version
