@@ -29,6 +29,8 @@ pub struct Actor {
     pub assault: f32,
     /// Their Stamina, out of 100: how many wounds they take before they fall
     pub stamina: f32,
+    /// Their Self-control, out of 100: how soon they shoot
+    pub self_control: f32,
     /// Face texture file names (`.bmp` in the file; the game data has them as
     /// `.rsb` in `data/texture/faces`)
     pub hrt_face: Option<String>,
@@ -71,6 +73,7 @@ pub fn parse(id: &str, text: &str) -> Actor {
         scale: [1.0; 3],
         assault: 50.0,
         stamina: 50.0,
+        self_control: 50.0,
         hrt_face: None,
         camo_face: None,
         desert_face: None,
@@ -93,6 +96,10 @@ pub fn parse(id: &str, text: &str) -> Actor {
         } else if comment.starts_with("assault") {
             if let Ok(v) = value.parse() {
                 actor.assault = v;
+            }
+        } else if comment.starts_with("self-control") {
+            if let Ok(v) = value.parse() {
+                actor.self_control = v;
             }
         } else if comment.starts_with("stamina") {
             if let Ok(v) = value.parse() {

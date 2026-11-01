@@ -153,13 +153,26 @@ over 100:
   angle round it, `u1`, `u2` uniform in 0..1. So most shots go out toward its edge (on average at
   3/4 of it), not into its middle.
 
+Before it fires, a terrorist takes aim (0x5a83e0). Each frame it takes as its target the nearest
+player it sees in full (not a glimpse) within a fifth of its view angle either side of where its
+body faces, and its aim point (char+0x950) swings toward them from where it was, starting from
+where the body faces. The swing is at most `t / T * (1.3 - s) * 10 pi` radians a second, `s` its
+Assault skill, `t` how long it has been swinging at this target, up to `T`, half the weapon's
++0x180 (0.5 s without one). Once the aim is on them (char+0x555) the trigger rule below may fire.
+The sight stage tests every pair every frame (0x53d140; 0x54bcf0 only leaves out the same side),
+and what is seen one frame can be the target that frame: nothing more holds a terrorist back.
+
+The gun's skill (char method +0xd4, 0x5af310) is Assault, or toward Sniper as a scope zooms in.
+The trigger's `s` (char+0x304) is Self-control. The actor's skills sit in the character from
+char+0x2fc in the file's order, Aggression first: +0x308 is Stamina, +0x318 Assault, +0x31c
+Grenades (a grenade's spread uses it).
+
 A terrorist (0x5a93e0) aims at its target's head (char+0x4f4) if its skill is over 74 and
 char+0x25e is at most 0.2 (unread), otherwise at the middle of the body (char+0x500, a fixed height
 over the feet). It pulls the trigger (0x601610) when the spread, as wide as it is at the target
 (the angle times the distance, char+0x994), is at most `15 - 7s` units, or the spread has nearly
 closed (`(1 - t/T)^2` at most `0.15 - 0.14s`); and never while it is wider than 180 units there,
-or while one of a list of things (unread) holds it back. `s` there is char+0x304, likely the same
-skill.
+or while it is switching weapons (0x600c20's flags). `s` there is char+0x304, its Self-control.
 
 For an AK in the hands of a terrorist with an Assault of 40, standing still: the spread closes
 from 1.7 degrees to 0.07 in 1.4 s, and it fires once that is 12 units wide at the target (at

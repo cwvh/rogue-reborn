@@ -319,9 +319,9 @@ pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, sight: f32, w
             // Armed, they fight
             let mind = weapon.and_then(|w| {
                 let (_, wpn) = &characters.weapons[w];
-                let skill = actor.as_ref().map_or(0.5, |a| a.assault / 100.0);
+                let (skill, self_control) = actor.as_ref().map_or((0.5, 0.5), |a| (a.assault / 100.0, a.self_control / 100.0));
                 let magazines = kit.weapon.as_ref().map_or(1, |(_, n)| *n);
-                Some(super::terrorist::Mind::new(member.alertness, skill, sight, wpn.gun?, wpn.magazine, magazines))
+                Some(super::terrorist::Mind::new(member.alertness, skill, self_control, sight, wpn.gun?, wpn.magazine, magazines))
             });
             let scale = actor.as_ref().map_or([1.0; 3], |a| a.scale);
             let mut npc = Npc {
