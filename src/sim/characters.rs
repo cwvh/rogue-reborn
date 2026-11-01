@@ -394,7 +394,13 @@ pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, setting: &cra
                 let (_, wpn) = &characters.weapons[w];
                 let (skill, self_control) = actor.as_ref().map_or((0.5, 0.5), |a| (a.assault / 100.0, a.self_control / 100.0));
                 let magazines = kit.weapon.as_ref().map_or(1, |(_, n)| *n);
-                let mind = super::terrorist::Mind::new(member.alertness, skill, self_control, sight, wpn.gun?, wpn.magazine, magazines);
+                let mut mind = super::terrorist::Mind::new(member.alertness, skill, self_control, sight, wpn.gun?, wpn.magazine, magazines);
+                if let Some((file, n)) = &kit.sidearm {
+                    let side = characters.add_weapon(file).and_then(|s| Some((s, characters.weapons[s].1.gun?, characters.weapons[s].1.magazine)));
+                    if let Some((s, gun, magazine)) = side {
+                        mind = mind.with_sidearm(s, gun, magazine, *n);
+                    }
+                }
                 Some(mind.with_orders(team_index, orders.clone()))
             });
             let scale = actor.as_ref().map_or([1.0; 3], |a| a.scale);
@@ -459,7 +465,7 @@ mod tests {
     #[test]
     fn every_missions_terrorists_stand_on_a_floor_clear_of_the_walls_dressed_by_their_kit() {
         let Some(mut characters) = Characters::load(Path::new("data/character/team_hrt/blue_M_a.CRP"), "up_none_cyc") else { return };
-        let (mut placed, mut in_walls) = (0, Vec::new());
+        let (mut placed, mut in_walls, mut sidearms) = (0, Vec::new(), 0);
         for level in 1..=19 {
             let map_path = format!("data/map/rm{level:02}/rm{level:02}.map");
             let Some((_, teams)) = mission::teams(Path::new(&map_path), Difficulty::Medium) else { continue };
@@ -472,6 +478,10 @@ mod tests {
                 assert_eq!(n.stance, Some(m.stance));
                 // Some carry nothing, as a security guard lying dead on rm01
                 assert_eq!(n.weapon.is_some(), dress(m).0.weapon.is_some(), "rm{level:02}: {}", m.name);
+                if let (Some(side), Some(mind)) = (dress(m).0.sidearm, &n.mind) {
+                    assert!(mind.sidearm.is_some(), "rm{level:02}: {} has no {}", m.name, side.0);
+                    sidearms += 1;
+                }
                 let body = &characters.bodies[n.body.unwrap_or_else(|| panic!("rm{level:02}: {} wears no model of their own", m.name))];
                 assert!(body.rig.is_some(), "{}", m.kit);
                 for (dir, t) in &body.textures {
@@ -491,5 +501,6 @@ mod tests {
             }
         }
         assert!(placed == 0 || in_walls.len() * 50 < placed, "{} of {placed} in walls: {in_walls:?}", in_walls.len());
+        assert!(placed == 0 || sidearms > 0, "no one carries a sidearm");
     }
 }

@@ -95,6 +95,11 @@ const SAME_PLACE: f32 = 500.0;
 /// How many ways are looked for in a tick, among all of them: the rest wait their turn, so
 /// that a shot many hear does not hold up the game (five on rm16 set off within 0.15 seconds)
 const SEARCHES_PER_TICK: usize = 1;
+/// Seconds a terrorist takes to draw its sidearm when its own weapon is empty (a guess: the
+/// original has no motion for it)
+const DRAW_SECONDS: f32 = 1.0;
+/// How far a terrorist with nothing left to fire runs, at most, in units of walking
+const FLEE_REACH: f32 = 2500.0;
 /// How fast terrorists too close together are pushed apart, in units a second
 const PUSH_SPEED: f32 = 150.0;
 /// Seconds they keep to a target they no longer see
@@ -158,6 +163,22 @@ pub struct Mind {
     pub magazine: u32,
     pub reload_until: Option<f32>,
     pub next_shot: f32,
+    /// The sidearm it has not yet drawn: which of the characters' weapons it is, its gun, and
+    /// its magazine and how many it has
+    pub sidearm: Option<(usize, Gun, u32, u32)>,
+    /// With nothing left to fire, what it does
+    pub spent: Option<Spent>,
+}
+
+/// What a terrorist with nothing left to fire does
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Spent {
+    /// It has to find a way to run
+    Out,
+    /// It runs from the fight
+    Running,
+    /// It cowers where it ran to
+    Hiding,
 }
 
 impl Mind {
@@ -167,7 +188,14 @@ impl Mind {
             team: 0, orders: Arc::new(Orders::default()), active: None, fired: Vec::new(), threat: Threat::None, heard_gunfire: false,
             step: 0, loop_at: None, errand: None, speed: None, zones: Vec::new(), pause_until: 0.0, gun,
             ammo: magazine, magazines: magazines.saturating_sub(1), magazine, reload_until: None, next_shot: 0.0,
+            sidearm: None, spent: None,
         }
+    }
+
+    /// Carrying a sidearm too, `weapon` of the characters' weapons, to draw when its own is empty
+    pub fn with_sidearm(mut self, weapon: usize, gun: Gun, magazine: u32, magazines: u32) -> Mind {
+        self.sidearm = Some((weapon, gun, magazine, magazines));
+        self
     }
 
     /// One of a team, with its orders
@@ -434,7 +462,7 @@ impl super::Sim {
                 }
             }
             // Its turn to look for the way there
-            if let Some((at, gait)) = mind.seek.filter(|_| mind.target.is_none() && searches > 0) {
+            if let Some((at, gait)) = mind.seek.filter(|_| mind.target.is_none() && mind.spent.is_none() && searches > 0) {
                 searches -= 1;
                 mind.seek = None;
                 mind.gait = gait;
@@ -446,6 +474,25 @@ impl super::Sim {
                 mind.path = self.nav.as_ref().and_then(|g| g.path(&self.world, feet, &rooms, at, &there, &self.blocked_portals)).unwrap_or_default();
                 if !mind.path.is_empty() {
                     ev.push(super::Event::Log(format!("t={now:.2} character {i} goes to see at ({:.0}, {:.0}, {:.0}), {} legs, {gait:?}", at[0], at[1], at[2], mind.path.len())));
+                }
+            }
+
+            // Its own weapon empty: it draws its sidearm, or with none it gives up the fight
+            let mut draw = None;
+            if mind.ammo == 0 && mind.magazines == 0 && mind.reload_until.is_none() && mind.spent.is_none() {
+                if let Some((weapon, gun, magazine, magazines)) = mind.sidearm.take() {
+                    // Empty, so that drawing it ends with loading its first magazine
+                    (mind.gun, mind.magazine, mind.magazines, mind.ammo) = (gun, magazine, magazines, 0);
+                    mind.reload_until = Some(now + DRAW_SECONDS);
+                    mind.aim = Aim::default();
+                    draw = Some(weapon);
+                    ev.push(super::Event::Log(format!("t={now:.2} character {i} draws its sidearm")));
+                } else {
+                    mind.spent = Some(Spent::Out);
+                    mind.path.clear();
+                    mind.seek = None;
+                    mind.errand = None;
+                    ev.push(super::Event::Log(format!("t={now:.2} character {i} has nothing left to fire")));
                 }
             }
 
@@ -472,8 +519,13 @@ impl super::Sim {
                     sees.push((slot, aim_at, dist));
                 }
             }
-            // The one it is after while it sees them, else the nearest
+            // The one it is after while it sees them, else the nearest; none when it cannot fight
             let seen = sees.iter().find(|s| mind.target == Some(s.0)).or_else(|| sees.iter().min_by(|a, b| a.2.total_cmp(&b.2))).copied();
+            let threat_at = seen.map(|s| s.1).or(mind.target.and_then(|t| self.players.get(t)).map(|p| p.player.pos)).or(mind.heard.map(|h| h.0));
+            let seen = seen.filter(|_| mind.spent.is_none());
+            if mind.spent.is_some() {
+                mind.target = None;
+            }
             match seen {
                 Some((slot, _, _)) => {
                     // It stops where it is to fight
@@ -511,16 +563,35 @@ impl super::Sim {
                     || self.players.iter().any(|p| p.active && p.respawn_at.is_none() && on(p.player.pos, next))
             });
             let npc = &mut self.npcs[i];
+            if let Some(weapon) = draw {
+                npc.weapon = Some(weapon);
+            }
             // Its weapon up for someone it sees, or toward what it heard
-            let listening = mind.heard.filter(|&(_, t)| now - t < HEARD_SECONDS);
+            let listening = mind.heard.filter(|&(_, t)| now - t < HEARD_SECONDS && mind.spent.is_none());
             let aiming = mind.target.is_some() || listening.is_some();
             if aiming && !npc.aiming {
                 npc.aim_since = now;
             }
             npc.aiming = aiming;
             let raised = now >= npc.aim_since + raise_seconds;
+            // With nothing to fire, it runs from the fight, away from where the threat is, and
+            // cowers where it gets to
+            match mind.spent {
+                Some(Spent::Out) if searches > 0 => {
+                    searches -= 1;
+                    let feet = [npc.pos[0], npc.floor, npc.pos[2]];
+                    let threat = threat_at.unwrap_or(feet);
+                    mind.path = self.nav.as_ref().and_then(|g| g.away(&self.world, feet, &rooms, threat, FLEE_REACH, &self.blocked_portals)).unwrap_or_default();
+                    mind.gait = Gait::Run;
+                    mind.spent = Some(if mind.path.is_empty() { Spent::Hiding } else { Spent::Running });
+                    ev.push(super::Event::Log(format!("t={now:.2} character {i} runs, {} legs", mind.path.len())));
+                }
+                Some(Spent::Running) if mind.path.is_empty() => mind.spent = Some(Spent::Hiding),
+                Some(Spent::Hiding) => npc.stance = Some(Stance::Cower),
+                _ => {}
+            }
             // With nothing else to do, it takes its plan's way, a step at a time
-            if mind.target.is_none() && listening.is_none() && mind.path.is_empty() && now >= mind.pause_until && searches > 0 {
+            if mind.target.is_none() && listening.is_none() && mind.path.is_empty() && mind.spent.is_none() && now >= mind.pause_until && searches > 0 {
                 if mind.errand.take() == Some(mind.step) {
                     // Patrolling zones, it stays a while in each room, and goes on to another
                     if mind.plan().route.get(mind.step) == Some(&Step::PatrolZones) {
@@ -750,6 +821,12 @@ impl super::Sim {
                 m.alertness, m.threat, m.plan().roe, m.plan().speed, m.step);
             t += &format!("\n    target {:?}, last seen {:.1}s ago, aiming {}, ammo {}/{} and {} magazines{}",
                 m.target, now - m.seen_at, n.aiming, m.ammo, m.magazine, m.magazines, if m.reload_until.is_some() { ", reloading" } else { "" });
+            if m.sidearm.is_some() {
+                t += ", and a sidearm";
+            }
+            if let Some(spent) = m.spent {
+                t += &format!(", nothing left to fire ({spent:?})");
+            }
             if let Some((at, when)) = m.heard {
                 t += &format!("\n    heard something at ({:.0}, {:.0}, {:.0}) {:.1}s ago", at[0], at[1], at[2], now - when);
             }
@@ -1375,6 +1452,38 @@ mod tests {
 {}", sim.npcs[a].pos, sim.npcs[b].pos, sim.terrorist_report(0)[a], sim.terrorist_report(0)[b]);
             }
         }
+    }
+
+    #[test]
+    fn a_terrorist_out_of_ammo_draws_its_sidearm_and_fights_on() {
+        let mut sim = standoff([0.0, 0.0, 300.0], 180.0);
+        sim.god = true;
+        let m = sim.npcs[0].mind.as_mut().unwrap();
+        (m.ammo, m.magazines) = (1, 0);
+        *m = m.clone().with_sidearm(7, MP5K, 7, 2);
+        let shots = wait(&mut sim, 8.0);
+        let m = sim.npcs[0].mind.as_ref().unwrap();
+        assert_eq!(sim.npcs[0].weapon, Some(7));
+        assert!(m.sidearm.is_none());
+        // Its last round, then the sidearm's, a draw later
+        assert!(shots.len() >= 3, "{shots:?}");
+        assert!(shots[1] - shots[0] >= DRAW_SECONDS, "{shots:?}");
+    }
+
+    #[test]
+    fn a_terrorist_with_nothing_left_runs_from_the_fight_and_cowers() {
+        let mut sim = standoff([0.0, 0.0, 0.0], 180.0);
+        sim.god = true;
+        let m = sim.npcs[0].mind.as_mut().unwrap();
+        (m.ammo, m.magazines) = (1, 0);
+        let shots = wait(&mut sim, 8.0);
+        assert_eq!(shots.len(), 1, "{shots:?}");
+        let (n, p) = (&sim.npcs[0], sim.players[0].player.pos);
+        assert_eq!(n.mind.as_ref().unwrap().spent, Some(Spent::Hiding));
+        assert_eq!(n.stance, Some(Stance::Cower));
+        assert!(!n.aiming);
+        // From 350 away to the far side of the room
+        assert!(((n.pos[0] - p[0]).powi(2) + (n.pos[2] - p[2]).powi(2)).sqrt() > 700.0, "{:?}", n.pos);
     }
 
     #[test]

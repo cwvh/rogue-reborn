@@ -226,6 +226,44 @@ impl Grid {
         if a != b && came[b as usize].0 == u32::MAX {
             return None;
         }
+        self.way_back(world, &came, b, to)
+    }
+
+    /// A way from `from` (in the rooms `start`) to the place farthest from `threat` that is
+    /// no more than `reach` of walking away, to run to; none when it is nowhere on the grid
+    pub fn away(&self, world: &CollisionWorld, from: V3, start: &[u32], threat: V3, reach: f32, shut: &[bool]) -> Option<Vec<(V3, Option<u32>)>> {
+        let a = self.nearest(from, start)?;
+        let far = |i: u32| {
+            let p = self.places[i as usize].at;
+            (p[0] - threat[0]).powi(2) + (p[2] - threat[2]).powi(2)
+        };
+        let mut came = vec![(u32::MAX, None); self.places.len()];
+        let mut cost = vec![f32::INFINITY; self.places.len()];
+        cost[a as usize] = 0.0;
+        let mut best = a;
+        let mut open = BinaryHeap::from([(Reverse(Key(0.0)), a)]);
+        while let Some((Reverse(Key(here)), i)) = open.pop() {
+            if here > cost[i as usize] {
+                continue;
+            }
+            if far(i) > far(best) {
+                best = i;
+            }
+            for &(j, d, door) in &self.links[i as usize] {
+                let opening = door.is_some_and(|p| shut.get(p as usize).copied().unwrap_or(false));
+                let c = here + d + if opening { SHUT_DOOR } else { 0.0 };
+                if c <= reach && c < cost[j as usize] {
+                    cost[j as usize] = c;
+                    came[j as usize] = (i, door);
+                    open.push((Reverse(Key(c)), j));
+                }
+            }
+        }
+        self.way_back(world, &came, best, self.places[best as usize].at)
+    }
+
+    /// The way to place `b` that `came` says each place was reached from, ending at `to`
+    fn way_back(&self, world: &CollisionWorld, came: &[(u32, Option<u32>)], b: u32, to: V3) -> Option<Vec<(V3, Option<u32>)>> {
         // Back from the end: each place, and the doorway on the way into it
         let mut way = vec![(b, None)];
         loop {

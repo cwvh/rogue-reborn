@@ -183,6 +183,15 @@ For an AK in the hands of a terrorist with an Assault of 40, standing still: the
 from 1.7 degrees to 0.07 in 1.4 s, and it fires once that is 12 units wide at the target (at
 10 m, 1000 units, after about half a second), or nearly closed. Running: 15 degrees down to 3.2.
 
+A terrorist carries its kit's Secondary as well as its Primary (167 of the 330 in the missions
+do). When the primary and its magazines are empty, it draws the sidearm. The original switches
+weapons (see the flags above), but has no motion for a terrorist doing it, so ours takes a
+second (a guess), then loads the sidearm's first magazine. It still holds the sidearm as a rifle.
+
+With nothing left to fire, a terrorist stops fighting. It runs from where the threat is, to the
+place farthest from it within 2500 units of walking, and cowers there. This is our own rule: we
+have not found what the original does.
+
 ## What a bullet does
 
 Whoever fires it, a bullet's effect comes from the gunfire combat model, `data/kit/gfcm.txt`

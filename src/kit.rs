@@ -14,21 +14,21 @@ pub struct Kit {
     /// The weapon in their hands: the primary, or else the secondary (`tw_ak47.wpn`), and how
     /// many magazines they carry for it
     pub weapon: Option<(String, u32)>,
+    /// The secondary, when the primary is in their hands, and its magazines
+    pub sidearm: Option<(String, u32)>,
 }
 
 pub fn read(kit: &Path) -> Result<Kit> {
     let bytes = std::fs::read(kit).with_context(|| format!("could not read {}", kit.display()))?;
-    let (model, weapon) = parse(&String::from_utf8_lossy(&bytes));
+    let text = String::from_utf8_lossy(&bytes);
+    let (model, weapon) = parse(&text);
     let model = model.and_then(|(dir, name)| crate::util::find_file(&Path::new("data/character").join(dir), &name, "crp"));
-    Ok(Kit { model, weapon })
+    Ok(Kit { model, weapon, sidearm: sidearm(&text) })
 }
 
 /// The model's directory and the name of its first model, and the weapon in hand
 pub fn parse(text: &str) -> (Option<(String, String)>, Option<(String, u32)>) {
-    let lines: Vec<Vec<&str>> = text.lines()
-        .map(|l| l.split("//").next().unwrap_or("").split_whitespace().map(|w| w.trim_matches('"')).collect::<Vec<_>>())
-        .filter(|l| !l.is_empty())
-        .collect();
+    let lines = words(text);
     // The directory is a word alone on its line, then a count, then that many names
     let model = (0..lines.len()).find_map(|i| {
         let [dir] = lines[i][..] else { return None };
@@ -36,9 +36,26 @@ pub fn parse(text: &str) -> (Option<(String, String)>, Option<(String, u32)>) {
         let names = lines.get(i + 2..i + 2 + n)?;
         (n > 0 && names.iter().all(|l| l.len() == 1)).then(|| (dir.to_string(), names[0][0].to_string()))
     });
-    let carried = |slot: &str| lines.iter().find(|l| l.len() >= 2 && l[0].eq_ignore_ascii_case(slot))
-        .map(|l| (l[1].to_string(), l.get(2).and_then(|n| n.parse().ok()).unwrap_or(1)));
-    (model, carried("Primary").or_else(|| carried("Secondary")))
+    (model, carried(&lines, "Primary").or_else(|| carried(&lines, "Secondary")))
+}
+
+/// The secondary weapon and its magazines, if the kit has a primary too
+pub fn sidearm(text: &str) -> Option<(String, u32)> {
+    let lines = words(text);
+    carried(&lines, "Primary").and(carried(&lines, "Secondary"))
+}
+
+fn words(text: &str) -> Vec<Vec<&str>> {
+    text.lines()
+        .map(|l| l.split("//").next().unwrap_or("").split_whitespace().map(|w| w.trim_matches('"')).collect::<Vec<_>>())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// The weapon in a slot (`Primary` or `Secondary`) and its magazines
+fn carried(lines: &[Vec<&str>], slot: &str) -> Option<(String, u32)> {
+    lines.iter().find(|l| l.len() >= 2 && l[0].eq_ignore_ascii_case(slot))
+        .map(|l| (l[1].to_string(), l.get(2).and_then(|n| n.parse().ok()).unwrap_or(1)))
 }
 
 #[cfg(test)]
@@ -50,12 +67,14 @@ mod tests {
         let kit = "\"TERRORIST\"\n\"TER_arab_cat1\"\n\"NONE\"\n\"NONE\"\n\"Primary\" \"tw_ak47.wpn\" 5\n\
             \"Secondary\" \"sw_de357.wpn\" 5\n\"TER_arabturk\"\n3\n\"arab_cat1_a\"\n\"arab_cat1_b\"\n\"arab_cat1_c\"\n1\n\"TR_ARM1.eq\" 1\n";
         assert_eq!(parse(kit), (Some(("TER_arabturk".to_string(), "arab_cat1_a".to_string())), Some(("tw_ak47.wpn".to_string(), 5))));
+        assert_eq!(sidearm(kit), Some(("sw_de357.wpn".to_string(), 5)));
         // A hostage's kit has no weapons
         let kit = "\"OTHER\"\n\"hsm_waiter\"\n\"NONE\"\n\"NONE\"\n\"HOS_male\"\n3\n\"hsm_waiter_a\"\n\"hsm_waiter_b\"\n\"hsm_waiter_c\"\n1\n\"H_ARM1.eq\" 1\n";
         assert_eq!(parse(kit), (Some(("HOS_male".to_string(), "hsm_waiter_a".to_string())), None));
         // Some carry only a sidearm
         let kit = "\"TERRORIST\"\n\"TER_rus_gen_de\"\n\"NONE\"\n\"NONE\"\n\"Secondary\" \"sw_de357.wpn\" 6\n\"TER_Russian\"\n3\n\"Rus_gen_a\"\n\"Rus_gen_b\"\n\"Rus_gen_c\"\n";
         assert_eq!(parse(kit).1, Some(("sw_de357.wpn".to_string(), 6)));
+        assert_eq!(sidearm(kit), None);
     }
 
     #[test]
