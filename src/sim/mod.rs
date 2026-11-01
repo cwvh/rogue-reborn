@@ -979,9 +979,13 @@ impl Sim {
         let world = &self.world;
         let clearance = |by: f32| world.wall_clearance(&Player { pos: [body.pos[0] + side[0] * by, body.pos[1], body.pos[2] - side[2] * by], ..body });
         let peek = &mut self.players[slot].peek;
-        *peek = peek::Peek::step(*peek, input.peek_left && alive, input.peek_right && alive, crouched, dt, clearance);
-        // Peeking stands the player still
-        let still = peek.is_some();
+        // Holding a peek key stands the player still. Let go, a direction moves them at once,
+        // and the lean plays back the faster.
+        let leaning = input.peek_left || input.peek_right;
+        let off = !leaning && (input.forward || input.left || input.back || input.right);
+        let dt_peek = if off { dt * peek::HURRY } else { dt };
+        *peek = peek::Peek::step(*peek, input.peek_left && alive, input.peek_right && alive, crouched, dt_peek, clearance);
+        let still = peek.is_some() && !off;
 
         let yaw_rad = input.look().0.to_radians();
         let fwd_flat = [-yaw_rad.sin(), 0.0, -yaw_rad.cos()];
@@ -1942,16 +1946,24 @@ mod tests {
     }
 
     #[test]
-    fn a_peek_moves_the_eye_to_the_side_and_stands_the_player_still() {
+    fn a_peek_moves_the_eye_to_the_side_and_moving_off_ends_it_at_once() {
         let mut sim = demo();
         let (feet, eye) = (sim.players[0].player.pos, sim.eye(0));
-        run(&mut sim, &Input { peek_left: true, forward: true, ..holding() }, 1.0);
-        assert_eq!(sim.players[0].player.pos, feet, "moved while peeking");
+        run(&mut sim, &Input { peek_left: true, ..holding() }, 1.0);
         let peeked = sim.eye(0);
         // Facing along -z, the left is -x
         assert!(peeked[0] - eye[0] < -50.0 && peeked[1] < eye[1], "{peeked:?} from {eye:?}");
         run(&mut sim, &holding(), 1.0);
         assert_eq!(sim.eye(0), eye);
+        // Holding the key, the player stays where they are
+        run(&mut sim, &Input { peek_left: true, forward: true, ..holding() }, 1.0);
+        assert_eq!(sim.players[0].player.pos, feet, "moved while peeking");
+        // Let go, they walk off straight away, and the lean is soon gone
+        let walk = Input { forward: true, ..holding() };
+        sim.tick(&[walk], TICK);
+        assert_ne!(sim.players[0].player.pos, feet, "held by the lean");
+        run(&mut sim, &walk, 0.3);
+        assert!(sim.players[0].peek.is_none());
     }
 
     #[test]

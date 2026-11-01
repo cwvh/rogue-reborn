@@ -72,6 +72,10 @@ impl Motion {
     }
 }
 
+/// How many times as fast a peek leans back when the player lets go of the key and moves off:
+/// they walk or run at once as it plays back
+pub const HURRY: f32 = 3.0;
+
 /// A peek under way
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Peek {

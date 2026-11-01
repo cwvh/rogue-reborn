@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::mission::{Alertness, Condition, Plan, Reaction, Roe, Speed, Stance};
+use crate::mission::{Alertness, Condition, Plan, Reaction, Roe, Speed, Stance, Step};
 use crate::sim::characters::Gait;
 use crate::sim::aim::{Aim, Gun, Pace};
 
@@ -114,6 +114,12 @@ pub struct Mind {
     /// How sure they are of a threat, and whether they heard gunfire (`Trigger Sound Combat`)
     pub threat: Threat,
     pub heard_gunfire: bool,
+    /// Where they are on their plan's way: the step, the loop it is in, the step their walking
+    /// is for (none when it is to see what they heard), and the speed it set
+    pub step: usize,
+    pub loop_at: Option<usize>,
+    pub errand: Option<usize>,
+    pub speed: Option<f32>,
     pub gun: Gun,
     pub ammo: u32,
     /// Full magazines left
@@ -127,7 +133,8 @@ impl Mind {
     pub fn new(alertness: Alertness, skill: f32, self_control: f32, sight: f32, gun: Gun, magazine: u32, magazines: u32) -> Mind {
         Mind {
             alertness, skill, self_control, sight, target: None, seen_at: 0.0, aim: Aim::default(), aim_dir: None, swing: 0.0, quick: false, heard: None, path: Vec::new(), gait: Gait::Walk,
-            team: 0, orders: Arc::new(Orders::default()), active: None, fired: Vec::new(), threat: Threat::None, heard_gunfire: false, gun,
+            team: 0, orders: Arc::new(Orders::default()), active: None, fired: Vec::new(), threat: Threat::None, heard_gunfire: false,
+            step: 0, loop_at: None, errand: None, speed: None, gun,
             ammo: magazine, magazines: magazines.saturating_sub(1), magazine, reload_until: None, next_shot: 0.0,
         }
     }
@@ -164,7 +171,48 @@ impl Mind {
             .min_by_key(|&k| self.orders.reactions[k].priority)?;
         self.fired[k] = true;
         self.active = Some(k);
+        // A new plan, from its first step
+        (self.step, self.loop_at, self.speed) = (0, None, None);
+        if self.errand.take().is_some() {
+            self.path.clear();
+        }
         Some(k)
+    }
+
+    /// The next place its plan's way sends it, past the steps that need no walking. None when it
+    /// is to stay where it is: guarding a spot, or at the end of the way.
+    pub fn next_place(&mut self) -> Option<V3> {
+        let route = self.plan().route.clone();
+        // Round a loop at most once a tick, in case it has nowhere to go
+        let mut looped = false;
+        loop {
+            match route.get(self.step)? {
+                Step::Move(at) => return Some(*at),
+                Step::Loop => self.loop_at = Some(self.step),
+                Step::EndLoop => match self.loop_at {
+                    Some(start) if !looped => {
+                        looped = true;
+                        self.step = start;
+                    }
+                    Some(_) => return None,
+                    None => {}
+                },
+                Step::Speed(v) => self.speed = Some(*v),
+                Step::Guard => return None,
+            }
+            self.step += 1;
+        }
+    }
+
+    /// How it walks its plan's way: at the plan's speed, or the speed a step set
+    pub fn plan_gait(&self) -> (Gait, f32) {
+        match (self.speed, self.plan().speed) {
+            (Some(v), _) if v < 350.0 => (Gait::Creep, v),
+            (Some(v), _) if v < 650.0 => (Gait::Walk, v),
+            (Some(v), _) => (Gait::Run, v),
+            (None, Speed::Normal) => (Gait::Walk, WALK_SPEED),
+            (None, Speed::Blitz) => (Gait::Run, RUN_SPEED),
+        }
     }
 
     /// Whether, and how, its plan sends it to see what it heard: Investigate and Advance go, at
@@ -311,6 +359,9 @@ impl super::Sim {
                 let going = mind.path.last().is_some_and(|&end| super::dist3(end, at) < 200.0);
                 if let (None, false, Some(gait)) = (mind.target, going, mind.goes_to_see()) {
                     mind.gait = gait;
+                    // Off its plan's way for now: it comes back to the step it left
+                    mind.errand = None;
+                    mind.speed = None;
                     let feet = [npc.pos[0], npc.floor, npc.pos[2]];
                     mind.path = self.visibility.path(feet, &rooms, at, rooms_there, &self.blocked_portals).unwrap_or_default();
                     if !mind.path.is_empty() {
@@ -382,6 +433,25 @@ impl super::Sim {
             }
             npc.aiming = aiming;
             let raised = now >= npc.aim_since + raise_seconds;
+            // With nothing else to do, it takes its plan's way, a step at a time
+            if mind.target.is_none() && listening.is_none() && mind.path.is_empty() {
+                if mind.errand.take() == Some(mind.step) {
+                    mind.step += 1;
+                }
+                if let Some(to) = mind.next_place() {
+                    let feet = [npc.pos[0], npc.floor, npc.pos[2]];
+                    let there = self.visibility.player_rooms(&self.level, to, None);
+                    match self.visibility.path(feet, &rooms, to, &there, &self.blocked_portals) {
+                        Some(path) => {
+                            mind.path = path;
+                            mind.errand = Some(mind.step);
+                            mind.gait = mind.plan_gait().0;
+                        }
+                        // No way there: on to the next step
+                        None => mind.step += 1,
+                    }
+                }
+            }
             if mind.reload_until.is_some_and(|t| now >= t) {
                 mind.ammo = mind.magazine;
                 mind.magazines -= 1;
@@ -401,10 +471,11 @@ impl super::Sim {
                     mind.path.remove(0);
                 } else {
                     npc.yaw = turn_toward(npc.yaw, dx.atan2(dz).to_degrees(), TURN_RATE * dt);
-                    let speed = match mind.gait {
-                        Gait::Creep => CREEP_SPEED,
-                        Gait::Walk => WALK_SPEED,
-                        Gait::Run => RUN_SPEED,
+                    let speed = match (mind.errand, mind.gait) {
+                        (Some(_), _) => mind.plan_gait().1,
+                        (None, Gait::Creep) => CREEP_SPEED,
+                        (None, Gait::Walk) => WALK_SPEED,
+                        (None, Gait::Run) => RUN_SPEED,
                     };
                     let step = (speed * dt).min(left);
                     npc.pos[0] += dx / left * step;
@@ -680,7 +751,7 @@ mod tests {
         let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
         let rush = Reaction {
             name: "Rush".into(), priority: 0, when: vec![Condition::DistantThreat],
-            plan: Plan { roe: Roe::Advance, speed: Speed::Blitz, steps: Vec::new() },
+            plan: Plan { roe: Roe::Advance, speed: Speed::Blitz, ..Plan::default() },
         };
         let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Arc::new(Orders { plan: Plan::default(), reactions: vec![rush] }));
         sim.npcs[0].mind = Some(mind);
@@ -691,6 +762,38 @@ mod tests {
         let (n, m) = (&sim.npcs[0], sim.npcs[0].mind.as_ref().unwrap());
         assert_eq!((m.active, m.plan().roe, m.threat), (Some(0), Roe::Advance, Threat::Distant));
         assert!(n.walking && n.gait == Gait::Run, "{:?}", n.pos);
+    }
+
+    #[test]
+    fn a_patrol_walks_its_loop_round_and_round_and_a_guard_stays_put() {
+        let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
+        let route = vec![Step::Loop, Step::Move([200.0, 0.0, 300.0]), Step::Move([-200.0, 0.0, 300.0]), Step::EndLoop];
+        let plan = Plan { roe: Roe::Investigate, route, ..Plan::default() };
+        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Arc::new(Orders { plan, reactions: Vec::new() }));
+        sim.npcs[0].mind = Some(mind);
+        // Out one way, back the other, and out again
+        let (mut east, mut west, mut turns) = (0.0f32, 0.0f32, 0);
+        let mut last = sim.npcs[0].pos[0];
+        let mut heading = 0.0f32;
+        for _ in 0..(3.0 / crate::sim::TICK) as usize {
+            wait(&mut sim, crate::sim::TICK);
+            let x = sim.npcs[0].pos[0];
+            let now = (x - last).signum();
+            if now != 0.0 && heading != 0.0 && now != heading {
+                turns += 1;
+            }
+            heading = if now != 0.0 { now } else { heading };
+            (east, west, last) = (east.max(x), west.min(x), x);
+        }
+        assert!(east > 160.0 && west < -160.0 && turns >= 3, "{east} {west} {turns}");
+        assert!(sim.npcs[0].walking && !sim.npcs[0].aiming);
+        // A guard goes to its spot, and stays
+        let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
+        let plan = Plan { route: vec![Step::Move([200.0, 0.0, 300.0]), Step::Guard, Step::Move([-200.0, 0.0, 300.0])], ..Plan::default() };
+        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Arc::new(Orders { plan, reactions: Vec::new() }));
+        sim.npcs[0].mind = Some(mind);
+        wait(&mut sim, 3.0);
+        assert!((sim.npcs[0].pos[0] - 200.0).abs() <= 31.0 && !sim.npcs[0].walking, "{:?}", sim.npcs[0].pos);
     }
 
     #[test]

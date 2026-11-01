@@ -114,12 +114,57 @@ pub enum Condition {
     Sound(String),
 }
 
-/// A plan: what the team does about threats, how fast it moves, and its steps as written
+/// A plan: what the team does about threats, how fast it moves, its steps as written, and the
+/// way they take it
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Plan {
     pub roe: Roe,
     pub speed: Speed,
     pub steps: Vec<String>,
+    pub route: Vec<Step>,
+}
+
+/// One step of the way a plan takes a team
+#[derive(Clone, Debug, PartialEq)]
+pub enum Step {
+    /// Go to a place (`MoveTo`, or a point of a `PatrolPath`)
+    Move(V3),
+    /// What is between these is done again and again (`PlanLoop`, `EndLoop`)
+    Loop,
+    EndLoop,
+    /// Move at this many units a second from here on (`ChangeSpeed`)
+    Speed(f32),
+    /// Stay and guard where they are (`GuardSpot`)
+    Guard,
+}
+
+/// The way a plan's steps take a team: where it goes, round again or once, and where it stops.
+/// A track (`PlanTrack`) is a way taken once; the rest of the steps are not taken yet.
+fn route(steps: &[String]) -> Vec<Step> {
+    let mut route = Vec::new();
+    let mut lines = steps.iter();
+    let place = |words: &mut std::str::SplitWhitespace| -> Option<V3> {
+        let v: Vec<f32> = words.take(3).filter_map(|n| n.parse().ok()).collect();
+        (v.len() == 3).then(|| [v[0], v[1], v[2]])
+    };
+    while let Some(line) = lines.next() {
+        let mut words = line.split_whitespace();
+        match words.next() {
+            Some("MoveTo") => route.extend(place(&mut words).map(Step::Move)),
+            Some("PatrolPath") => {
+                let n: usize = words.nth(1).and_then(|n| n.parse().ok()).unwrap_or(0);
+                for point in lines.by_ref().take(n) {
+                    route.extend(place(&mut point.split_whitespace()).map(Step::Move));
+                }
+            }
+            Some("PlanLoop") => route.push(Step::Loop),
+            Some("EndLoop") => route.push(Step::EndLoop),
+            Some("ChangeSpeed") => route.extend(words.next().and_then(|v| v.parse().ok()).map(Step::Speed)),
+            Some("GuardSpot") => route.push(Step::Guard),
+            _ => {}
+        }
+    }
+    route
 }
 
 /// A plan the team turns to when one of its conditions comes about
@@ -177,6 +222,7 @@ fn plan(lines: &[String]) -> Plan {
             _ => plan.steps.push(line.clone()),
         }
     }
+    plan.route = route(&plan.steps);
     plan
 }
 
@@ -370,6 +416,7 @@ mod tests {
         assert_eq!(t.starts, [([29809.5, 32777.0, 34509.1], 0.0), ([31424.4, 32777.0, 34336.0], 64.0)]);
         assert_eq!((t.plan.roe, t.plan.speed), (Roe::Investigate, Speed::Normal));
         assert_eq!(t.plan.steps, ["PlanLoop", "MoveTo 1 2 3 0", "EndLoop"]);
+        assert_eq!(t.plan.route, [Step::Loop, Step::Move([1.0, 2.0, 3.0]), Step::EndLoop]);
         let r = &t.reactions[0];
         assert_eq!((r.name.as_str(), r.priority, r.plan.roe, r.plan.speed), ("React", 2, Roe::Advance, Speed::Blitz));
         assert_eq!(r.when, [Condition::ImmediateThreat, Condition::ThreatInZone(3)]);

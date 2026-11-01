@@ -233,7 +233,16 @@ that carries 5000 or more), Immediate when it sees an enemy, Deadly when it is s
 team is killed. A team's grade is its members' highest; GloballySuspicious and GloballyAware are
 anyone's Suspicious and Immediate. When one of a trigger plan's conditions holds, the team turns
 to it, once, the lowest Priority first; `Sound Combat` is having heard gunfire. Zones (ThreatInZone)
-and alarms are not there yet, nor the plans' steps (GuardSpot, MoveTo, Cover and the rest).
+and alarms are not there yet.
+
+A plan's steps are its way (`Plan::route`): `MoveTo` places and `PatrolPath` points to go to in
+turn, `PlanLoop`/`EndLoop` round and round, `PlanTrack`/`EndTrack` once, `ChangeSpeed` units a
+second (under 350 a creep, under 650 a walk, else a run) and `GuardSpot`, where it stops and stays.
+A terrorist with nothing else to do walks its plan's way from doorway to doorway, at its plan's
+speed (a walk, or with Blitz a run); going to see what it heard takes it off it, and it walks back
+to the step it left once it has stopped listening; turning to a trigger plan starts that plan's
+way from the top. `MoveTo`'s last number (0 or 1, 1 mostly where the way climbs) is not known.
+Zones (`AddZone`, `PatrolZones`), `Cover` and the rest are not taken yet.
 
 ## Walking
 
