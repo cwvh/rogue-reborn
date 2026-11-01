@@ -52,11 +52,24 @@ pub enum Threat {
     Deadly,
 }
 
-/// A team's orders from its mission: its plan, and the plans it turns to when set off
+/// A team's orders from its mission: its plan, the plans it turns to when set off, and the
+/// mission's zones (their rooms, by zone)
 #[derive(Clone, Debug, Default)]
 pub struct Orders {
     pub plan: Plan,
     pub reactions: Vec<Reaction>,
+    pub zones: std::collections::HashMap<u32, Vec<u32>>,
+}
+
+/// Seconds a terrorist patrolling its zones stays in each room it comes to (a guess)
+pub const ZONE_PAUSE: f32 = 3.0;
+
+/// Where a plan's way sends a terrorist next
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Place {
+    At(V3),
+    /// A room of its zones
+    Room(u32),
 }
 /// How near a point on its way it must come before it heads for the next
 const ARRIVE: f32 = 30.0;
@@ -120,6 +133,9 @@ pub struct Mind {
     pub loop_at: Option<usize>,
     pub errand: Option<usize>,
     pub speed: Option<f32>,
+    /// The zones it patrols, and until when it stays in the room it came to
+    pub zones: Vec<u32>,
+    pub pause_until: f32,
     pub gun: Gun,
     pub ammo: u32,
     /// Full magazines left
@@ -134,7 +150,7 @@ impl Mind {
         Mind {
             alertness, skill, self_control, sight, target: None, seen_at: 0.0, aim: Aim::default(), aim_dir: None, swing: 0.0, quick: false, heard: None, path: Vec::new(), gait: Gait::Walk,
             team: 0, orders: Arc::new(Orders::default()), active: None, fired: Vec::new(), threat: Threat::None, heard_gunfire: false,
-            step: 0, loop_at: None, errand: None, speed: None, gun,
+            step: 0, loop_at: None, errand: None, speed: None, zones: Vec::new(), pause_until: 0.0, gun,
             ammo: magazine, magazines: magazines.saturating_sub(1), magazine, reload_until: None, next_shot: 0.0,
         }
     }
@@ -152,8 +168,9 @@ impl Mind {
     }
 
     /// Turn to the first trigger plan set off that has not gone off yet, by its priority, given
-    /// how sure its `team` is of a threat and how sure `anyone` is. Which, if one.
-    pub fn react(&mut self, team: Threat, anyone: Threat) -> Option<usize> {
+    /// how sure its `team` is of a threat, how sure `anyone` is, and whether a threat is known to
+    /// be in a zone. Which, if one.
+    pub fn react(&mut self, team: Threat, anyone: Threat, in_zone: impl Fn(u32) -> bool) -> Option<usize> {
         let holds = |c: &Condition| match c {
             Condition::GloballySuspicious => anyone >= Threat::Suspicious,
             Condition::GloballyAware => anyone >= Threat::Immediate,
@@ -163,14 +180,20 @@ impl Mind {
             Condition::DeadlyThreat => team >= Threat::Deadly,
             // No alarms yet
             Condition::Sound(kind) => kind.eq_ignore_ascii_case("Combat") && self.heard_gunfire,
-            // No zones yet
-            Condition::ThreatInZone(_) => false,
+            Condition::ThreatInZone(zone) => in_zone(*zone),
         };
         let k = (0..self.orders.reactions.len())
             .filter(|&k| !self.fired[k] && self.orders.reactions[k].when.iter().any(holds))
             .min_by_key(|&k| self.orders.reactions[k].priority)?;
         self.fired[k] = true;
         self.active = Some(k);
+        // Some rule out the rest of their priority
+        if self.orders.reactions[k].only {
+            let p = self.orders.reactions[k].priority;
+            for (j, r) in self.orders.reactions.iter().enumerate() {
+                self.fired[j] |= r.priority == p;
+            }
+        }
         // A new plan, from its first step
         (self.step, self.loop_at, self.speed) = (0, None, None);
         if self.errand.take().is_some() {
@@ -179,15 +202,22 @@ impl Mind {
         Some(k)
     }
 
-    /// The next place its plan's way sends it, past the steps that need no walking. None when it
-    /// is to stay where it is: guarding a spot, or at the end of the way.
-    pub fn next_place(&mut self) -> Option<V3> {
+    /// The next place its plan's way sends it, past the steps that need no walking: patrolling
+    /// zones, the room of them `pick` picks. None when it is to stay where it is: guarding a
+    /// spot, or at the end of the way.
+    pub fn next_place(&mut self, pick: u64) -> Option<Place> {
         let route = self.plan().route.clone();
         // Round a loop at most once a tick, in case it has nowhere to go
         let mut looped = false;
         loop {
             match route.get(self.step)? {
-                Step::Move(at) => return Some(*at),
+                Step::Move(at) => return Some(Place::At(*at)),
+                Step::AddZone(z) => self.zones.push(*z),
+                Step::ClearZones => self.zones.clear(),
+                Step::PatrolZones => {
+                    let rooms: Vec<u32> = self.zones.iter().flat_map(|z| self.orders.zones.get(z).cloned().unwrap_or_default()).collect();
+                    return (!rooms.is_empty()).then(|| Place::Room(rooms[(pick % rooms.len() as u64) as usize]));
+                }
                 Step::Loop => self.loop_at = Some(self.step),
                 Step::EndLoop => match self.loop_at {
                     Some(start) if !looped => {
@@ -321,9 +351,21 @@ impl super::Sim {
             *t = (*t).max(m.threat);
             anyone = anyone.max(m.threat);
         }
+        // Where threats are known to be: the players they fight, and what they have just heard
+        let mut threat_rooms: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for m in self.npcs.iter().filter(|n| !n.health.is_dead()).filter_map(|n| n.mind.as_ref()) {
+            if let Some(p) = m.target.and_then(|t| self.players.get(t)) {
+                threat_rooms.extend(self.rooms_at(p.player.pos, p.current_room));
+            }
+            if let Some((at, _)) = m.heard.filter(|&(_, t)| now - t < HEARD_SECONDS) {
+                threat_rooms.extend(self.visibility.player_rooms(&self.level, at, None));
+            }
+        }
         for (i, n) in self.npcs.iter_mut().enumerate().filter(|(_, n)| !n.health.is_dead()) {
             let Some(m) = n.mind.as_mut() else { continue };
-            if let Some(k) = m.react(teams.get(&m.team).copied().unwrap_or_default(), anyone) {
+            let zones = m.orders.clone();
+            let in_zone = |z: u32| zones.zones.get(&z).is_some_and(|rooms| rooms.iter().any(|r| threat_rooms.contains(r)));
+            if let Some(k) = m.react(teams.get(&m.team).copied().unwrap_or_default(), anyone, in_zone) {
                 let r = &m.orders.reactions[k];
                 ev.push(super::Event::Log(format!("t={now:.2} character {i} turns to \"{}\": {:?} {:?}", r.name, r.plan.roe, r.plan.speed)));
             }
@@ -434,11 +476,22 @@ impl super::Sim {
             npc.aiming = aiming;
             let raised = now >= npc.aim_since + raise_seconds;
             // With nothing else to do, it takes its plan's way, a step at a time
-            if mind.target.is_none() && listening.is_none() && mind.path.is_empty() {
+            if mind.target.is_none() && listening.is_none() && mind.path.is_empty() && now >= mind.pause_until {
                 if mind.errand.take() == Some(mind.step) {
-                    mind.step += 1;
+                    // Patrolling zones, it stays a while in each room, and goes on to another
+                    if mind.plan().route.get(mind.step) == Some(&Step::PatrolZones) {
+                        mind.pause_until = now + ZONE_PAUSE;
+                    } else {
+                        mind.step += 1;
+                    }
                 }
-                if let Some(to) = mind.next_place() {
+                let pick = super::next_rng(&mut self.rng);
+                let place = if now >= mind.pause_until { mind.next_place(pick) } else { None };
+                let to = place.and_then(|p| match p {
+                    Place::At(at) => Some(at),
+                    Place::Room(room) => self.visibility.center(room),
+                });
+                if let Some(to) = to {
                     let feet = [npc.pos[0], npc.floor, npc.pos[2]];
                     let there = self.visibility.player_rooms(&self.level, to, None);
                     match self.visibility.path(feet, &rooms, to, &there, &self.blocked_portals) {
@@ -447,7 +500,8 @@ impl super::Sim {
                             mind.errand = Some(mind.step);
                             mind.gait = mind.plan_gait().0;
                         }
-                        // No way there: on to the next step
+                        // No way there: on to the next step, or another room
+                        None if matches!(place, Some(Place::Room(_))) => {}
                         None => mind.step += 1,
                     }
                 }
@@ -723,7 +777,7 @@ mod tests {
     #[test]
     fn a_terrorist_walks_to_what_it_heard_and_stops_there() {
         let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
-        let orders = Orders { plan: Plan { roe: Roe::Investigate, ..Plan::default() }, reactions: Vec::new() };
+        let orders = Orders { plan: Plan { roe: Roe::Investigate, ..Plan::default() }, ..Orders::default() };
         let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Arc::new(orders));
         sim.npcs[0].mind = Some(mind);
         sim.noises.push(([200.0, 50.0, 300.0], 1000.0, true));
@@ -750,10 +804,10 @@ mod tests {
         // Its team's plan says to advance at a run on gunfire: it does
         let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
         let rush = Reaction {
-            name: "Rush".into(), priority: 0, when: vec![Condition::DistantThreat],
+            name: "Rush".into(), priority: 0, only: false, when: vec![Condition::DistantThreat],
             plan: Plan { roe: Roe::Advance, speed: Speed::Blitz, ..Plan::default() },
         };
-        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Arc::new(Orders { plan: Plan::default(), reactions: vec![rush] }));
+        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Arc::new(Orders { reactions: vec![rush], ..Orders::default() }));
         sim.npcs[0].mind = Some(mind);
         sim.noises.push(([200.0, 50.0, 300.0], 10000.0, true));
         wait(&mut sim, 2.0 * crate::sim::TICK);
@@ -769,7 +823,7 @@ mod tests {
         let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
         let route = vec![Step::Loop, Step::Move([200.0, 0.0, 300.0]), Step::Move([-200.0, 0.0, 300.0]), Step::EndLoop];
         let plan = Plan { roe: Roe::Investigate, route, ..Plan::default() };
-        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Arc::new(Orders { plan, reactions: Vec::new() }));
+        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Arc::new(Orders { plan, ..Orders::default() }));
         sim.npcs[0].mind = Some(mind);
         // Out one way, back the other, and out again
         let (mut east, mut west, mut turns) = (0.0f32, 0.0f32, 0);
@@ -790,10 +844,31 @@ mod tests {
         // A guard goes to its spot, and stays
         let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
         let plan = Plan { route: vec![Step::Move([200.0, 0.0, 300.0]), Step::Guard, Step::Move([-200.0, 0.0, 300.0])], ..Plan::default() };
-        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Arc::new(Orders { plan, reactions: Vec::new() }));
+        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Arc::new(Orders { plan, ..Orders::default() }));
         sim.npcs[0].mind = Some(mind);
         wait(&mut sim, 3.0);
         assert!((sim.npcs[0].pos[0] - 200.0).abs() <= 31.0 && !sim.npcs[0].walking, "{:?}", sim.npcs[0].pos);
+    }
+
+    #[test]
+    fn a_zone_patrol_goes_to_the_rooms_of_its_zones_and_a_threat_in_a_zone_sets_off_its_plan() {
+        let zones = [(5, vec![10, 11]), (1, vec![7]), (9, vec![99])].into_iter().collect();
+        let plan = Plan { route: vec![Step::AddZone(5), Step::AddZone(1), Step::PatrolZones], ..Plan::default() };
+        let search = |priority, only, zone| Reaction {
+            name: format!("search {zone}"), priority, only, when: vec![Condition::ThreatInZone(zone)],
+            plan: Plan { roe: Roe::Investigate, speed: Speed::Blitz, route: vec![Step::ClearZones, Step::AddZone(zone), Step::PatrolZones], ..Plan::default() },
+        };
+        let orders = Orders { plan, reactions: vec![search(0, true, 9), search(0, false, 1)], zones };
+        let mut m = mind(Alertness::Bored).with_orders(0, Arc::new(orders));
+        let rooms: std::collections::HashSet<u32> = (0..20).filter_map(|pick| match m.next_place(pick) {
+            Some(Place::Room(r)) => Some(r),
+            _ => None,
+        }).collect();
+        assert_eq!(rooms, [10, 11, 7].into_iter().collect());
+        // A threat in zone 9 sets off its search, which rules out the other of its priority
+        assert_eq!(m.react(Threat::None, Threat::None, |z| z == 9), Some(0));
+        assert_eq!(m.next_place(3), Some(Place::Room(99)));
+        assert_eq!(m.react(Threat::None, Threat::None, |z| z == 1), None);
     }
 
     #[test]

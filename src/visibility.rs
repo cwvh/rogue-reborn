@@ -306,6 +306,11 @@ impl Visibility {
         self.index.contains_key(&number)
     }
 
+    /// The middle of a room, by number
+    pub fn center(&self, room: u32) -> Option<[f32; 3]> {
+        self.centers.get(&room).copied()
+    }
+
     /// The number of the room at this index in `map.rooms.rooms`
     pub fn number_of(&self, index: usize) -> Option<u32> {
         self.numbers.get(index).copied().flatten()

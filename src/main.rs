@@ -441,7 +441,7 @@ fn main() {
     let (npcs, npc_actor) = match (&joined, &mut characters, args.no_models, &mission_file) {
         (_, Some(c), false, Some(path)) => match mission::read(path) {
             Ok(teams) => {
-                let npcs = place_terrorists(&teams, seed, mission::max_los(path), &world, c);
+                let npcs = place_terrorists(&teams, seed, &mission::setting(path), &world, c);
                 println!("{} terrorists from {}", npcs.len(), path.display());
                 let n = npcs.len();
                 (npcs, vec![None; n])

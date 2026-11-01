@@ -25,7 +25,7 @@ pub fn build_sim(setup: &Setup) -> Result<Sim> {
     let npcs = match (&setup.mission, &mut characters) {
         (Some(mission), Some(c)) => {
             let teams = crate::mission::read(Path::new(mission))?;
-            place_terrorists(&teams, setup.seed, crate::mission::max_los(Path::new(mission)), &world, c)
+            place_terrorists(&teams, setup.seed, &crate::mission::setting(Path::new(mission)), &world, c)
         }
         _ => setup.npcs.iter().map(|n| Npc {
             health: Health::new(),

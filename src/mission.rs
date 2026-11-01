@@ -136,6 +136,11 @@ pub enum Step {
     Speed(f32),
     /// Stay and guard where they are (`GuardSpot`)
     Guard,
+    /// Add a zone to those the team patrols, or patrol none (`AddZone`, `ClearZones`)
+    AddZone(u32),
+    ClearZones,
+    /// Go from room to room of its zones, on and on (`PatrolZones`)
+    PatrolZones,
 }
 
 /// The way a plan's steps take a team: where it goes, round again or once, and where it stops.
@@ -161,6 +166,9 @@ fn route(steps: &[String]) -> Vec<Step> {
             Some("EndLoop") => route.push(Step::EndLoop),
             Some("ChangeSpeed") => route.extend(words.next().and_then(|v| v.parse().ok()).map(Step::Speed)),
             Some("GuardSpot") => route.push(Step::Guard),
+            Some("AddZone") => route.extend(words.next().and_then(|z| z.parse().ok()).map(Step::AddZone)),
+            Some("ClearZones") => route.push(Step::ClearZones),
+            Some("PatrolZones") => route.push(Step::PatrolZones),
             _ => {}
         }
     }
@@ -173,6 +181,8 @@ pub struct Reaction {
     pub name: String,
     /// Lower first, when more than one could start
     pub priority: u32,
+    /// Setting it off rules out the others of its priority (`RemoveSamePriorityTriggers`)
+    pub only: bool,
     pub when: Vec<Condition>,
     pub plan: Plan,
 }
@@ -247,13 +257,14 @@ fn orders(lines: &[String]) -> Result<(Plan, Vec<Reaction>)> {
             }
             "BeginTriggerPlan" => {
                 i += 1;
-                let (mut name, mut priority, mut when) = (String::new(), 0, Vec::new());
+                let (mut name, mut priority, mut when, mut only) = (String::new(), 0, Vec::new(), false);
                 while lines.get(i).context("a trigger plan ends early")? != "BeginPlan" {
                     let mut words = lines[i].splitn(2, char::is_whitespace);
                     let (key, rest) = (words.next().unwrap_or(""), words.next().unwrap_or("").trim());
                     match key {
                         "Name" => name = rest.trim_matches('"').to_string(),
                         "Priority" => priority = rest.parse().unwrap_or(0),
+                        "RemoveSamePriorityTriggers" => only = true,
                         "Trigger" => {
                             let mut w = rest.split_whitespace();
                             let condition = match w.next().unwrap_or("") {
@@ -278,7 +289,7 @@ fn orders(lines: &[String]) -> Result<(Plan, Vec<Reaction>)> {
                 if lines.get(i).map(String::as_str) == Some("EndTriggerPlan") {
                     i += 1;
                 }
-                reactions.push(Reaction { name, priority, when, plan });
+                reactions.push(Reaction { name, priority, only, when, plan });
             }
             _ => i += 1,
         }
@@ -301,17 +312,43 @@ pub fn teams(map_path: &Path, difficulty: Difficulty) -> Option<(PathBuf, Vec<Te
 /// How far the mission's characters see, from the mission file beside a difficulty file
 /// (`RM01Med.mdf` has `RM01.mis`): its Max LOS Distance, 4000 when it does not say
 pub fn max_los(difficulty_file: &Path) -> f32 {
+    setting(difficulty_file).sight
+}
+
+/// What the mission file says of the level its terrorists are in
+#[derive(Clone, Debug, PartialEq)]
+pub struct Setting {
+    /// How far its characters see: its Max LOS Distance, 4000 when it does not say
+    pub sight: f32,
+    /// Its zones (`ZoneRooms`: a room and its zone a line), each zone's rooms by number
+    pub zones: std::collections::HashMap<u32, Vec<u32>>,
+}
+
+impl Default for Setting {
+    fn default() -> Setting {
+        Setting { sight: 4000.0, zones: Default::default() }
+    }
+}
+
+/// The mission file beside a difficulty file (`RM01Med.mdf` has `RM01.mis`), as `Setting`
+pub fn setting(difficulty_file: &Path) -> Setting {
     let stem = difficulty_file.file_stem().map_or_else(String::new, |s| s.to_string_lossy().to_string());
     let level = ["Easy", "Med", "Hard"].iter().find_map(|d| stem.strip_suffix(d)).unwrap_or(&stem);
     let dir = difficulty_file.parent().unwrap_or(Path::new("."));
-    crate::util::find_file(dir, level, "mis")
-        .and_then(|p| std::fs::read(p).ok())
-        .and_then(|bytes| {
-            String::from_utf8_lossy(&bytes).lines()
-                .find(|l| l.to_ascii_lowercase().contains("// max los distance"))
-                .and_then(|l| l.split("//").next()?.trim().parse().ok())
-        })
-        .unwrap_or(4000.0)
+    let text = crate::util::find_file(dir, level, "mis").and_then(|p| std::fs::read(p).ok())
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()).unwrap_or_default();
+    let mut setting = Setting::default();
+    if let Some(v) = text.lines().find(|l| l.to_ascii_lowercase().contains("// max los distance")).and_then(|l| l.split("//").next()?.trim().parse().ok()) {
+        setting.sight = v;
+    }
+    let mut lines = text.lines().map(str::trim).skip_while(|l| *l != "ZoneRooms").skip(1);
+    for line in lines.by_ref().take_while(|l| *l != "End") {
+        let v: Vec<u32> = line.split_whitespace().filter_map(|n| n.parse().ok()).collect();
+        if let [room, zone] = v[..] {
+            setting.zones.entry(zone).or_default().push(room);
+        }
+    }
+    setting
 }
 
 /// The difficulty file of the mission on the level at `map_path` (`RM01.map` is `RM01Med.mdf`),
@@ -436,10 +473,16 @@ mod tests {
     }
 
     #[test]
-    fn a_mission_says_how_far_its_characters_see() {
+    fn a_mission_says_how_far_its_characters_see_and_its_zones() {
         let path = Path::new("data/mission/RM02Med.mdf");
         if path.exists() {
             assert_eq!(max_los(path), 4000.0);
+        }
+        // RM03's zone 1 is one room and zone 2 two
+        let path = Path::new("data/mission/RM03Med.mdf");
+        if path.exists() {
+            let zones = setting(path).zones;
+            assert_eq!((zones[&1].len(), zones[&2].len()), (1, 2));
         }
     }
 }

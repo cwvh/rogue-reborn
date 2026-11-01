@@ -367,12 +367,13 @@ fn dress(member: &crate::mission::Member) -> (crate::kit::Kit, Option<Actor>) {
 /// finds), the members side by side where there is room. Each wears the model their kit names
 /// with their actor's textures, which become `characters`' bodies, holds the kit's weapon, and
 /// waits in their stance.
-/// They see as far as `sight`, the mission's Max LOS Distance.
-pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, sight: f32, world: &CollisionWorld, characters: &mut Characters) -> Vec<Npc> {
+/// They see as far as the mission says, and patrol its zones.
+pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, setting: &crate::mission::Setting, world: &CollisionWorld, characters: &mut Characters) -> Vec<Npc> {
+    let sight = setting.sight;
     let mut rng = seed | 1;
     let mut npcs = Vec::new();
     for (team_index, team) in teams.iter().enumerate().filter(|(_, t)| t.terrorists) {
-        let orders = std::sync::Arc::new(super::terrorist::Orders { plan: team.plan.clone(), reactions: team.reactions.clone() });
+        let orders = std::sync::Arc::new(super::terrorist::Orders { plan: team.plan.clone(), reactions: team.reactions.clone(), zones: setting.zones.clone() });
         let pick = (crate::util::next_rng(&mut rng) >> 33) as usize % team.starts.len();
         let (at, heading) = team.starts[pick];
         let yaw = heading * 360.0 / 256.0;
@@ -464,7 +465,7 @@ mod tests {
             let Some((_, teams)) = mission::teams(Path::new(&map_path), Difficulty::Medium) else { continue };
             let level_map = crate::map::read(Path::new(&map_path)).unwrap();
             let world = CollisionWorld::from_map(&level_map, Params::default());
-            let npcs = place_terrorists(&teams, 7, 4000.0, &world, &mut characters);
+            let npcs = place_terrorists(&teams, 7, &mission::Setting::default(), &world, &mut characters);
             let members: Vec<_> = teams.iter().filter(|t| t.terrorists).flat_map(|t| &t.members).collect();
             assert_eq!(npcs.len(), members.len());
             for (n, m) in npcs.iter().zip(&members) {

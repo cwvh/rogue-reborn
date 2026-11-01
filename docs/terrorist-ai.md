@@ -232,8 +232,10 @@ a threat as the triggers do: Suspicious for a quiet sound, Distant for gunfire o
 that carries 5000 or more), Immediate when it sees an enemy, Deadly when it is shot or one of its
 team is killed. A team's grade is its members' highest; GloballySuspicious and GloballyAware are
 anyone's Suspicious and Immediate. When one of a trigger plan's conditions holds, the team turns
-to it, once, the lowest Priority first; `Sound Combat` is having heard gunfire. Zones (ThreatInZone)
-and alarms are not there yet.
+to it, once, the lowest Priority first (and `RemoveSamePriorityTriggers` rules out the others of
+its priority); `Sound Combat` is having heard gunfire, and `ThreatInZone N` a threat known to be in
+zone N: a player a terrorist is fighting, or something one has just heard, in one of its rooms.
+Alarms are not there yet.
 
 A plan's steps are its way (`Plan::route`): `MoveTo` places and `PatrolPath` points to go to in
 turn, `PlanLoop`/`EndLoop` round and round, `PlanTrack`/`EndTrack` once, `ChangeSpeed` units a
@@ -242,7 +244,10 @@ A terrorist with nothing else to do walks its plan's way from doorway to doorway
 speed (a walk, or with Blitz a run); going to see what it heard takes it off it, and it walks back
 to the step it left once it has stopped listening; turning to a trigger plan starts that plan's
 way from the top. `MoveTo`'s last number (0 or 1, 1 mostly where the way climbs) is not known.
-Zones (`AddZone`, `PatrolZones`), `Cover` and the rest are not taken yet.
+A mission's zones are sets of its rooms (the `.mis`'s `ZoneRooms`, a room and its zone a line).
+`AddZone` and `ClearZones` set the zones a team patrols, and `PatrolZones` sends it from room to
+room of them, to the middle of one picked at random, staying three seconds (a guess) in each, on
+and on. `Cover` and the rest are not taken yet.
 
 ## Walking
 
