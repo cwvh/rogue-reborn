@@ -23,6 +23,22 @@ pub const ALERT_TURN_RATE: f32 = 270.0;
 pub const RAISE_SECONDS: f32 = 0.5;
 /// The original's motions for standing up with the rifle from leaning and from slouching
 pub const RAISE_MOTIONS: [&str; 2] = ["rmt_llup", "rmt_slup"];
+/// Through walls a sound carries this much of its reach (a guess)
+pub const MUFFLED: f32 = 0.5;
+/// Seconds a terrorist who heard something keeps its weapon up toward it (a guess)
+pub const HEARD_SECONDS: f32 = 10.0;
+
+/// How far a terrorist hears a player's footsteps at a pace: half as far as the original's
+/// sounds carry for an operative with light gear on a hard floor (soundvol.txt's F_TWLEQ and
+/// F_TRLEQ), and not through walls; creeping, or still, not at all. A guess, as hearing every
+/// step to the sounds' full reach made them far too sharp.
+pub fn footstep_reach(pace: Pace) -> f32 {
+    match pace {
+        Pace::Stopped | Pace::Shuffle => 0.0,
+        Pace::Walk => 400.0,
+        Pace::WalkFast | Pace::Run => 500.0,
+    }
+}
 /// Seconds they keep to a target they no longer see
 pub const FORGET: f32 = 5.0;
 /// How near where they face a player must be for them to take aim, in degrees either side:
@@ -49,6 +65,8 @@ pub struct Mind {
     pub swing: f32,
     /// Whether they were already alert when they took this target, which they turn to faster
     pub quick: bool,
+    /// The nearest thing they last heard, and when
+    pub heard: Option<(V3, f32)>,
     pub gun: Gun,
     pub ammo: u32,
     /// Full magazines left
@@ -61,7 +79,7 @@ pub struct Mind {
 impl Mind {
     pub fn new(alertness: Alertness, skill: f32, self_control: f32, sight: f32, gun: Gun, magazine: u32, magazines: u32) -> Mind {
         Mind {
-            alertness, skill, self_control, sight, target: None, seen_at: 0.0, aim: Aim::default(), aim_dir: None, swing: 0.0, quick: false, gun,
+            alertness, skill, self_control, sight, target: None, seen_at: 0.0, aim: Aim::default(), aim_dir: None, swing: 0.0, quick: false, heard: None, gun,
             ammo: magazine, magazines: magazines.saturating_sub(1), magazine, reload_until: None, next_shot: 0.0,
         }
     }
@@ -141,9 +159,13 @@ impl Mind {
 }
 
 impl super::Sim {
-    /// Each armed terrorist sees the players it can, turns toward the one it is after, and
-    /// fires when its spread lets it; it stops to flinch and reloads when its magazine is empty
-    pub(super) fn terrorists(&mut self, dt: f32, ev: &mut Vec<super::Event>) {
+    /// Each armed terrorist hears the `noises` that reach it (where, how far each carries, and
+    /// whether through walls),
+    /// sees the players it can, turns toward the one it is after, and fires when its spread lets
+    /// it; it stops to flinch and reloads when its magazine is empty. Hearing something makes it
+    /// alert, and it turns toward it with its weapon up.
+    pub(super) fn terrorists(&mut self, dt: f32, noises: &[(V3, f32, bool)], ev: &mut Vec<super::Event>) {
+        let noise_rooms: Vec<Vec<u32>> = noises.iter().map(|&(at, _, _)| self.visibility.player_rooms(&self.level, at, None)).collect();
         let now = self.time;
         let params = self.world.params();
         let (stand_eye, kneel_eye) = (params.eye_height, params.crouch_eye_height);
@@ -158,6 +180,19 @@ impl super::Sim {
             let kneel = kneels(npc.stance);
             let eye = [npc.pos[0], npc.floor + if kneel { kneel_eye } else { stand_eye }, npc.pos[2]];
             let rooms = self.rooms_at([npc.pos[0], npc.floor, npc.pos[2]], None);
+
+            // The nearest noise it hears: in reach, and through walls only half as far. Not its own.
+            let hears = noises.iter().zip(&noise_rooms).filter_map(|(&(at, reach, through_walls), rooms_there)| {
+                let d = super::dist3(eye, at);
+                let across = ((at[0] - eye[0]).powi(2) + (at[2] - eye[2]).powi(2)).sqrt();
+                let muffled = through_walls && d <= reach * MUFFLED;
+                let heard = across > 60.0 && d <= reach && (muffled || self.line_clear(eye, &rooms, at, rooms_there));
+                heard.then_some((at, d))
+            }).min_by(|a, b| a.1.total_cmp(&b.1));
+            if let Some((at, _)) = hears {
+                mind.heard = Some((at, now));
+                mind.alertness = Alertness::Alert;
+            }
 
             // The players it sees: where it would aim at each, and how far that is
             let (_, range) = mind.view();
@@ -211,10 +246,13 @@ impl super::Sim {
             let frames = |m: &str| self.characters.as_ref().map_or(RAISE_SECONDS * 30.0, |c| c.frames(m));
             let (_, raise_seconds) = raise(self.npcs[i].stance, frames);
             let npc = &mut self.npcs[i];
-            if mind.target.is_some() && !npc.aiming {
+            // Its weapon up for someone it sees, or toward what it heard
+            let listening = mind.heard.filter(|&(_, t)| now - t < HEARD_SECONDS);
+            let aiming = mind.target.is_some() || listening.is_some();
+            if aiming && !npc.aiming {
                 npc.aim_since = now;
             }
-            npc.aiming = mind.target.is_some();
+            npc.aiming = aiming;
             let raised = now >= npc.aim_since + raise_seconds;
             if mind.reload_until.is_some_and(|t| now >= t) {
                 mind.ammo = mind.magazine;
@@ -225,6 +263,11 @@ impl super::Sim {
             if !matches!(npc.health.state, crate::combat::NpcState::Idle) {
                 npc.mind = Some(mind);
                 continue;
+            }
+            // Without a target, turn toward what it heard
+            if let (None, Some((at, _))) = (seen, listening) {
+                let want = (at[0] - eye[0]).atan2(at[2] - eye[2]).to_degrees();
+                npc.yaw = turn_toward(npc.yaw, want, TURN_RATE * dt);
             }
             // Turn toward the target, swing the aim onto them, and fire when the spread lets it
             let mut fire = None;
@@ -414,6 +457,42 @@ mod tests {
         sim.add_player([37813.4, 32767.0, 33285.3]);
         assert!(wait(&mut sim, 3.0).is_empty());
         assert!(!sim.npcs[0].aiming);
+    }
+
+    #[test]
+    fn a_terrorist_hears_a_player_running_behind_it_and_turns_on_them() {
+        let moving = |run: bool| {
+            let mut i = crate::sim::Input { run, forward: true, ..Default::default() };
+            i.set_look(90.0, 0.0);
+            i
+        };
+        // Walking across the room is not heard
+        let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
+        for _ in 0..30 {
+            sim.tick(&[moving(false)], crate::sim::TICK);
+        }
+        assert!(sim.npcs[0].mind.as_ref().unwrap().heard.is_none());
+        // Running near behind it is
+        let mut sim = standoff([0.0, 0.0, 50.0], 0.0);
+        for _ in 0..30 {
+            sim.tick(&[moving(true)], crate::sim::TICK);
+        }
+        assert!(sim.npcs[0].mind.as_ref().unwrap().heard.is_some());
+        assert_eq!(sim.npcs[0].mind.as_ref().unwrap().alertness, Alertness::Alert);
+        // It turns round, sees them and fires
+        let shots = wait(&mut sim, 3.0);
+        assert!(!shots.is_empty());
+    }
+
+    #[test]
+    fn a_terrorist_hears_a_shot_and_turns_toward_it() {
+        let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
+        let mut fire = crate::sim::Input { run: true, fire: true, ..Default::default() };
+        fire.set_look(180.0, 0.0);
+        sim.tick(&[fire], crate::sim::TICK);
+        assert!(sim.npcs[0].mind.as_ref().unwrap().heard.is_some());
+        let shots = wait(&mut sim, 3.0);
+        assert!(sim.npcs[0].aiming && !shots.is_empty());
     }
 
     #[test]

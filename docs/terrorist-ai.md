@@ -207,6 +207,24 @@ Ours (gfcm.rs): health is still the 100 shown, and a wound takes its share (a th
 terrorist with a Stamina of 50, a fifth for a player, whose Stamina is taken as 85); being
 incapacitated is dying.
 
+## Hearing
+
+The original's sounds have kinds (the table at 0x7fcf94): Environment, Alarm, BulletHit, Combat,
+Door, Explosion, Footstep, Gunfire, Speech. Mission plans react to them by triggers (`Trigger
+Sound Alarm`, 55 of them, and `Trigger Sound Combat`, read by 0x58d1f0), beside the threat
+triggers (GloballySuspicious, GloballyAware, SuspiciousThreat, DistantThreat, ImmediateThreat,
+DeadlyThreat, ThreatInZone). How far a sound carries to a character, and what it does to one
+without a trigger, is not read yet. `soundvol.txt` gives each sound how far it is heard: an
+unsuppressed gun 10000 to 12500, a suppressed one 1000, footsteps 500 to 1500 by pace and gear
+(`F_TW`/`F_TR`, walking and running; `INT`, `LEQ`, `HEQ`, no, light and heavy equipment).
+
+Ours (sim::terrorist): every sound the game makes at a place, the players' shots and their
+footsteps are heard by the terrorists within that reach, and through walls within half of it (a
+guess). Footsteps, four a second, are heard half as far as they sound for light gear (walking
+400, running 500), never through walls, and creeping not at all: heard to the sounds' full reach,
+every step made the terrorists far too sharp. One that hears something becomes alert and turns toward it with
+its weapon up, for ten seconds (a guess), so it is quicker to fire on whoever comes.
+
 ## Not read yet
 
 - How a sighting becomes a threat: what makes it Suspicious, Distant, Immediate or Deadly, and
@@ -214,7 +232,7 @@ incapacitated is dying.
 - How fast a terrorist turns to face a target, what holds back its trigger, how it fires
   (bursts, the rate of fire) and reloads, and which skill it aims with (Assault, or Sniper with a
   sniper rifle).
-- Hearing: how far each kind of sound carries and what it starts (the sound stage).
+- Hearing: how far each kind of sound carries to a character, and what it starts without a trigger.
 - Moving: the path points, doors, and the ROE's speeds (Normal, Blitz).
 - The two values set at run time: the close radius and the normal view angle.
 

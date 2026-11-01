@@ -265,6 +265,12 @@ fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
 
+/// How far each sound carries, by its lowercase name: the farthest it is heard, from the
+/// text of `soundvol.txt`
+pub fn reaches(text: &str) -> HashMap<String, f32> {
+    parse_volumes(text).into_iter().map(|(name, v)| (name, v.max)).collect()
+}
+
 fn parse_volumes(text: &str) -> HashMap<String, Volume> {
     let mut out = HashMap::new();
     for line in text.lines() {

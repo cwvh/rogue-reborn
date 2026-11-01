@@ -48,6 +48,9 @@ pub const PLAYER_STAMINA: f32 = 85.0;
 /// The ammunition the players' MP5K fires (pw_mp5k.wpn)
 pub const PLAYER_AMMO: &str = "9mmP(FMJ)";
 
+/// The sound of one shot of the players' MP5K, whose reach is how far it is heard
+const PLAYER_SHOT: &str = "C_SB5KS.WAV";
+
 /// How far from the feet, across the floor, a posed body can reach (a peek, an arm out)
 const POSED_REACH: f32 = 120.0;
 
@@ -421,6 +424,11 @@ pub struct Sim {
     pub panes: Vec<Pane>,
     /// When each pane broke
     pub broken_at: Vec<Option<f32>>,
+    /// How far each sound carries (data/sound/soundvol.txt), by its lowercase name
+    reaches: Arc<std::collections::HashMap<String, f32>>,
+    /// What was made to be heard this tick besides the sounds it sends: where, and how far it
+    /// carries
+    noises: Vec<(V3, f32, bool)>,
 }
 
 impl Sim {
@@ -457,6 +465,8 @@ impl Sim {
             characters,
             npcs,
             gunfire: crate::gfcm::read(std::path::Path::new("data/kit/gfcm.txt")).ok().map(Arc::new),
+            reaches: Arc::new(std::fs::read_to_string("data/sound/soundvol.txt").map(|t| crate::sound::reaches(&t)).unwrap_or_default()),
+            noises: Vec::new(),
         }
     }
 
@@ -822,7 +832,23 @@ impl Sim {
             }
         }
         // The terrorists see the players where they have moved to, and fire
-        self.terrorists(dt, &mut ev);
+        // What the terrorists hear: the sounds of this tick, the players' shots and footsteps
+        for i in 0..self.players.len() {
+            let p = &self.players[i];
+            if p.active && p.controlled && p.respawn_at.is_none() {
+                // Four steps a second, each as loud as the pace makes it
+                let reach = terrorist::footstep_reach(p.aim.pace);
+                if reach > 0.0 && (self.time * 4.0).floor() != ((self.time - dt) * 4.0).floor() {
+                    self.noises.push((p.player.pos, reach, false));
+                }
+            }
+        }
+        let mut noises = std::mem::take(&mut self.noises);
+        noises.extend(ev.iter().filter_map(|e| match e {
+            Event::Sound { name, at: Some(at), .. } => Some((*at, self.reach_of(name), true)),
+            _ => None,
+        }));
+        self.terrorists(dt, &noises, &mut ev);
 
         self.apply_union_rooms();
         self.update_grenades(dt, &mut ev);
@@ -1055,6 +1081,8 @@ impl Sim {
         p.ammo -= 1;
         p.next_shot = now + 60.0 / 800.0; // the MP5K fires about 800 rounds a minute
         p.flash_until = now + 0.05;
+        let noise = (p.player.pos, self.reach_of(PLAYER_SHOT), true);
+        self.noises.push(noise);
 
         let eye = self.eye(slot);
         let f = forward_cam;
@@ -1204,6 +1232,11 @@ impl Sim {
         let roll = 1 + (next_rng(&mut self.rng) >> 33) as u32 % 100;
         let gunfire = self.gunfire.as_ref()?;
         Some(gunfire.effect(gunfire.ammo(ammo?)?, part, dist / 100.0, roll))
+    }
+
+    /// How far a sound carries, none when soundvol.txt does not have it
+    fn reach_of(&self, name: &str) -> f32 {
+        self.reaches.get(&name.to_ascii_lowercase()).copied().unwrap_or(0.0)
     }
 
     /// The rooms a person standing at `feet` is in (`hint` is the one they were last in)
