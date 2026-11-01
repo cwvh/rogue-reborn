@@ -10,6 +10,7 @@
 pub mod aim;
 pub mod characters;
 pub mod idle;
+pub mod nav;
 pub mod movement;
 pub mod peek;
 pub mod terrorist;
@@ -426,6 +427,8 @@ pub struct Sim {
     pub broken_at: Vec<Option<f32>>,
     /// How far each sound carries (data/sound/soundvol.txt), by its lowercase name
     reaches: Arc<std::collections::HashMap<String, f32>>,
+    /// Where characters can walk, made the first time one has somewhere to go
+    nav: Option<Arc<nav::Grid>>,
     /// What was made to be heard this tick besides the sounds it sends: where, and how far it
     /// carries
     noises: Vec<(V3, f32, bool)>,
@@ -467,6 +470,7 @@ impl Sim {
             gunfire: crate::gfcm::read(std::path::Path::new("data/kit/gfcm.txt")).ok().map(Arc::new),
             reaches: Arc::new(std::fs::read_to_string("data/sound/soundvol.txt").map(|t| crate::sound::reaches(&t)).unwrap_or_default()),
             noises: Vec::new(),
+            nav: None,
         }
     }
 
@@ -1124,7 +1128,12 @@ impl Sim {
         };
         let mut wall = near_wall(self);
         let flown = far_wall(self);
-        let reaches = |rooms: &[u32], d: f32| rooms.iter().any(|r| crossed.contains(r)) && flown.is_none_or(|w| w >= d - 1.0);
+        // Reaching a body in `rooms`: among the walls of the rooms flown through, and of its own
+        let reaches = |rooms: &[u32], d: f32| {
+            let walls: Vec<u32> = crossed.iter().chain(rooms).copied().collect();
+            rooms.iter().any(|r| crossed.contains(r)) && flown.is_none_or(|w| w >= d - 1.0)
+                && self.world.bullet_hit_in(eye, dir, d, &walls).is_none_or(|h| h.dist >= d - 1.0)
+        };
 
         let mut best: Option<(usize, combat::Hit)> = None;
         if let (Some(chars), Shooter::Player(_)) = (&self.characters, by) {
@@ -1269,7 +1278,10 @@ impl Sim {
     /// those rooms' faces on the way
     fn line_clear(&self, a: V3, from: &[u32], b: V3, to: &[u32]) -> bool {
         let d = dist3(a, b);
-        let Some(rooms) = self.visibility.rooms_along(from, to, a, b, &self.blocked_portals) else { return false };
+        let Some(mut rooms) = self.visibility.rooms_along(from, to, a, b, &self.blocked_portals) else { return false };
+        // Both ends' rooms' walls too: a room that holds the whole level (rm16's grounds) is
+        // one both ends are in, and would leave out the walls of the room inside it
+        rooms.extend(from.iter().chain(to));
         let dir = [(b[0] - a[0]) / d, (b[1] - a[1]) / d, (b[2] - a[2]) / d];
         self.world.bullet_hit_in(a, dir, d, &rooms).is_none_or(|h| h.dist >= d - 1.0)
     }

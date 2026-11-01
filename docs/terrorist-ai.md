@@ -251,11 +251,16 @@ and on. `Cover` and the rest are not taken yet.
 
 ## Walking
 
-The original's path points are not found in our reading of the level files yet. Ours finds its way
-through the rooms' doorways (`Visibility::path`): the shortest way from portal to portal standing
-upright, not shut by a closed door, walking straight across each room, at a player's walking speed
-(514 units a second), on its feet, keeping to the floor and up stairs. It does not yet keep clear
-of furniture, open doors, or play a walk of its own weapon's.
+The original's path points are not found in our reading of the level files yet. Ours walk a grid
+(sim::nav): places 40 units apart across each room's floors where a body fits among that room's
+own walls (the rooms overlap, so each room's are found among its own), each joined to those beside
+it a step (45 units) up or down away, and to the next room's through the doorways between, shut
+when a door is. It spreads out from where the characters and the players' spawns are, so the sea
+round a ship gets none: rm02 has 17000 places, made in a fifth of a second the first time a
+terrorist is about. A way is the shortest across the places, made straight where there is floor
+all along. They walk it at a player's speed, on their feet, keeping to the floor and up stairs.
+They do not yet open doors (a shut door is no way through), keep clear of furniture with flat tops
+(a table's top counts as floor), or walk as their own weapon's hold.
 
 ## Not read yet
 

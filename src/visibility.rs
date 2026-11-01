@@ -306,6 +306,29 @@ impl Visibility {
         self.index.contains_key(&number)
     }
 
+    /// The doorway, a portal standing upright, between rooms `a` and `b` that a step from `from`
+    /// to `to` goes through at a body's middle, if one does
+    pub fn doorway(&self, a: u32, b: u32, from: [f32; 3], to: [f32; 3]) -> Option<usize> {
+        let (p, q) = ([from[0], from[1] + 80.0, from[2]], [to[0], to[1] + 80.0, to[2]]);
+        self.by_room.get(&a)?.iter().copied().find(|&i| {
+            self.sides[i].iter().any(|(r, _)| *r == b)
+                && plane_normal(&self.corners[i]).is_some_and(|n| n[1].abs() <= 0.5)
+                && crosses(&self.corners[i], p, q)
+        })
+    }
+
+    /// A room's doorways (portals standing upright): each portal, the room on its far side,
+    /// and the middle of its opening
+    pub fn doorways_of(&self, room: u32) -> Vec<(usize, u32, [f32; 3])> {
+        self.by_room.get(&room).map(Vec::as_slice).unwrap_or_default().iter().filter_map(|&i| {
+            let c = &self.corners[i];
+            plane_normal(c).filter(|n| n[1].abs() <= 0.5)?;
+            let other = self.sides[i].iter().map(|(r, _)| *r).find(|&r| r != room)?;
+            let k = c.len() as f32;
+            Some((i, other, [0, 1, 2].map(|a| c.iter().map(|p| p[a]).sum::<f32>() / k)))
+        }).collect()
+    }
+
     /// The middle of a room, by number
     pub fn center(&self, room: u32) -> Option<[f32; 3]> {
         self.centers.get(&room).copied()

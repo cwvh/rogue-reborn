@@ -834,6 +834,65 @@ impl CollisionWorld {
 
     /// Smallest distance from any wall-like triangle to the body's spheres;
     /// negative when penetrating. Used by tests.
+    /// The rooms with floors to walk on, each once
+    pub fn rooms_with_floors(&self) -> Vec<u32> {
+        let ny = self.walkable_ny();
+        let mut rooms: Vec<u32> = self.tris.iter().filter(|t| t.room != NO_ROOM && t.n[1] >= ny).map(|t| t.room).collect();
+        rooms.sort();
+        rooms.dedup();
+        rooms
+    }
+
+    /// The extent of a room's floors across the ground: min x, min z, max x, max z
+    pub fn floor_bounds(&self, room: u32) -> Option<[f32; 4]> {
+        let ny = self.walkable_ny();
+        self.tris.iter().filter(|t| t.room == room && t.n[1] >= ny).flat_map(|t| [t.a, t.b, t.c]).fold(None, |b, p| {
+            let [x0, z0, x1, z1] = b.unwrap_or([p[0], p[2], p[0], p[2]]);
+            Some([x0.min(p[0]), z0.min(p[2]), x1.max(p[0]), z1.max(p[2])])
+        })
+    }
+
+    /// The heights of a room's floors at (x, z), whatever rooms are solid around the players
+    pub fn floors_in(&self, room: u32, x: f32, z: f32) -> Vec<f32> {
+        let ny = self.walkable_ny();
+        let mut ys: Vec<f32> = self.cells[self.row(z) * self.cols + self.col(x)].iter()
+            .map(|&ti| &self.tris[ti as usize])
+            .filter(|t| t.room == room && !t.off && t.n[1] >= ny)
+            .filter_map(|t| height_on_triangle(t, x, z))
+            .collect();
+        ys.sort_by(f32::total_cmp);
+        ys.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+        ys
+    }
+
+    /// As `wall_clearance`, but among the walls of one room only (and those of no room), and
+    /// not its doors, which open and close: whether a body could stand there in that room
+    pub fn wall_clearance_in(&self, p: &Player, room: u32) -> f32 {
+        let prm = &self.params;
+        let ny_floor = self.walkable_ny();
+        let lo = prm.step_up + prm.radius;
+        let hi = (prm.body_height(p.crouched) - prm.radius).max(lo);
+        let reach = prm.radius * 2.0;
+        let (c0, c1) = (self.col(p.pos[0] - reach), self.col(p.pos[0] + reach));
+        let (r0, r1) = (self.row(p.pos[2] - reach), self.row(p.pos[2] + reach));
+        let mut worst = f32::INFINITY;
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                for &ti in &self.cells[r * self.cols + c] {
+                    let t = &self.tris[ti as usize];
+                    if !t.wall || t.off || (t.room != room && t.room != NO_ROOM) || self.door_tris.contains(&(ti as usize)) || t.n[1].abs() >= ny_floor {
+                        continue;
+                    }
+                    for k in 0..3 {
+                        let center = [p.pos[0], p.pos[1] + lo + (hi - lo) * (k as f32 / 2.0), p.pos[2]];
+                        worst = worst.min(len(sub(center, closest_on_triangle(center, t))) - prm.radius);
+                    }
+                }
+            }
+        }
+        worst
+    }
+
     pub fn wall_clearance(&self, p: &Player) -> f32 {
         let prm = &self.params;
         let ny_floor = self.walkable_ny();
