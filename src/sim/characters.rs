@@ -15,6 +15,15 @@ use crate::util::find_file;
 
 type V3 = [f32; 3];
 
+/// How a character walks somewhere: creeping, walking or running
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Gait {
+    Creep,
+    #[default]
+    Walk,
+    Run,
+}
+
 /// A character in the level
 #[derive(Clone)]
 pub struct Npc {
@@ -39,8 +48,9 @@ pub struct Npc {
     pub last_shot: f32,
     /// When it began to aim, raising its weapon (see `terrorist::raise`)
     pub aim_since: f32,
-    /// Walking somewhere
+    /// Walking somewhere, and how
     pub walking: bool,
+    pub gait: Gait,
     /// What it knows and holds, as a terrorist: only the game's own copy keeps it
     pub mind: Option<super::terrorist::Mind>,
 }
@@ -49,7 +59,7 @@ impl Default for Npc {
     fn default() -> Npc {
         Npc {
             health: Health::new(), pos: [0.0; 3], floor: 0.0, yaw: 0.0, scale: [1.0; 3], stagger: 0.0,
-            body: None, stance: None, weapon: None, aiming: false, last_shot: f32::NEG_INFINITY, aim_since: 0.0, walking: false, mind: None,
+            body: None, stance: None, weapon: None, aiming: false, last_shot: f32::NEG_INFINITY, aim_since: 0.0, walking: false, gait: Gait::Walk, mind: None,
         }
     }
 }
@@ -275,11 +285,20 @@ impl Characters {
         }
     }
 
-    /// Walking as a player does, its weapon up if it is alert
+    /// Walking or running as a player does, its weapon up if it is alert; creeping is a walk at
+    /// half its pace
     fn walking_pose(&self, npc: &Npc, skeleton: &Skeleton, now: f32) -> Option<(V3, Vec<[f32; 4]>)> {
+        use crate::sim::movement::Movement;
+        let (movement, pace) = match npc.gait {
+            Gait::Creep => (Movement::Walk, 0.5),
+            Gait::Walk => (Movement::Walk, 1.0),
+            Gait::Run => (Movement::Run, 1.0),
+        };
+        // The motion loops, at the pace players' play at
+        let frames = self.player.get(movement, false).map_or(1, |m| m.frames.max(1)) as f32;
         let doing = crate::body::Doing {
-            movement: crate::sim::movement::Movement::Walk,
-            frame: now * 30.0, crouched: false, reloading: None, firing: npc.aiming, flinch: None, peek: None,
+            movement,
+            frame: (now * 30.0 * super::ANIM_PACE * pace) % frames, crouched: false, reloading: None, firing: npc.aiming, flinch: None, peek: None,
             hip_turn: 0.0, changing: None, shuffle: None, clock: 0.0,
         };
         let pose = crate::body::pose(&self.player, skeleton, &doing)?;
@@ -352,7 +371,8 @@ fn dress(member: &crate::mission::Member) -> (crate::kit::Kit, Option<Actor>) {
 pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, sight: f32, world: &CollisionWorld, characters: &mut Characters) -> Vec<Npc> {
     let mut rng = seed | 1;
     let mut npcs = Vec::new();
-    for team in teams.iter().filter(|t| t.terrorists) {
+    for (team_index, team) in teams.iter().enumerate().filter(|(_, t)| t.terrorists) {
+        let orders = std::sync::Arc::new(super::terrorist::Orders { plan: team.plan.clone(), reactions: team.reactions.clone() });
         let pick = (crate::util::next_rng(&mut rng) >> 33) as usize % team.starts.len();
         let (at, heading) = team.starts[pick];
         let yaw = heading * 360.0 / 256.0;
@@ -373,7 +393,8 @@ pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, sight: f32, w
                 let (_, wpn) = &characters.weapons[w];
                 let (skill, self_control) = actor.as_ref().map_or((0.5, 0.5), |a| (a.assault / 100.0, a.self_control / 100.0));
                 let magazines = kit.weapon.as_ref().map_or(1, |(_, n)| *n);
-                Some(super::terrorist::Mind::new(member.alertness, skill, self_control, sight, wpn.gun?, wpn.magazine, magazines))
+                let mind = super::terrorist::Mind::new(member.alertness, skill, self_control, sight, wpn.gun?, wpn.magazine, magazines);
+                Some(mind.with_orders(team_index, orders.clone()))
             });
             let scale = actor.as_ref().map_or([1.0; 3], |a| a.scale);
             let mut npc = Npc {

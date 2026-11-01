@@ -223,8 +223,17 @@ footsteps are heard by the terrorists within that reach, and through walls withi
 guess). Footsteps, four a second, are heard half as far as they sound for light gear (walking
 400, running 500), never through walls, and creeping not at all: heard to the sounds' full reach,
 every step made the terrorists far too sharp. One that hears something becomes alert and turns toward it with
-its weapon up, for ten seconds (a guess), so it is quicker to fire on whoever comes. With no one
-to fight, it walks to where it heard it.
+its weapon up, for ten seconds (a guess), so it is quicker to fire on whoever comes.
+
+What it does then is its team's plan's (mission.rs reads them: the plan's `ROE` lines, its steps,
+and its trigger plans). With no one to fight, Investigate and Advance go to see, at a walk or, with
+Blitz, at a run; Cautious creeps there; Defend stays put. Each terrorist grades how sure it is of
+a threat as the triggers do: Suspicious for a quiet sound, Distant for gunfire or a blast (a sound
+that carries 5000 or more), Immediate when it sees an enemy, Deadly when it is shot or one of its
+team is killed. A team's grade is its members' highest; GloballySuspicious and GloballyAware are
+anyone's Suspicious and Immediate. When one of a trigger plan's conditions holds, the team turns
+to it, once, the lowest Priority first; `Sound Combat` is having heard gunfire. Zones (ThreatInZone)
+and alarms are not there yet, nor the plans' steps (GuardSpot, MoveTo, Cover and the rest).
 
 ## Walking
 

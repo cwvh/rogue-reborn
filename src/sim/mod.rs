@@ -658,6 +658,7 @@ impl Sim {
                 h.opt_f32(m.reload_until);
                 h.f32(m.next_shot);
                 h.u32(m.path.len() as u32);
+                h.u32(m.threat as u32 + 8 * m.active.map_or(0, |k| k as u32 + 1));
             }
             match n.health.state {
                 combat::NpcState::Idle => h.u32(0),
@@ -1199,12 +1200,19 @@ impl Sim {
                     mind.target = Some(slot);
                     mind.seen_at = now;
                     mind.alertness = crate::mission::Alertness::Alert;
+                    mind.threat = terrorist::Threat::Deadly;
                 }
                 let effect = self.bullet_effect(ammo.as_deref(), hit.part, hit.distance);
                 next_rng(&mut self.rng);
                 let result = self.npcs[i].health.apply_hit(&hit, effect, now, (self.rng >> 33) as u32);
                 self.players[slot].target_hp = Some(self.npcs[i].health.hp);
                 ev.push(Event::Log(format!("t={now:.2} shot hit character {i}: {:?} from the {:?}, {:?}, hp now {}", hit.part, hit.facing, result, self.npcs[i].health.hp)));
+                // A death is deadly to the rest of its team
+                if let (HitResult::Killed, Some(team)) = (result, self.npcs[i].mind.as_ref().map(|m| m.team)) {
+                    for m in self.npcs.iter_mut().filter_map(|n| n.mind.as_mut()).filter(|m| m.team == team) {
+                        m.threat = terrorist::Threat::Deadly;
+                    }
+                }
                 let text = match result {
                     HitResult::Killed => {
                         self.players[slot].kills += 1;

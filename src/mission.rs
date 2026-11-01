@@ -76,6 +76,62 @@ impl Alertness {
     }
 }
 
+/// What a team does about a threat (a plan's `ROE`): close in on it, go and see, hold its
+/// ground, or close in carefully; hostages are held, or are hostages
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Roe {
+    Advance,
+    Investigate,
+    #[default]
+    Defend,
+    Cautious,
+    HostageCaptive,
+    Hostage,
+}
+
+/// How fast a team moves (a plan's other `ROE`): walking, or at a run
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Speed {
+    #[default]
+    Normal,
+    Blitz,
+}
+
+/// What sets off a trigger plan
+#[derive(Clone, Debug, PartialEq)]
+pub enum Condition {
+    /// Any terrorist anywhere suspects, or knows of, a threat
+    GloballySuspicious,
+    GloballyAware,
+    /// The team's threat has come to this
+    SuspiciousThreat,
+    DistantThreat,
+    ImmediateThreat,
+    DeadlyThreat,
+    /// A threat in one of the mission's zones
+    ThreatInZone(u32),
+    /// A sound of a kind: `Alarm` or `Combat`
+    Sound(String),
+}
+
+/// A plan: what the team does about threats, how fast it moves, and its steps as written
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Plan {
+    pub roe: Roe,
+    pub speed: Speed,
+    pub steps: Vec<String>,
+}
+
+/// A plan the team turns to when one of its conditions comes about
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reaction {
+    pub name: String,
+    /// Lower first, when more than one could start
+    pub priority: u32,
+    pub when: Vec<Condition>,
+    pub plan: Plan,
+}
+
 /// One of a team's characters
 #[derive(Clone, Debug, PartialEq)]
 pub struct Member {
@@ -96,8 +152,92 @@ pub struct Team {
     pub members: Vec<Member>,
     /// Where the team can start, and which way it faces there, in 256ths of a turn
     pub starts: Vec<(V3, f32)>,
-    /// Its plan and the plans its triggers start, line by line, as written
-    pub plans: Vec<String>,
+    /// Its plan, and the plans it turns to when they are set off
+    pub plan: Plan,
+    pub reactions: Vec<Reaction>,
+}
+
+/// A plan's lines between `BeginPlan` and `EndPlan`
+fn plan(lines: &[String]) -> Plan {
+    let mut plan = Plan::default();
+    for line in lines {
+        let mut words = line.split_whitespace();
+        match (words.next(), words.next()) {
+            (Some("ROE"), Some(word)) => match word.to_ascii_lowercase().as_str() {
+                "normal" => plan.speed = Speed::Normal,
+                "blitz" => plan.speed = Speed::Blitz,
+                "advance" => plan.roe = Roe::Advance,
+                "investigate" => plan.roe = Roe::Investigate,
+                "defend" => plan.roe = Roe::Defend,
+                "cautious" => plan.roe = Roe::Cautious,
+                "hostagecaptive" => plan.roe = Roe::HostageCaptive,
+                "hostage" => plan.roe = Roe::Hostage,
+                _ => {}
+            },
+            _ => plan.steps.push(line.clone()),
+        }
+    }
+    plan
+}
+
+/// A team's plan and its trigger plans, from the lines after its starting places
+fn orders(lines: &[String]) -> Result<(Plan, Vec<Reaction>)> {
+    let mut base = Plan::default();
+    let mut reactions = Vec::new();
+    let mut i = 0;
+    let between = |i: &mut usize, end: &str| -> Result<Vec<String>> {
+        let from = *i;
+        while lines.get(*i).context("a plan ends early")? != end {
+            *i += 1;
+        }
+        *i += 1;
+        Ok(lines[from..*i - 1].to_vec())
+    };
+    while i < lines.len() {
+        match lines[i].as_str() {
+            "BeginPlan" => {
+                i += 1;
+                base = plan(&between(&mut i, "EndPlan")?);
+            }
+            "BeginTriggerPlan" => {
+                i += 1;
+                let (mut name, mut priority, mut when) = (String::new(), 0, Vec::new());
+                while lines.get(i).context("a trigger plan ends early")? != "BeginPlan" {
+                    let mut words = lines[i].splitn(2, char::is_whitespace);
+                    let (key, rest) = (words.next().unwrap_or(""), words.next().unwrap_or("").trim());
+                    match key {
+                        "Name" => name = rest.trim_matches('"').to_string(),
+                        "Priority" => priority = rest.parse().unwrap_or(0),
+                        "Trigger" => {
+                            let mut w = rest.split_whitespace();
+                            let condition = match w.next().unwrap_or("") {
+                                "GloballySuspicious" => Some(Condition::GloballySuspicious),
+                                "GloballyAware" => Some(Condition::GloballyAware),
+                                "SuspiciousThreat" => Some(Condition::SuspiciousThreat),
+                                "DistantThreat" => Some(Condition::DistantThreat),
+                                "ImmediateThreat" => Some(Condition::ImmediateThreat),
+                                "DeadlyThreat" => Some(Condition::DeadlyThreat),
+                                "ThreatInZone" => Some(Condition::ThreatInZone(w.next().and_then(|z| z.parse().ok()).unwrap_or(0))),
+                                "Sound" => Some(Condition::Sound(w.next().unwrap_or("").to_string())),
+                                _ => None,
+                            };
+                            when.extend(condition);
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                i += 1;
+                let plan = plan(&between(&mut i, "EndPlan")?);
+                if lines.get(i).map(String::as_str) == Some("EndTriggerPlan") {
+                    i += 1;
+                }
+                reactions.push(Reaction { name, priority, when, plan });
+            }
+            _ => i += 1,
+        }
+    }
+    Ok((base, reactions))
 }
 
 /// The teams of the mission on the level at `map_path` at a difficulty, if it has one and it reads
@@ -192,15 +332,16 @@ pub fn parse(text: &str) -> Result<Vec<Team>> {
             let [x, y, z, heading] = v[..] else { bail!("team {name}'s starting place is not x y z and a heading") };
             starts.push(([x, y, z], heading));
         }
-        let mut plans = Vec::new();
+        let mut lines = Vec::new();
         loop {
             let line = next("EndTeamPlan")?;
             if line == "EndTeamPlan" {
                 break;
             }
-            plans.push(line.to_string());
+            lines.push(line.to_string());
         }
-        teams.push(Team { name, terrorists, members, starts, plans });
+        let (plan, reactions) = orders(&lines).with_context(|| format!("team {name}'s plans"))?;
+        teams.push(Team { name, terrorists, members, starts, plan, reactions });
     }
 }
 
@@ -212,7 +353,9 @@ mod tests {
         \"Terrorist\"\n\"Response #1\"\n\"TER_arab_cat2_02.ter\"\n\"TER_arab_cat2_AK47.kit\"\n0\nBored\nCellPhone\nStand\n\
         \"Terrorist\"\n\"Response #2\"\n\"TER_arab_cat1_01.ter\"\n\"TER_arab_cat1_AK47.kit\"\n0\nReady\nNone\nKneel\n\
         BeginTeamPlan\n2\t// Number Starting Locations\n\t29809.5 32777 34509.1 0\n\t31424.4 32777 34336 64\n\
-        BeginPlan\nROE Investigate\nEndPlan\nEndTeamPlan\nEndTeams\n";
+        BeginPlan\nROE Investigate\nPlanLoop\nMoveTo 1 2 3 0\nEndLoop\nEndPlan\n\
+        BeginTriggerPlan\nName \"React\"\nPriority 2\nTrigger ImmediateThreat\nTrigger ThreatInZone 3\nEndTriggers\n\
+        BeginPlan\nROE Advance\nROE Blitz\nEndPlan\nEndTriggerPlan\nEndTeamPlan\nEndTeams\n";
 
     #[test]
     fn reads_a_team_of_two_and_where_it_can_start() {
@@ -225,7 +368,11 @@ mod tests {
             [("Response #1", Stance::Stand, Alertness::Bored), ("Response #2", Stance::Kneel, Alertness::Ready)]);
         assert_eq!(t.members[1].kit, "TER_arab_cat1_AK47.kit");
         assert_eq!(t.starts, [([29809.5, 32777.0, 34509.1], 0.0), ([31424.4, 32777.0, 34336.0], 64.0)]);
-        assert_eq!(t.plans, ["BeginPlan", "ROE Investigate", "EndPlan"]);
+        assert_eq!((t.plan.roe, t.plan.speed), (Roe::Investigate, Speed::Normal));
+        assert_eq!(t.plan.steps, ["PlanLoop", "MoveTo 1 2 3 0", "EndLoop"]);
+        let r = &t.reactions[0];
+        assert_eq!((r.name.as_str(), r.priority, r.plan.roe, r.plan.speed), ("React", 2, Roe::Advance, Speed::Blitz));
+        assert_eq!(r.when, [Condition::ImmediateThreat, Condition::ThreatInZone(3)]);
     }
 
     #[test]

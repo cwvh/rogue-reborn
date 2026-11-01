@@ -4,7 +4,10 @@
 //! are guesses here. They take aim at a player only near where they face, and their aim swings
 //! across to them, ever faster, before they fire.
 
-use crate::mission::{Alertness, Stance};
+use std::sync::Arc;
+
+use crate::mission::{Alertness, Condition, Plan, Reaction, Roe, Speed, Stance};
+use crate::sim::characters::Gait;
 use crate::sim::aim::{Aim, Gun, Pace};
 
 type V3 = [f32; 3];
@@ -27,8 +30,34 @@ pub const RAISE_MOTIONS: [&str; 2] = ["rmt_llup", "rmt_slup"];
 pub const MUFFLED: f32 = 0.5;
 /// Seconds a terrorist who heard something keeps its weapon up toward it (a guess)
 pub const HEARD_SECONDS: f32 = 10.0;
-/// How fast they walk, as a player does (units a second)
+/// How fast they walk and run, as a player does (units a second), and creep, at half a walk
 pub const WALK_SPEED: f32 = 514.0;
+pub const RUN_SPEED: f32 = 735.0;
+pub const CREEP_SPEED: f32 = 257.0;
+/// A sound that carries this far is gunfire or a blast, not footsteps or a door
+const LOUD: f32 = 5000.0;
+
+/// How sure a terrorist is of a threat, as the mission's triggers grade it
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Threat {
+    #[default]
+    None,
+    /// It heard something: footsteps, a door
+    Suspicious,
+    /// It heard gunfire or a blast
+    Distant,
+    /// It sees an enemy
+    Immediate,
+    /// It was shot, or one of its team was killed
+    Deadly,
+}
+
+/// A team's orders from its mission: its plan, and the plans it turns to when set off
+#[derive(Clone, Debug, Default)]
+pub struct Orders {
+    pub plan: Plan,
+    pub reactions: Vec<Reaction>,
+}
 /// How near a point on its way it must come before it heads for the next
 const ARRIVE: f32 = 30.0;
 /// The highest step up it takes walking, from one tick to the next
@@ -73,8 +102,18 @@ pub struct Mind {
     pub quick: bool,
     /// The nearest thing they last heard, and when
     pub heard: Option<(V3, f32)>,
-    /// The points they are walking to in turn, through doorways (see `Visibility::path`)
+    /// The points they are walking to in turn, through doorways (see `Visibility::path`), and how
     pub path: Vec<V3>,
+    pub gait: Gait,
+    /// Their team, its orders, which of its trigger plans it has turned to (the last of them
+    /// leads) and which have gone off
+    pub team: usize,
+    pub orders: Arc<Orders>,
+    pub active: Option<usize>,
+    pub fired: Vec<bool>,
+    /// How sure they are of a threat, and whether they heard gunfire (`Trigger Sound Combat`)
+    pub threat: Threat,
+    pub heard_gunfire: bool,
     pub gun: Gun,
     pub ammo: u32,
     /// Full magazines left
@@ -87,8 +126,56 @@ pub struct Mind {
 impl Mind {
     pub fn new(alertness: Alertness, skill: f32, self_control: f32, sight: f32, gun: Gun, magazine: u32, magazines: u32) -> Mind {
         Mind {
-            alertness, skill, self_control, sight, target: None, seen_at: 0.0, aim: Aim::default(), aim_dir: None, swing: 0.0, quick: false, heard: None, path: Vec::new(), gun,
+            alertness, skill, self_control, sight, target: None, seen_at: 0.0, aim: Aim::default(), aim_dir: None, swing: 0.0, quick: false, heard: None, path: Vec::new(), gait: Gait::Walk,
+            team: 0, orders: Arc::new(Orders::default()), active: None, fired: Vec::new(), threat: Threat::None, heard_gunfire: false, gun,
             ammo: magazine, magazines: magazines.saturating_sub(1), magazine, reload_until: None, next_shot: 0.0,
+        }
+    }
+
+    /// One of a team, with its orders
+    pub fn with_orders(mut self, team: usize, orders: Arc<Orders>) -> Mind {
+        self.fired = vec![false; orders.reactions.len()];
+        (self.team, self.orders) = (team, orders);
+        self
+    }
+
+    /// The plan it follows now: the trigger plan it last turned to, or its first
+    pub fn plan(&self) -> &Plan {
+        self.active.and_then(|k| self.orders.reactions.get(k)).map_or(&self.orders.plan, |r| &r.plan)
+    }
+
+    /// Turn to the first trigger plan set off that has not gone off yet, by its priority, given
+    /// how sure its `team` is of a threat and how sure `anyone` is. Which, if one.
+    pub fn react(&mut self, team: Threat, anyone: Threat) -> Option<usize> {
+        let holds = |c: &Condition| match c {
+            Condition::GloballySuspicious => anyone >= Threat::Suspicious,
+            Condition::GloballyAware => anyone >= Threat::Immediate,
+            Condition::SuspiciousThreat => team >= Threat::Suspicious,
+            Condition::DistantThreat => team >= Threat::Distant,
+            Condition::ImmediateThreat => team >= Threat::Immediate,
+            Condition::DeadlyThreat => team >= Threat::Deadly,
+            // No alarms yet
+            Condition::Sound(kind) => kind.eq_ignore_ascii_case("Combat") && self.heard_gunfire,
+            // No zones yet
+            Condition::ThreatInZone(_) => false,
+        };
+        let k = (0..self.orders.reactions.len())
+            .filter(|&k| !self.fired[k] && self.orders.reactions[k].when.iter().any(holds))
+            .min_by_key(|&k| self.orders.reactions[k].priority)?;
+        self.fired[k] = true;
+        self.active = Some(k);
+        Some(k)
+    }
+
+    /// Whether, and how, its plan sends it to see what it heard: Investigate and Advance go, at
+    /// a walk or (Blitz) a run; Cautious creeps; Defend stays put
+    pub fn goes_to_see(&self) -> Option<Gait> {
+        let plan = self.plan();
+        match (plan.roe, plan.speed) {
+            (Roe::Investigate | Roe::Advance, Speed::Blitz) => Some(Gait::Run),
+            (Roe::Investigate | Roe::Advance, Speed::Normal) => Some(Gait::Walk),
+            (Roe::Cautious, _) => Some(Gait::Creep),
+            _ => None,
         }
     }
 
@@ -178,6 +265,21 @@ impl super::Sim {
         let params = self.world.params();
         let (stand_eye, kneel_eye) = (params.eye_height, params.crouch_eye_height);
         let player_rooms: Vec<Vec<u32>> = self.players.iter().map(|p| self.rooms_at(p.player.pos, p.current_room)).collect();
+        // What each team is sure of, and anyone, sets off their trigger plans
+        let mut teams: std::collections::HashMap<usize, Threat> = std::collections::HashMap::new();
+        let mut anyone = Threat::None;
+        for m in self.npcs.iter().filter(|n| !n.health.is_dead()).filter_map(|n| n.mind.as_ref()) {
+            let t = teams.entry(m.team).or_default();
+            *t = (*t).max(m.threat);
+            anyone = anyone.max(m.threat);
+        }
+        for (i, n) in self.npcs.iter_mut().enumerate().filter(|(_, n)| !n.health.is_dead()) {
+            let Some(m) = n.mind.as_mut() else { continue };
+            if let Some(k) = m.react(teams.get(&m.team).copied().unwrap_or_default(), anyone) {
+                let r = &m.orders.reactions[k];
+                ev.push(super::Event::Log(format!("t={now:.2} character {i} turns to \"{}\": {:?} {:?}", r.name, r.plan.roe, r.plan.speed)));
+            }
+        }
         for i in 0..self.npcs.len() {
             let npc = &self.npcs[i];
             let Some(mut mind) = npc.mind.clone() else { continue };
@@ -196,18 +298,23 @@ impl super::Sim {
                 let across = ((at[0] - eye[0]).powi(2) + (at[2] - eye[2]).powi(2)).sqrt();
                 let muffled = through_walls && d <= reach * MUFFLED;
                 let heard = across > 60.0 && d <= reach && (muffled || self.line_clear(eye, &rooms, at, rooms_there));
-                heard.then_some((at, d, rooms_there))
+                heard.then_some((at, d, rooms_there, reach))
             }).min_by(|a, b| a.1.total_cmp(&b.1));
-            if let Some((at, _, rooms_there)) = hears {
+            if let Some((at, _, rooms_there, reach)) = hears {
                 mind.heard = Some((at, now));
                 mind.alertness = Alertness::Alert;
-                // With no one to fight, it goes to see: unless it is on its way there already
+                let loud = reach >= LOUD;
+                mind.threat = mind.threat.max(if loud { Threat::Distant } else { Threat::Suspicious });
+                mind.heard_gunfire |= loud;
+                // With no one to fight, it goes to see if its plan says to: unless it is on its
+                // way there already. Otherwise it stays put, its weapon up toward it.
                 let going = mind.path.last().is_some_and(|&end| super::dist3(end, at) < 200.0);
-                if mind.target.is_none() && !going {
+                if let (None, false, Some(gait)) = (mind.target, going, mind.goes_to_see()) {
+                    mind.gait = gait;
                     let feet = [npc.pos[0], npc.floor, npc.pos[2]];
                     mind.path = self.visibility.path(feet, &rooms, at, rooms_there, &self.blocked_portals).unwrap_or_default();
                     if !mind.path.is_empty() {
-                        ev.push(super::Event::Log(format!("t={now:.2} character {i} goes to see at ({:.0}, {:.0}, {:.0}), {} legs", at[0], at[1], at[2], mind.path.len())));
+                        ev.push(super::Event::Log(format!("t={now:.2} character {i} goes to see at ({:.0}, {:.0}, {:.0}), {} legs, {gait:?}", at[0], at[1], at[2], mind.path.len())));
                     }
                 }
             }
@@ -241,6 +348,7 @@ impl super::Sim {
                 Some((slot, _, _)) => {
                     // It stops where it is to fight
                     mind.path.clear();
+                    mind.threat = mind.threat.max(Threat::Immediate);
                     if mind.target != Some(slot) {
                         // A new target: its spread opens afresh, and its aim starts again from
                         // where it faces
@@ -293,7 +401,12 @@ impl super::Sim {
                     mind.path.remove(0);
                 } else {
                     npc.yaw = turn_toward(npc.yaw, dx.atan2(dz).to_degrees(), TURN_RATE * dt);
-                    let step = (WALK_SPEED * dt).min(left);
+                    let speed = match mind.gait {
+                        Gait::Creep => CREEP_SPEED,
+                        Gait::Walk => WALK_SPEED,
+                        Gait::Run => RUN_SPEED,
+                    };
+                    let step = (speed * dt).min(left);
                     npc.pos[0] += dx / left * step;
                     npc.pos[2] += dz / left * step;
                     let floor = self.world.ground_at(npc.pos[0], npc.pos[2], npc.floor + STEP).unwrap_or(npc.floor);
@@ -309,6 +422,7 @@ impl super::Sim {
                 }
             }
             npc.walking = seen.is_none() && !mind.path.is_empty();
+            npc.gait = mind.gait;
             // Turn toward the target, swing the aim onto them, and fire when the spread lets it
             let mut fire = None;
             if let Some((_, to, dist)) = seen {
@@ -538,6 +652,9 @@ mod tests {
     #[test]
     fn a_terrorist_walks_to_what_it_heard_and_stops_there() {
         let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
+        let orders = Orders { plan: Plan { roe: Roe::Investigate, ..Plan::default() }, reactions: Vec::new() };
+        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Arc::new(orders));
+        sim.npcs[0].mind = Some(mind);
         sim.noises.push(([200.0, 50.0, 300.0], 1000.0, true));
         let mut walked = false;
         for _ in 0..60 {
@@ -548,6 +665,32 @@ mod tests {
         assert!(walked && !n.walking, "still walking at {:?}", n.pos);
         assert!((n.pos[0] - 200.0).abs() <= 30.0 + 1.0 && (n.pos[2] - 300.0).abs() < 1.0, "{:?}", n.pos);
         assert_eq!(n.stance, Some(Stance::Stand));
+    }
+
+    #[test]
+    fn a_defending_terrorist_spooks_but_stays_put_and_its_trigger_plan_sends_it_running() {
+        // Defending, it turns its weapon toward a sound but stays where it is
+        let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
+        sim.noises.push(([200.0, 50.0, 300.0], 1000.0, true));
+        wait(&mut sim, 0.5);
+        let n = &sim.npcs[0];
+        assert!(n.aiming && !n.walking && n.pos == [0.0, 0.0, 300.0]);
+        assert_eq!(n.mind.as_ref().unwrap().threat, Threat::Suspicious);
+        // Its team's plan says to advance at a run on gunfire: it does
+        let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
+        let rush = Reaction {
+            name: "Rush".into(), priority: 0, when: vec![Condition::DistantThreat],
+            plan: Plan { roe: Roe::Advance, speed: Speed::Blitz, steps: Vec::new() },
+        };
+        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Arc::new(Orders { plan: Plan::default(), reactions: vec![rush] }));
+        sim.npcs[0].mind = Some(mind);
+        sim.noises.push(([200.0, 50.0, 300.0], 10000.0, true));
+        wait(&mut sim, 2.0 * crate::sim::TICK);
+        sim.noises.push(([200.0, 50.0, 300.0], 10000.0, true));
+        wait(&mut sim, crate::sim::TICK);
+        let (n, m) = (&sim.npcs[0], sim.npcs[0].mind.as_ref().unwrap());
+        assert_eq!((m.active, m.plan().roe, m.threat), (Some(0), Roe::Advance, Threat::Distant));
+        assert!(n.walking && n.gait == Gait::Run, "{:?}", n.pos);
     }
 
     #[test]
