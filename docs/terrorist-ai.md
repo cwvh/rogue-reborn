@@ -270,7 +270,10 @@ way is the shortest across the places, made straight where there is floor all al
 fits all along (checked every 10 units: a line between places can cut a wall's corner), and
 stopping before each doorway. A place, and a step across a corner to the next, keeps clear of the
 walls of every room whose volume holds it, not only its own: rm16's grounds hold rooms whose walls
-their places once walked through. That makes rm16's grid take 0.6 seconds instead of 0.45. A shut door costs 400 units more (a guess), so an open way is taken when it is
+their places once walked through. A place, and each straight leg, also needs head room: no face
+that points up, such as a table's top, between a step and a body's height over it. Such a face
+counts as floor, so no wall kept bodies out from under it. rm16's grid takes 0.57 seconds. A
+shut door costs 400 units more (a guess), so an open way is taken when it is
 not much longer. Places nothing joins have no way between them, found at once without a search. A
 terrorist looks for a way to what it hears at most once a second, and once in five seconds toward
 much the same place (within 500 units), unless a door has opened or shut since; and only one
@@ -282,16 +285,17 @@ stairs.
 
 Terrorists closer than two bodies' width (60 units) push apart, at up to 150 units a second.
 Players and unarmed characters stay put and push them away. A push never takes a terrorist
-nearer a wall or off its floor. When someone stands on the next point of a terrorist's way, the
-terrorist counts as there once it is close. Our own rule: we have not read how the original
+nearer a wall or off its floor. A walking terrorist does not step into anyone. Held up on the
+last point of its way, it counts as there; on any other point, it goes on without it after a
+second. When someone stands on the next point of its way, it counts as there once it is close.
+Our own rule: we have not read how the original
 keeps characters apart.
 
 Doors on the way they open, as the original does: its MoveTo step (0x5fc4f0) adds an OpenDoor step
 (0x5fc1b0) when the next point of the way has a door, and OpenDoor (0x5fed60) goes to the door's
 handle, works it, and waits until it is open. Ours stop where the way meets the doorway, open the
 door as a player does (its sound plays), face it, and go on once it is all the way open. They do
-not close doors behind them, keep clear of furniture with flat tops (a table's top counts as
-floor), or walk as their own weapon's hold.
+not close doors behind them, or walk as their own weapon's hold.
 
 ## Not read yet
 

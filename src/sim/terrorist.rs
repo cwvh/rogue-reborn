@@ -100,6 +100,8 @@ const SEARCHES_PER_TICK: usize = 1;
 const DRAW_SECONDS: f32 = 1.0;
 /// How far a terrorist with nothing left to fire runs, at most, in units of walking
 const FLEE_REACH: f32 = 2500.0;
+/// Seconds a terrorist waits for someone in its way before it goes on to the next point
+const BLOCKED_SECONDS: f32 = 1.0;
 /// How fast terrorists too close together are pushed apart, in units a second
 const PUSH_SPEED: f32 = 150.0;
 /// Seconds they keep to a target they no longer see
@@ -168,6 +170,8 @@ pub struct Mind {
     pub sidearm: Option<(usize, Gun, u32, u32)>,
     /// With nothing left to fire, what it does
     pub spent: Option<Spent>,
+    /// Since when someone has stood in its way
+    pub blocked_since: Option<f32>,
 }
 
 /// What a terrorist with nothing left to fire does
@@ -188,7 +192,7 @@ impl Mind {
             team: 0, orders: Arc::new(Orders::default()), active: None, fired: Vec::new(), threat: Threat::None, heard_gunfire: false,
             step: 0, loop_at: None, errand: None, speed: None, zones: Vec::new(), pause_until: 0.0, gun,
             ammo: magazine, magazines: magazines.saturating_sub(1), magazine, reload_until: None, next_shot: 0.0,
-            sidearm: None, spent: None,
+            sidearm: None, spent: None, blocked_since: None,
         }
     }
 
@@ -562,6 +566,12 @@ impl super::Sim {
                 self.npcs.iter().enumerate().any(|(k, o)| k != i && !o.health.is_dead() && on([o.pos[0], o.floor, o.pos[2]], next))
                     || self.players.iter().any(|p| p.active && p.respawn_at.is_none() && on(p.player.pos, next))
             });
+            // The others near enough to stand in its way
+            let here = [npc.pos[0], npc.floor, npc.pos[2]];
+            let others: Vec<V3> = self.npcs.iter().enumerate().filter(|(k, o)| *k != i && !o.health.is_dead()).map(|(_, o)| [o.pos[0], o.floor, o.pos[2]])
+                .chain(self.players.iter().filter(|p| p.active && p.respawn_at.is_none()).map(|p| p.player.pos))
+                .filter(|o| (o[1] - here[1]).abs() < 100.0 && ((o[0] - here[0]).powi(2) + (o[2] - here[2]).powi(2)).sqrt() < 4.0 * width)
+                .collect();
             let npc = &mut self.npcs[i];
             if let Some(weapon) = draw {
                 npc.weapon = Some(weapon);
@@ -663,11 +673,25 @@ impl super::Sim {
                         (None, Gait::Run) => RUN_SPEED,
                     };
                     let step = (speed * dt).min(left);
-                    npc.pos[0] += dx / left * step;
-                    npc.pos[2] += dz / left * step;
-                    let floor = self.world.ground_at(npc.pos[0], npc.pos[2], npc.floor + STEP).unwrap_or(npc.floor);
-                    npc.pos[1] += floor - npc.floor;
-                    npc.floor = floor;
+                    let (x, z) = (npc.pos[0] + dx / left * step, npc.pos[2] + dz / left * step);
+                    // Not into someone else: closer than a body's width, and nearer than it was
+                    let gap = |o: &V3, x: f32, z: f32| ((o[0] - x).powi(2) + (o[2] - z).powi(2)).sqrt();
+                    let blocked = others.iter().any(|o| gap(o, x, z) < width && gap(o, x, z) < gap(o, npc.pos[0], npc.pos[2]));
+                    if blocked {
+                        // At the end of its way, or held up a while, it goes on without that point
+                        let since = *mind.blocked_since.get_or_insert(now);
+                        if mind.path.len() == 1 || now - since > BLOCKED_SECONDS {
+                            mind.path.remove(0);
+                            mind.blocked_since = None;
+                        }
+                    } else {
+                        mind.blocked_since = None;
+                        npc.pos[0] = x;
+                        npc.pos[2] = z;
+                        let floor = self.world.ground_at(npc.pos[0], npc.pos[2], npc.floor + STEP).unwrap_or(npc.floor);
+                        npc.pos[1] += floor - npc.floor;
+                        npc.floor = floor;
+                    }
                     // On its feet to walk
                     npc.stance = Some(Stance::Stand);
                 }
@@ -773,10 +797,12 @@ impl super::Sim {
             let n = &self.npcs[i];
             let feet = [n.pos[0] + px, n.floor, n.pos[2] + pz];
             let Some(floor) = self.world.ground_at(feet[0], feet[2], n.floor + STEP).filter(|f| (f - n.floor).abs() <= STEP) else { continue };
-            // No nearer a wall than it was, in any room it would be in
-            let clearance = |at: V3| self.rooms_at(at, None).iter().map(|&r| self.world.wall_clearance_in(&crate::collision::Player::new(at), r)).fold(f32::INFINITY, f32::min);
-            let to = [feet[0], floor, feet[2]];
-            if clearance(to) < clearance([n.pos[0], n.floor, n.pos[2]]).min(0.0) {
+            // Not into a wall, nor nearer one it is already in, among the rooms of either spot
+            let (from, to) = ([n.pos[0], n.floor, n.pos[2]], [feet[0], floor, feet[2]]);
+            let mut rooms = self.rooms_at(from, None);
+            rooms.extend(self.rooms_at(to, None));
+            let clearance = |at: V3| rooms.iter().map(|&r| self.world.wall_clearance_in(&crate::collision::Player::new(at), r)).fold(f32::INFINITY, f32::min);
+            if clearance(to) < clearance(from).min(0.0) {
                 continue;
             }
             let n = &mut self.npcs[i];
@@ -1326,6 +1352,7 @@ mod tests {
         eprintln!("the grid took {:?}", started.elapsed());
         let grid = sim.nav.clone().unwrap();
         let there = sim.rooms_at(to, None);
+        let head = sim.world.params().height;
         for (i, n) in sim.npcs.iter().enumerate() {
             let feet = [n.pos[0], n.floor, n.pos[2]];
             let way = grid.path(&sim.world, feet, &sim.rooms_at(feet, None), to, &there, &sim.blocked_portals).expect("a way");
@@ -1342,6 +1369,9 @@ mod tests {
                     for r in sim.rooms_at(foot, None) {
                         let c = sim.world.wall_clearance_in(&crate::collision::Player::new(foot), r);
                         assert!(door.is_some() || c > -3.0, "#{i}: {a:?} -> {b:?} into room {r}'s wall by {:.0} at {foot:?}", -c);
+                        // Nothing to walk through overhead, as a table's top
+                        let over = sim.world.floors_in(r, foot[0], foot[2]).into_iter().find(|&f| f > foot[1] + 45.0 && f < foot[1] + head);
+                        assert!(over.is_none(), "#{i}: {a:?} -> {b:?} under a top of room {r} at {over:?} at {foot:?}");
                     }
                 }
             }
@@ -1446,7 +1476,7 @@ mod tests {
             }
         }
         for (k, &a) in near.iter().enumerate() {
-            for &b in &near[k + 1..] {
+            for &b in near[k + 1..].iter().filter(|&&b| (sim.npcs[a].floor - sim.npcs[b].floor).abs() < 100.0) {
                 assert!(apart(&sim, a, b) >= 55.0, "#{a} and #{b}: {:?} {:?}
 {}
 {}", sim.npcs[a].pos, sim.npcs[b].pos, sim.terrorist_report(0)[a], sim.terrorist_report(0)[b]);

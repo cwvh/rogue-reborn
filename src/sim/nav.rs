@@ -75,7 +75,7 @@ impl Grid {
             if !walls.contains(&room) {
                 walls.push(room);
             }
-            if walls.iter().any(|&r| world.wall_clearance_in(&Player::new([x, y, z]), r) < 0.0) {
+            if walls.iter().any(|&r| world.wall_clearance_in(&Player::new([x, y, z]), r) < 0.0) || !head_room(world, &walls, [x, y, z]) {
                 return None;
             }
             let i = grid.places.len() as u32;
@@ -336,10 +336,20 @@ impl Grid {
             let mut any = false;
             places.into_iter().all(|s| {
                 any = true;
-                s.walls.iter().all(|&r| world.wall_clearance_in(&Player::new([at[0], s.at[1], at[2]]), r) >= 0.0)
+                let feet = [at[0], s.at[1], at[2]];
+                s.walls.iter().all(|&r| world.wall_clearance_in(&Player::new(feet), r) >= 0.0) && head_room(world, &s.walls, feet)
             }) && any
         })
     }
+}
+
+/// Whether nothing that faces up, as a table's top, is over a body standing at `feet` in any of
+/// `rooms`: such a face counts as floor, so no wall keeps a body out from under it
+fn head_room(world: &CollisionWorld, rooms: &[u32], feet: V3) -> bool {
+    let (r, top) = (world.params().radius, feet[1] + world.params().height);
+    [(0.0, 0.0), (r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r)].iter().all(|&(dx, dz)| {
+        rooms.iter().all(|&room| world.floors_in(room, feet[0] + dx, feet[2] + dz).iter().all(|&f| f <= feet[1] + STEP || f >= top))
+    })
 }
 
 /// A cost that orders as a float does, for the heap
@@ -357,5 +367,49 @@ impl PartialOrd for Key {
 impl Ord for Key {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.0.total_cmp(&other.0)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collision::Params;
+
+    #[test]
+    fn no_way_goes_under_a_table() {
+        // rm02's room 100 has a block about 280 units square whose top (45 to 61 over the
+        // floor) counts as floor, so no wall kept a body from walking through it
+        let path = std::path::Path::new("data/map/rm02/rm02.map");
+        let Ok(level) = crate::map::read(path) else { return };
+        let world = CollisionWorld::from_map(&level, Params::default());
+        let vis = Visibility::new(&level);
+        let rooms = |p: V3| vis.rooms_holding(&level, [p[0], p[1] + 50.0, p[2]], None);
+        let (from, to) = ([29300.0, 32767.0, 32900.0], [29960.0, 32767.0, 32720.0]);
+        let grid = Grid::new(&world, &level, &vis, &[(from, rooms(from))]);
+        let height = world.params().height;
+        let under = |at: V3, f: f32| f > at[1] + STEP && f < at[1] + height;
+        for p in &grid.places {
+            for &r in &p.walls {
+                let over = world.floors_in(r, p.at[0], p.at[2]).into_iter().find(|&f| under(p.at, f));
+                assert!(over.is_none(), "a place at {:?} under a top of room {r} at {over:?}", p.at);
+            }
+        }
+        // From beside the block to past it: a straight line would cross it
+        let way = grid.path(&world, from, &rooms(from), to, &rooms(to), &[]).expect("a way across");
+        let mut prev = from;
+        for &(p, _) in &way {
+            let n = (dist(prev, p) / 5.0).ceil() as usize;
+            for k in 1..n {
+                let t = k as f32 / n as f32;
+                let at = [0, 1, 2].map(|c| prev[c] + (p[c] - prev[c]) * t);
+                let Some(y) = world.ground_at(at[0], at[2], at[1] + STEP) else { continue };
+                for r in rooms([at[0], y, at[2]]) {
+                    let over = world.floors_in(r, at[0], at[2]).into_iter().find(|&f| under([at[0], y, at[2]], f));
+                    assert!(over.is_none(), "{prev:?} -> {p:?} under a top of room {r} at {over:?}, at {at:?}");
+                }
+            }
+            prev = p;
+        }
     }
 }
