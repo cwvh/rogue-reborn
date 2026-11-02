@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use crate::net::link::{Addr, Link};
 use crate::net::proto::{Setup, Snapshot, ToClient, ToServer, split};
+use crate::net::record::{ServerRecorder, ServerRecording};
 use crate::sim::{Event, Input, Sim, TICK};
 
 type V3 = [f32; 3];
@@ -114,6 +115,7 @@ pub struct Server {
     pub snapshot_bytes: u64,
     /// Snapshots too big for a datagram, sent in parts
     pub snapshots_split: u64,
+    recorder: Option<ServerRecorder>,
 }
 
 impl Server {
@@ -121,7 +123,7 @@ impl Server {
         assert!(!spawns.is_empty(), "players need somewhere to start");
         let mut sim = sim;
         sim.spawns = spawns.clone();
-        Server { sim, setup, build: build.to_string(), spawns, spawned: 0, remotes: Vec::new(), tick: 0, next_tick_at: None, events: VecDeque::new(), next_event: 1, snapshot_every: SNAPSHOT_EVERY, lag_compensation: true, snapshots_sent: 0, snapshot_bytes: 0, snapshots_split: 0 }
+        Server { sim, setup, build: build.to_string(), spawns, spawned: 0, remotes: Vec::new(), tick: 0, next_tick_at: None, events: VecDeque::new(), next_event: 1, snapshot_every: SNAPSHOT_EVERY, lag_compensation: true, snapshots_sent: 0, snapshot_bytes: 0, snapshots_split: 0, recorder: None }
     }
 
     /// Send snapshots this many times a second (the nearest the 60 ticks a second allow)
@@ -133,6 +135,17 @@ impl Server {
     /// where they are now
     pub fn set_lag_compensation(&mut self, on: bool) {
         self.lag_compensation = on;
+    }
+
+    /// Record the match from here, which must be before it has begun
+    pub fn record(&mut self) {
+        assert!(self.tick == 0 && self.remotes.is_empty(), "a match is recorded from its start");
+        self.recorder = Some(ServerRecorder::new(&self.build, self.setup.clone(), self.spawns.clone()));
+    }
+
+    /// The match so far, if it is being recorded
+    pub fn recording(&self) -> Option<ServerRecording> {
+        self.recorder.as_ref().map(|r| r.recording(&self.sim))
     }
 
     pub fn players(&self) -> usize {
@@ -184,6 +197,9 @@ impl Server {
                     return;
                 };
                 self.spawned += 1;
+                if let Some(rec) = self.recorder.as_mut() {
+                    rec.joined(slot, spawn);
+                }
                 self.remotes.push(Remote {
                     addr: from, token, slot, queue: BTreeMap::new(), next_seq: None, last_input: Input { run: true, ..Input::default() },
                     applied_seq: 0, event_ack: self.next_event - 1, in_flight: VecDeque::new(), heard: now, acked: 0, sent: VecDeque::new(),
@@ -213,9 +229,16 @@ impl Server {
             ToServer::Leave { token } => {
                 if let Some(i) = self.remotes.iter().position(|r| r.addr == from && r.token == token) {
                     let r = self.remotes.remove(i);
-                    self.sim.remove_player(r.slot);
+                    self.drop_player(r.slot);
                 }
             }
+        }
+    }
+
+    fn drop_player(&mut self, slot: usize) {
+        self.sim.remove_player(slot);
+        if let Some(rec) = self.recorder.as_mut() {
+            rec.left(slot);
         }
     }
 
@@ -235,9 +258,12 @@ impl Server {
                 rewind[r.slot] = (self.tick as f32 - view as f32 / 16.0).clamp(0.0, MAX_REWIND);
             }
         }
-        self.sim.rewind = rewind;
+        self.sim.rewind = rewind.clone();
         let events = self.sim.tick(&inputs, TICK);
         self.tick += 1;
+        if let Some(rec) = self.recorder.as_mut() {
+            rec.ticked(&inputs, &rewind, &self.sim);
+        }
         for e in &events {
             self.events.push_back((self.tick, self.next_event, e.clone()));
             self.next_event += 1;
@@ -250,7 +276,7 @@ impl Server {
         let gone: Vec<usize> = self.remotes.iter().enumerate().filter(|(_, r)| now - r.heard > TIMEOUT).map(|(i, _)| i).collect();
         for i in gone.into_iter().rev() {
             let r = self.remotes.remove(i);
-            self.sim.remove_player(r.slot);
+            self.drop_player(r.slot);
         }
 
         if self.tick % self.snapshot_every == 0 {

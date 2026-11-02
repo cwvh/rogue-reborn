@@ -7,6 +7,7 @@ pub mod client;
 pub mod link;
 pub mod meter;
 pub mod proto;
+pub mod record;
 pub mod server;
 pub mod setup;
 

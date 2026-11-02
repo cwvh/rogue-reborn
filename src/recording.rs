@@ -79,6 +79,8 @@ impl std::fmt::Display for Desync {
     }
 }
 
+impl std::error::Error for Desync {}
+
 impl Recording {
     /// Play every input into a sim that was set up from the header, checking the checksums.
     /// Returns where it first stopped matching, if it did.

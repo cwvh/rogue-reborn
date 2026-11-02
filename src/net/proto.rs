@@ -909,7 +909,7 @@ fn read_state(r: &mut Reader, base: Option<&Snapshot>) -> Result<Snapshot> {
     Ok(Snapshot { tick, time, ack_seq, culling, players, npcs, thrown, doors, broken, events: Vec::new() })
 }
 
-fn write_setup(w: &mut Writer, s: &Setup) {
+pub(crate) fn write_setup(w: &mut Writer, s: &Setup) {
     w.string(&s.map);
     w.string(&s.model);
     w.string(&s.idle);
@@ -934,7 +934,7 @@ fn write_setup(w: &mut Writer, s: &Setup) {
     }
 }
 
-fn read_setup(r: &mut Reader) -> Result<Setup> {
+pub(crate) fn read_setup(r: &mut Reader) -> Result<Setup> {
     let (map, model, idle) = (r.string()?, r.string()?, r.string()?);
     let (magazine, ammo, reserve, grenades) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
     let speed_scale = r.f32()?;

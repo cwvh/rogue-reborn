@@ -16,7 +16,8 @@ pub struct Args {
     pub sim_latency: f64,
     pub sim_jitter: f64,
     pub sim_loss: f32,
-    /// Record the game to this file, to play back with --play
+    /// Record the game to this file, to play back with --play. On a server, what the player saw
+    /// (see net::record), which `rrsrv --check` plays back; M marks a moment in it.
     pub record: Option<PathBuf>,
     /// Play back a recorded game, which starts as it did when recorded
     pub play: Option<PathBuf>,

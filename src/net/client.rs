@@ -93,6 +93,8 @@ pub struct Client {
     received: VecDeque<Snapshot>,
     /// Parts of snapshots too big for a datagram
     parts: Parts,
+    /// What the server has sent, kept for a recording
+    tape: Option<Vec<Vec<u8>>>,
     /// When (client time) the newest snapshot arrived
     arrived: f64,
     /// The server tick that other players are shown at, which runs at the pace of the clock
@@ -108,7 +110,7 @@ impl Client {
             server, token, build: build.to_string(), status: Status::Connecting, setup: None, slot: 0, seq: 1,
             recent: VecDeque::new(), pending: VecDeque::new(), last_snapshot: 0, event_seen: 0, heard: 0.0,
             asked: f64::NEG_INFINITY, correction: 0.0, snapshots: 0,
-            history: VecDeque::new(), received: VecDeque::new(), parts: Parts::default(), arrived: 0.0, view_tick: None, view_at: 0.0,
+            history: VecDeque::new(), received: VecDeque::new(), parts: Parts::default(), tape: None, arrived: 0.0, view_tick: None, view_at: 0.0,
             meter: Meter::default(),
         }
     }
@@ -126,6 +128,16 @@ impl Client {
     pub fn leave(&mut self, link: &mut impl Link) {
         link.send(self.server, &ToServer::Leave { token: self.token }.encode());
         self.status = Status::Lost;
+    }
+
+    /// Keep a copy of every datagram the server sends from now on, for a recording
+    pub fn start_tape(&mut self) {
+        self.tape.get_or_insert_with(Vec::new);
+    }
+
+    /// The datagrams kept since this was last asked
+    pub fn take_tape(&mut self) -> Vec<Vec<u8>> {
+        self.tape.as_mut().map(std::mem::take).unwrap_or_default()
     }
 
     /// Listen, until the server lets us in. Returns the setup once it has.
@@ -148,6 +160,9 @@ impl Client {
                 continue;
             }
             self.meter.received(now, bytes.len());
+            if let Some(tape) = self.tape.as_mut() {
+                tape.push(bytes.clone());
+            }
             let received = &self.received;
             let Ok(msg) = ToClient::decode_with(&bytes, &|tick| received.iter().find(|s| s.tick == tick)) else { continue };
             // A message in parts is read once the last of them comes

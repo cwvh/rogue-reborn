@@ -104,6 +104,22 @@ More realistic conditions for them and the lab:
 A remote tester's recording is how we will see what they saw. A recording of a bug becomes a
 test.
 
+How it is done (`net::record`):
+
+- `rrsrv --record match.rrs` keeps how the match was set up, who joined and left between which
+  ticks, each player's input every tick, and how far back each shot was judged. It is written
+  out every 30 seconds and when the server stops. Four players come to about 1 KB a second.
+- `rr --connect HOST:PORT --record seen.rrc` keeps every datagram the server sent, with when it
+  came, every input, and the moment of every frame. M marks a moment. It comes to about 6 KB a
+  second.
+- Both keep a checksum of the game every second. `rrsrv --check FILE` plays either back and
+  says whether it comes out the same, or the tick where it first does not.
+- A player's recording plays back through the client code, so a replay shows the frames they
+  were shown. It also keeps the checksum of their game as it was set up, which catches a client
+  that set it up differently from `build_sim`.
+
+Not done yet: a way to watch a recording, from any player's eyes.
+
 ### For playtests
 
 - A hit debug view: where the server judged each shot, against where the shooter saw the target.
@@ -114,7 +130,7 @@ test.
 
 1. Raise `MAX_PLAYERS` to 16, the original's limit, and check that a snapshot of 16 busy
    players fits a datagram. Give each player their own connection conditions. Done.
-2. Record network games, on the server and on the client.
+2. Record network games, on the server and on the client. Done (`net::record`).
 3. The lab.
 4. Burst loss and latency spikes.
 5. Tests that hold the lab's numbers.

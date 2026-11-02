@@ -4,6 +4,10 @@
 //!   rrsrv --level rm11 --max-players 4    a level from the game
 //!
 //! Clients join with `rr --connect HOST:PORT`.
+//!
+//!   rrsrv --level rm11 --record match.rrs  record the match, to play back later
+//!   rrsrv --check match.rrs                play back a match, or a player's recording, and
+//!                                          say whether it comes out the same
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -12,6 +16,7 @@ use rogue_reborn::collision::{CollisionWorld, Params};
 use rogue_reborn::levels::{find_level, find_mission_spawns};
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
 use rogue_reborn::net::proto::{NpcSetup, Setup};
+use rogue_reborn::net::record::{Change, ClientRecording, ServerRecording};
 use rogue_reborn::net::server::Server;
 use rogue_reborn::net::setup::build_sim;
 use rogue_reborn::mission;
@@ -43,13 +48,17 @@ struct Args {
     sim_latency: f64,
     sim_jitter: f64,
     sim_loss: f32,
+    /// Record the match to this file
+    record: Option<PathBuf>,
+    /// Play back a recording instead of serving
+    check: Option<PathBuf>,
 }
 
 fn parse_args() -> Args {
     let mut a = Args {
         port: 27960, demo: false, map: None, level: None, npcs: demo::MAX_NPCS, max_players: 4, seed: 0x5eed,
         model: PathBuf::from("data/character/team_hrt/blue_M_a.CRP"), no_models: false, grenades: 3, duration: None, quiet: false, no_pvp: false, no_lag_compensation: false,
-        snapshot_rate: 30.0, sim_latency: 0.0, sim_jitter: 0.0, sim_loss: 0.0,
+        snapshot_rate: 30.0, sim_latency: 0.0, sim_jitter: 0.0, sim_loss: 0.0, record: None, check: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -73,6 +82,8 @@ fn parse_args() -> Args {
             "--sim-latency" => a.sim_latency = value("--sim-latency").parse::<f64>().unwrap_or_else(|_| usage("--sim-latency expects milliseconds")) / 1000.0,
             "--sim-jitter" => a.sim_jitter = value("--sim-jitter").parse::<f64>().unwrap_or_else(|_| usage("--sim-jitter expects milliseconds")) / 1000.0,
             "--sim-loss" => a.sim_loss = value("--sim-loss").parse::<f32>().unwrap_or_else(|_| usage("--sim-loss expects a percentage")) / 100.0,
+            "--record" => a.record = Some(PathBuf::from(value("--record"))),
+            "--check" => a.check = Some(PathBuf::from(value("--check"))),
             "--help" | "-h" => usage(""),
             other => usage(&format!("unknown option {other}")),
         }
@@ -87,12 +98,72 @@ fn usage(problem: &str) -> ! {
     eprintln!("usage: rrsrv [--demo | --level NAME | --map PATH] [--port N] [--max-players N] [--npcs N] [--seed N]");
     eprintln!("             [--model FILE] [--no-models] [--grenades N] [--duration SECONDS] [--quiet] [--snapshot-rate HZ] [--no-pvp] [--no-lag-compensation]");
     eprintln!("             [--sim-latency MS] [--sim-jitter MS] [--sim-loss PERCENT]   (to make the connection worse)");
+    eprintln!("             [--record FILE]");
+    eprintln!("       rrsrv --check FILE");
     std::process::exit(if problem.is_empty() { 0 } else { 2 });
+}
+
+/// How often (seconds) a recording is written out while the match goes on, so that little is
+/// lost if the server is stopped
+const WRITE_EVERY: f64 = 30.0;
+
+/// Play back a match the server recorded, or what a player recorded, and say whether it comes
+/// out as it did
+fn check(path: &Path) -> ! {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| {
+        eprintln!("rrsrv: could not read {}: {e}", path.display());
+        std::process::exit(2);
+    });
+    let result = match ServerRecording::from_bytes(&bytes) {
+        Ok(rec) => {
+            let joins = rec.ticks.iter().flat_map(|t| &t.changes).filter(|c| matches!(c, Change::Joined { .. })).count();
+            println!("a match of {:.1} s on {}, build {}, {joins} joined", rec.seconds(), rec.setup.map, rec.build);
+            rec.replay().map(|sim| sim.checksum())
+        }
+        Err(_) => match ClientRecording::from_bytes(&bytes) {
+            Ok(rec) => {
+                println!("what a player saw, {:.1} s, build {}", rec.seconds(), rec.build);
+                for (tick, now) in &rec.marks {
+                    println!("marked at tick {tick}, {:.1} s in", now - rec.steps.first().map_or(0.0, |s| s.now));
+                }
+                let mut frames = 0;
+                rec.replay(|_, _, _, _| frames += 1).map(|sim| {
+                    println!("{frames} frames");
+                    sim.checksum()
+                })
+            }
+            Err(e) => {
+                eprintln!("rrsrv: {} is not a recording of a network game: {e:#}", path.display());
+                std::process::exit(2);
+            }
+        },
+    };
+    match result {
+        Ok(sum) => {
+            println!("it plays back the same, ending with checksum {sum:016x}");
+            std::process::exit(0);
+        }
+        Err(e) => {
+            println!("{e:#}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn write(rec: Option<ServerRecording>, path: &Path) {
+    if let Some(rec) = rec {
+        if let Err(e) = rec.write(path) {
+            eprintln!("rrsrv: {e:#}");
+        }
+    }
 }
 
 fn main() {
     let args = parse_args();
     let build = option_env!("GIT_HASH").unwrap_or("unknown");
+    if let Some(path) = &args.check {
+        check(path);
+    }
 
     // The level, and where everyone starts in it
     let (map_name, level_path) = if args.demo || (args.map.is_none() && args.level.is_none()) {
@@ -178,6 +249,9 @@ fn main() {
     let mut server = Server::new(sim, setup, build, player_spawns);
     server.set_snapshot_rate(args.snapshot_rate);
     server.set_lag_compensation(!args.no_lag_compensation);
+    if args.record.is_some() {
+        server.record();
+    }
 
     let mut link = Impaired::new(
         UdpLink::bind(&format!("0.0.0.0:{}", args.port)).unwrap_or_else(|e| {
@@ -194,6 +268,7 @@ fn main() {
 
     let start = Instant::now();
     let mut players = 0;
+    let mut written = 0.0;
     loop {
         let now = start.elapsed().as_secs_f64();
         link.set_time(now);
@@ -209,11 +284,19 @@ fn main() {
         if args.duration.is_some_and(|d| now >= d) {
             break;
         }
+        if let Some(path) = args.record.as_ref().filter(|_| now - written >= WRITE_EVERY) {
+            write(server.recording(), path);
+            written = now;
+        }
         std::thread::sleep(Duration::from_millis(1));
     }
 
     // How things stand, for whoever wants to check
     println!("server stopped at tick {}, checksum {:016x}", server.tick, server.sim.checksum());
+    if let Some(path) = &args.record {
+        write(server.recording(), path);
+        println!("recorded the match to {}", path.display());
+    }
     if server.snapshots_sent > 0 {
         println!("sent {} snapshots, {} bytes each on average", server.snapshots_sent, server.snapshot_bytes / server.snapshots_sent);
     }

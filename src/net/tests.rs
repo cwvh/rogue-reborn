@@ -1,9 +1,10 @@
 //! The server and its clients, run against each other on a pretend network and a pretend clock.
 
 use crate::net::bot::{Bot, Skill};
-use crate::net::client::{Client, Status};
+use crate::net::client::{Client, Frame, Status};
 use crate::net::link::{Conditions, FakeLink, FakeNet};
 use crate::net::proto::Setup;
+use crate::net::record::{ClientRecorder, ClientRecording, ServerRecording};
 use crate::net::server::Server;
 use crate::net::setup::build_sim;
 use crate::sim::{self, Event, Input, MAX_PLAYERS, Sim, TICK};
@@ -43,7 +44,13 @@ struct Peer {
     on: bool,
     /// What the client has been told happened
     events: Vec<Event>,
+    /// Recording what the player saw, and the frames they were shown
+    recorder: Option<ClientRecorder>,
+    frames: Vec<Frame>,
 }
+
+/// Where a recorded player stands until the server says
+const START: [f32; 3] = [0.0, 0.0, 300.0];
 
 struct Game {
     net: FakeNet,
@@ -79,7 +86,7 @@ impl Game {
     fn join_with(&mut self, build: &str, script: impl FnMut(u32) -> Input + 'static) -> usize {
         let link = self.net.endpoint();
         let client = Client::new(self.server_link.addr(), 1000 + self.peers.len() as u32, build);
-        self.peers.push(Peer { client, link, sim: None, script: Box::new(script), bot: None, ticks: 0, on: true, events: Vec::new() });
+        self.peers.push(Peer { client, link, sim: None, script: Box::new(script), bot: None, ticks: 0, on: true, events: Vec::new(), recorder: None, frames: Vec::new() });
         self.peers.len() - 1
     }
 
@@ -91,6 +98,15 @@ impl Game {
 
     fn join(&mut self, script: impl FnMut(u32) -> Input + 'static) -> usize {
         self.join_with(BUILD, script)
+    }
+
+    /// A player whose computer records what they see, a frame each tick
+    fn join_recorded(&mut self, script: impl FnMut(u32) -> Input + 'static) -> usize {
+        let peer = self.join(script);
+        let p = &mut self.peers[peer];
+        p.client.start_tape();
+        p.recorder = Some(ClientRecorder::new(BUILD, 1000 + peer as u32));
+        peer
     }
 
     /// A player with a connection of their own, the same both ways
@@ -109,21 +125,36 @@ impl Game {
         self.net.set_time(now);
         for p in self.peers.iter_mut().filter(|p| p.on) {
             if p.sim.is_none() {
-                if let Some(setup) = p.client.connect(now, &mut p.link).cloned() {
-                    p.sim = Some(build_sim(&setup).unwrap());
+                let setup = p.client.connect(now, &mut p.link).cloned();
+                if let Some(rec) = p.recorder.as_mut() {
+                    rec.connected(now, &mut p.client);
+                }
+                if let Some(setup) = setup {
+                    let mut sim = build_sim(&setup).unwrap();
+                    if let Some(rec) = p.recorder.as_mut() {
+                        // As the game's client does
+                        sim.activate_slot(p.client.slot(), START);
+                        rec.began(START, false, &sim);
+                    }
+                    p.sim = Some(sim);
                 }
             }
             if let Some(sim) = p.sim.as_mut() {
-                let input = match p.bot.as_mut() {
-                    Some(bot) => {
-                        let view = p.client.view(now);
-                        bot.think(sim, p.client.slot(), &view)
-                    }
-                    None => (p.script)(p.ticks),
+                let view = (p.bot.is_some() || p.recorder.is_some()).then(|| p.client.view(now));
+                if let (Some(rec), Some(view)) = (p.recorder.as_mut(), &view) {
+                    rec.viewed(now);
+                    p.frames.push(view.clone());
+                }
+                let input = match (p.bot.as_mut(), &view) {
+                    (Some(bot), Some(view)) => bot.think(sim, p.client.slot(), view),
+                    _ => (p.script)(p.ticks),
                 };
                 p.ticks += 1;
                 let news = p.client.tick(now, &mut p.link, sim, input);
                 p.events.extend(news);
+                if let Some(rec) = p.recorder.as_mut() {
+                    rec.ticked(now, input, &mut p.client, sim);
+                }
             }
         }
         self.server.update(now, &mut self.server_link);
@@ -378,6 +409,79 @@ fn a_snapshot_too_big_for_a_datagram_reaches_the_clients_in_parts() {
     }
     assert!(game.server.snapshots_split > 100, "only {} snapshots went in parts", game.server.snapshots_split);
     assert!(seen.iter().all(|&n| n + 5 >= most), "{most} grenades at most, but the clients saw {seen:?}");
+}
+
+/// A match on a poor connection with players coming and going, recorded by the server and by
+/// one of the players
+fn recorded_match() -> (Game, usize) {
+    let mut game = Game::with_setup(Conditions::poor(), Setup { pvp: true, ..setup() });
+    game.server.record();
+    game.join_bot(Skill::hard(), 3);
+    let watcher = game.join_recorded(|t| {
+        let mut i = Input { forward: (t / 90) % 2 == 0, fire: t % 70 < 20, run: true, ..Input::default() };
+        i.set_look((t as f32 * 0.7) % 360.0, 0.0);
+        i
+    });
+    game.run(3.0);
+    let late = game.join_bot(Skill::normal(), 5);
+    game.run(4.0);
+    game.peers[late].on = false;
+    game.run(8.0);
+    game.join_bot(Skill::easy(), 7);
+    game.run(5.0);
+    (game, watcher)
+}
+
+#[test]
+fn a_match_recorded_by_the_server_plays_back_the_same() {
+    let (game, _) = recorded_match();
+    let rec = game.server.recording().unwrap();
+    let back = ServerRecording::from_bytes(&rec.to_bytes()).unwrap();
+    assert_eq!(back, rec);
+    let size = rec.to_bytes().len() as f32 / rec.seconds();
+    assert!(size < 1500.0, "{size:.0} bytes a second for four players");
+    // Players came and went, and shots were judged against the past
+    let changes: usize = rec.ticks.iter().map(|t| t.changes.len()).sum();
+    assert_eq!(changes, 5, "four joins and one leave");
+    assert!(rec.ticks.iter().any(|t| t.rewind.iter().any(|&r| r > 5.0)));
+    let sim = back.replay().unwrap();
+    assert_eq!(sim.checksum(), game.server.sim.checksum());
+    assert!(sim.players.iter().any(|p| p.deaths > 0), "nobody died, so the test shows little");
+}
+
+#[test]
+fn a_server_recording_that_does_not_match_says_where() {
+    let (game, _) = recorded_match();
+    let mut rec = game.server.recording().unwrap();
+    // The watcher turns back for a moment at 9 s
+    for t in &mut rec.ticks[540..560] {
+        t.inputs[1].forward = !t.inputs[1].forward;
+    }
+    let Err(err) = rec.replay() else { panic!("it played back the same") };
+    let d = err.downcast_ref::<crate::recording::Desync>().expect("a desync");
+    assert_eq!(d.tick, 600);
+}
+
+#[test]
+fn a_player_records_what_they_saw_and_it_plays_back_the_same() {
+    let (mut game, watcher) = recorded_match();
+    let now = game.steps as f64 * TICK as f64;
+    let p = &mut game.peers[watcher];
+    p.recorder.as_mut().unwrap().mark(now - 2.0);
+    let rec = p.recorder.as_ref().unwrap().recording(p.sim.as_ref().unwrap());
+    let back = ClientRecording::from_bytes(&rec.to_bytes()).unwrap();
+    // Small enough for a tester to send: a few megabytes for ten minutes
+    let size = rec.to_bytes().len() as f64 / rec.seconds();
+    assert!(size < 8000.0, "{size:.0} bytes a second");
+    assert_eq!(back, rec);
+    assert_eq!(back.marks.len(), 1);
+    let mut frames = Vec::new();
+    let sim = back.replay(|_, frame, _, _| frames.push(frame.clone())).unwrap();
+    assert_eq!(sim.checksum(), p.sim.as_ref().unwrap().checksum());
+    // Every frame as it was shown, the others moving and all
+    assert_eq!(frames.len(), p.frames.len());
+    assert!(frames == p.frames, "the frames differ");
+    assert!(frames.iter().any(|f| f.players.len() >= 3));
 }
 
 #[test]

@@ -18,6 +18,7 @@ use rogue_reborn::net::client::{Client, Status};
 use rogue_reborn::net::animation::Doing;
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
 use rogue_reborn::recording::{Playback, Recorder, Recording};
+use rogue_reborn::net::record::ClientRecorder;
 use rogue_reborn::mission;
 use rogue_reborn::sim::characters::{Characters, Npc, Rig, place_npcs, place_terrorists};
 use rogue_reborn::sim::movement::{Movement, Reloading, crouched_speed, ground_speed, hip_turn, movement_from_keys};
@@ -115,6 +116,8 @@ fn main() {
     let net_clock = Instant::now();
     let mut net: Option<(Client, Impaired<UdpLink>)> = None;
     let mut joined: Option<rogue_reborn::net::proto::Setup> = None;
+    // On a server, --record keeps what the player saw (see net::record)
+    let mut net_recorder: Option<ClientRecorder> = None;
     if let Some(address) = args.connect.clone() {
         let server = address.to_socket_addrs().ok().and_then(|mut a| a.next()).unwrap_or_else(|| {
             eprintln!("cannot find the server {address}");
@@ -128,10 +131,18 @@ fn main() {
         let to_server = link.inner_mut().addr_of(server);
         let token = (std::process::id() ^ 0x5bd1e995).wrapping_mul(2654435761);
         let mut client = Client::new(to_server, token, option_env!("GIT_HASH").unwrap_or("unknown"));
+        if args.record.is_some() {
+            client.start_tape();
+            net_recorder = Some(ClientRecorder::new(option_env!("GIT_HASH").unwrap_or("unknown"), token));
+        }
         let setup = loop {
             let now = net_clock.elapsed().as_secs_f64();
             link.set_time(now);
-            if let Some(setup) = client.connect(now, &mut link).cloned() {
+            let setup = client.connect(now, &mut link).cloned();
+            if let Some(rec) = net_recorder.as_mut() {
+                rec.connected(now, &mut client);
+            }
+            if let Some(setup) = setup {
                 break setup;
             }
             match &client.status {
@@ -517,7 +528,7 @@ fn main() {
         None => mag_size,
     };
     let grenades = playback.as_ref().map(|p| p.header().grenades).or(joined.as_ref().map(|s| s.grenades)).or(args.grenades).unwrap_or(3);
-    let mut recorder = args.record.as_ref().map(|_| Recorder::new(recording::Header {
+    let mut recorder = args.record.as_ref().filter(|_| net.is_none()).map(|_| Recorder::new(recording::Header {
         build: option_env!("GIT_HASH").unwrap_or("unknown").to_string(),
         map: if args.demo { "demo".to_string() } else { map_path.display().to_string() },
         npcs: args.npcs.unwrap_or(demo::MAX_NPCS) as u32,
@@ -569,6 +580,13 @@ fn main() {
         sim.set_doors_open(open);
     }
     sim.god = args.god;
+    if let Some(s) = &joined {
+        // Set up as `build_sim` sets up the server's game, so that a recording plays back
+        sim.pvp = s.pvp;
+    }
+    if let Some(rec) = net_recorder.as_mut() {
+        rec.began(feet, args.god, &sim);
+    }
 
     let mut last_cursor_pos = None;
     let mut recent_log: std::collections::VecDeque<String> = std::collections::VecDeque::new();
@@ -683,6 +701,11 @@ fn main() {
                         }
                         (Key::L, Action::Press) if net.is_some() => {
                             lag_meter = !lag_meter;
+                        }
+                        (Key::M, Action::Press) if net_recorder.is_some() => {
+                            let now = net_clock.elapsed().as_secs_f64();
+                            net_recorder.as_mut().unwrap().mark(now);
+                            println!("marked this moment in the recording, {now:.1} s in");
                         }
                         (Key::L, Action::Press) => {
                             if !level.planning_levels.levels.is_empty() {
@@ -903,7 +926,11 @@ fn main() {
                 Some((client, link)) => {
                     let now = net_clock.elapsed().as_secs_f64();
                     link.set_time(now);
-                    client.tick(now, link, &mut sim, tick_input)
+                    let news = client.tick(now, link, &mut sim, tick_input);
+                    if let Some(rec) = net_recorder.as_mut() {
+                        rec.ticked(now, tick_input, client, &sim);
+                    }
+                    news
                 }
                 None => sim.tick(&[tick_input], sim::TICK),
             });
@@ -1522,7 +1549,13 @@ fn main() {
 
             // On a server, what moves is shown a little in the past, between its snapshots, so that
             // it moves smoothly
-            let view = net.as_mut().map(|(client, _)| client.view(net_clock.elapsed().as_secs_f64()));
+            let view = net.as_mut().map(|(client, _)| {
+                let now = net_clock.elapsed().as_secs_f64();
+                if let Some(rec) = net_recorder.as_mut() {
+                    rec.viewed(now);
+                }
+                client.view(now)
+            });
 
             // A character shows only when a room it is in is drawn: the level overlaps itself,
             // and on rm05 a character on the plane's upper deck pokes out of the top of the hull.
@@ -2307,6 +2340,13 @@ fn main() {
 
     if let Some((client, link)) = net.as_mut() {
         client.leave(link);
+    }
+    if let (Some(rec), Some(path)) = (&net_recorder, &args.record) {
+        let rec = rec.recording(&sim);
+        match rec.write(path) {
+            Ok(()) => println!("recorded {:.1} s of the game as you saw it to {}", rec.seconds(), path.display()),
+            Err(e) => eprintln!("{e:#}"),
+        }
     }
     if let (Some(rec), Some(path)) = (recorder, &args.record) {
         let rec = rec.finish(&sim);
