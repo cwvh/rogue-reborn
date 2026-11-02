@@ -33,6 +33,10 @@ pub struct Weapon {
     pub hold: String,
     /// The ammunition it fires, as the gunfire combat model names it (see `gfcm`)
     pub ammo: Option<String>,
+    /// How many pellets a shot fires, and how far apart: each goes off the aim by up to
+    /// `pellet_spread` in 100 across and up (0x588c70)
+    pub pellets: u32,
+    pub pellet_spread: f32,
     pub gun: Option<Gun>,
 }
 
@@ -70,13 +74,14 @@ pub fn parse(text: &str) -> Result<Weapon> {
     let (class, reload_class, hold) = (word(model_at.checked_sub(3)), word(model_at.checked_sub(2)), word(model_at.checked_sub(1)));
     let sound = lines.iter().find(|l| l.to_ascii_lowercase().ends_with(".wav\"")).map(|l| l.trim_matches('"').to_string());
 
-    let muzzle = lines[model_at + 1..].iter().find_map(|l| {
+    let (muzzle_at, muzzle) = lines.iter().enumerate().skip(model_at + 1).find_map(|(i, l)| {
         let v: Vec<f32> = l.split_whitespace().filter_map(|n| n.parse().ok()).collect();
-        (v.len() == 3 && l.split_whitespace().count() == 3).then(|| [v[0], v[1], v[2]])
+        (v.len() == 3 && l.split_whitespace().count() == 3).then(|| (i, [v[0], v[1], v[2]]))
     }).context("muzzle not found")?;
 
-    // After the muzzle, the ammunition's name, then the spread's numbers
-    // (A shotgun first has two numbers and a line of its pellets, it seems, then the name again)
+    // After the muzzle, the ammunition's name, then the spread's numbers. A shotgun first has
+    // its pellets' spread and a list of its ammunitions, each with how many pellets it fires
+    // (0x5dabf0), then the name again.
     let ammo_at = (model_at + 1..lines.len().saturating_sub(1))
         .find(|&i| lines[i].starts_with('"') && lines[i + 1].parse::<f32>().is_ok());
     let ammo = ammo_at.and_then(|a| lines[a].split('"').nth(1)).map(str::to_string);
@@ -88,7 +93,20 @@ pub fn parse(text: &str) -> Result<Weapon> {
         close: numbers[7],
     });
 
-    Ok(Weapon { id, magazine, reserve, model, muzzle, sound, class, reload_class, hold, ammo, gun })
+    let shot = (reload_class == "shotgun").then(|| {
+        let spread: f32 = lines.get(muzzle_at + 1)?.parse().ok()?;
+        let n: usize = lines.get(muzzle_at + 2)?.parse().ok()?;
+        // As many as the ammunition it is loaded with fires, else one (0x5dc500)
+        let pellets = lines.get(muzzle_at + 3..muzzle_at + 3 + n)?.iter().find_map(|l| {
+            let mut parts = l.split('"');
+            let name = parts.nth(1)?;
+            (Some(name) == ammo.as_deref()).then(|| parts.next()?.trim().parse().ok()).flatten()
+        }).unwrap_or(1);
+        Some((pellets, spread))
+    }).flatten();
+    let (pellets, pellet_spread) = shot.unwrap_or((1, 0.0));
+
+    Ok(Weapon { id, magazine, reserve, model, muzzle, sound, class, reload_class, hold, ammo, gun, pellets, pellet_spread })
 }
 
 #[cfg(test)]
@@ -108,6 +126,7 @@ mod tests {
         assert_eq!(w.muzzle, [0.0, -43.0, 13.0]);
         assert_eq!(w.sound.as_deref(), Some("C_sb5ks.wav"));
         assert_eq!((w.class.as_str(), w.reload_class.as_str(), w.hold.as_str(), w.ammo.as_deref()), ("compact", "subgun", "compact", Some("9mmP(FMJ)")));
+        assert_eq!((w.pellets, w.pellet_spread), (1, 0.0));
         // What sim::aim has for it
         let (gun, mp5k) = (w.gun.unwrap(), crate::sim::aim::MP5K);
         assert_eq!((gun.moving, gun.crouched, gun.recoil, gun.close), (mp5k.moving, mp5k.crouched, mp5k.recoil, mp5k.close));
@@ -140,5 +159,14 @@ mod tests {
         }
         eprintln!("{ok} weapons parsed, {} failed: {:?}", bad.len(), &bad[..bad.len().min(3)]);
         assert!(ok > bad.len(), "most weapons should parse");
+    }
+
+    #[test]
+    fn a_shotgun_fires_its_ammunitions_pellets() {
+        let Ok(w) = read(Path::new("data/kit/pw_shotgun.wpn")) else { return };
+        assert_eq!((w.ammo.as_deref(), w.pellets, w.pellet_spread), (Some("12ga. 00 Buckshot"), 4, 2.16));
+        assert!(w.gun.is_some());
+        let spas = read(Path::new("data/kit/pw_spas12.wpn")).unwrap();
+        assert_eq!((spas.pellets, spas.pellet_spread), (4, 3.81));
     }
 }

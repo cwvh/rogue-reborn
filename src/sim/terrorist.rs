@@ -27,6 +27,21 @@ pub const RAISE_SECONDS: f32 = 0.5;
 /// The original's motions for standing up with the rifle from leaning and from slouching
 pub const RAISE_MOTIONS: [&str; 2] = ["rmt_llup", "rmt_slup"];
 
+/// Which way the `k`th pellet of a shot along `dir` goes (0x588c70): off it by up to `spread`
+/// in 100 across and up, `u` (each 0 to 1) saying how far, in each quarter round it in turn so
+/// that the pellets spread all round
+pub fn pellet(dir: V3, k: u32, spread: f32, u: [f32; 2]) -> V3 {
+    let (sx, sy) = [(1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)][(k % 4) as usize];
+    let (x, y) = (sx * u[0] * spread, sy * u[1] * spread);
+    // Across: level and square to the shot; up: square to both
+    let flat = (dir[0] * dir[0] + dir[2] * dir[2]).sqrt();
+    let across = if flat > 1e-4 { [dir[2] / flat, 0.0, -dir[0] / flat] } else { [1.0, 0.0, 0.0] };
+    let up = [dir[1] * across[2] - dir[2] * across[1], dir[2] * across[0] - dir[0] * across[2], dir[0] * across[1] - dir[1] * across[0]];
+    let v = [0, 1, 2].map(|c| dir[c] * 100.0 + across[c] * x + up[c] * y);
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    v.map(|c| c / len)
+}
+
 /// The motions a terrorist's arms play with a weapon, each standing and then kneeling
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Arms {
@@ -998,10 +1013,10 @@ impl super::Sim {
                     mind.reload_until = Some(now + mind.reload_for);
                 }
                 npc.last_shot = now;
-                (to, weapon.and_then(|w| w.sound.clone()))
+                (to, weapon.and_then(|w| w.sound.clone()), weapon.map_or((1, 0.0), |w| (w.pellets.max(1), w.pellet_spread)))
             });
             let npc_pos = npc.pos;
-            if let Some((to, sound)) = shot {
+            if let Some((to, sound, (pellets, spread))) = shot {
                 let mut u = [0.0; 3];
                 for v in &mut u {
                     *v = (super::next_rng(&mut self.rng) >> 40) as f32 / (1u64 << 24) as f32;
@@ -1022,7 +1037,19 @@ impl super::Sim {
                 ev.push(super::Event::Log(format!("t={now:.2} character {i} fires at {at} from ({:.0}, {:.0}, {:.0}) along ({:.2}, {:.2}, {:.2})",
                     eye[0], eye[1], eye[2], dir[0], dir[1], dir[2])));
                 self.npcs[i].mind = Some(mind);
-                self.bullet(eye, dir, super::Shooter::Character(i), ev);
+                // A shotgun fires its pellets round the shot
+                for k in 0..pellets {
+                    let way = if pellets > 1 {
+                        let mut u = [0.0; 2];
+                        for v in &mut u {
+                            *v = (super::next_rng(&mut self.rng) >> 40) as f32 / (1u64 << 24) as f32;
+                        }
+                        pellet(dir, k, spread, u)
+                    } else {
+                        dir
+                    };
+                    self.bullet(eye, way, super::Shooter::Character(i), ev);
+                }
             } else {
                 self.npcs[i].mind = Some(mind);
             }
@@ -1561,6 +1588,42 @@ mod tests {
         // Then on to its next step, which it walks
         let (n, m) = (&sim.npcs[0], sim.npcs[0].mind.as_ref().unwrap());
         assert!(m.step >= 2 && crate::sim::dist3([n.pos[0], 0.0, n.pos[2]], [-300.0, 0.0, 300.0]) <= 31.0, "step {} at {:?}", m.step, n.pos);
+    }
+
+    #[test]
+    fn pellets_spread_round_the_shot_a_quarter_each() {
+        let dir = [0.0, 0.0, 1.0];
+        assert_eq!(pellet(dir, 0, 2.16, [0.0, 0.0]), dir);
+        let ways: Vec<V3> = (0..4).map(|k| pellet(dir, k, 2.16, [1.0, 1.0])).collect();
+        // Across is +x for a shot along +z, up is +y: one pellet in each quarter round it
+        let quarters: Vec<(bool, bool)> = ways.iter().map(|w| (w[0] > 0.0, w[1] > 0.0)).collect();
+        assert_eq!(quarters, [(true, true), (false, true), (false, false), (true, false)]);
+        for w in &ways {
+            assert!(((w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt() - 1.0).abs() < 1e-5);
+            // No further off than the corner of the spread
+            let off = w[2].acos().to_degrees();
+            assert!(off <= (2.16f32 * 2f32.sqrt() / 100.0).atan().to_degrees() + 1e-3, "{off}");
+        }
+        // Straight down, it still spreads
+        let down = pellet([0.0, -1.0, 0.0], 1, 3.0, [0.5, 0.5]);
+        assert!(down[1] < -0.99 && down[0] != 0.0 && down[2] != 0.0, "{down:?}");
+    }
+
+    #[test]
+    fn a_terrorist_with_a_shotgun_fires_its_pellets() {
+        let Some(mut chars) = crate::sim::characters::Characters::load(std::path::Path::new("data/character/team_hrt/blue_M_a.CRP"), "up_none_cyc") else { return };
+        let mut sim = standoff([0.0, 0.0, 300.0], 180.0);
+        sim.npcs[0].weapon = chars.add_weapon("pw_shotgun.wpn");
+        sim.characters = Some(chars);
+        let still = crate::sim::Input { run: true, ..Default::default() };
+        let mut volleys = Vec::new();
+        for _ in 0..(3.0 / crate::sim::TICK) as usize {
+            let ev = sim.tick(&[still], crate::sim::TICK);
+            if ev.iter().any(|e| matches!(e, crate::sim::Event::Log(l) if l.contains("fires at"))) {
+                volleys.push(ev.iter().filter(|e| matches!(e, crate::sim::Event::CharacterShot { .. })).count());
+            }
+        }
+        assert!(!volleys.is_empty() && volleys.iter().all(|&n| n == 4), "{volleys:?}");
     }
 
     #[test]

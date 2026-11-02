@@ -205,6 +205,13 @@ its reload lasts as long as its motion: 5.6 seconds standing with a rifle (167 f
 kneeling, and 1.7 with a pistol. The original's moving terrorists have motions of their own for
 some holds (0x5c84c0's first part); ours walk as players do.
 
+A shotgun's file has two more things after its muzzle: how far its pellets spread, and a list of
+the ammunitions it takes, each with how many pellets it fires (0x5dabf0). The pellets are those
+of the ammunition it is loaded with, else one (0x5dc500): 4 for 00 buckshot. Each shot goes off
+within the spread as any other, and then each pellet goes off that by up to the pellets' spread
+in 100, across and up (0x588c70): 2.16 for the Benelli, 3.81 for the SPAS-12. The pellets take
+the four quarters round the shot in turn, so 4 pellets put one in each. Ours fires them so.
+
 With nothing left to fire, a terrorist stops fighting. It runs from where the threat is, to the
 place farthest from it within 2500 units of walking, and cowers there. This is our own rule: we
 have not found what the original does.
@@ -426,7 +433,7 @@ Small enough to try out on the maps we play, and grow from:
    a sniper's rifle 0.6 s, a shotgun 0.8 s) and hurt as players' bullets do, with the weapon's own
    sound. They reload when the magazine is empty, from the magazines the kit gives them.
    They stand, or kneel when squatting or kneeling, with the gun up as a player fires.
-   Still to do: the delay the original may add before reacting, and shotguns' pellets. Bullets do what the gunfire combat model says
+   Still to do: the delay the original may add before reacting. Bullets do what the gunfire combat model says
    (above).
 4. Then hearing (gunfire, footsteps), the guard and patrol plans (GuardSpot, MoveTo loops),
    triggers, and moving to cover.
