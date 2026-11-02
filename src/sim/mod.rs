@@ -58,6 +58,25 @@ const POSED_REACH: f32 = 120.0;
 /// The radius of each part of a player's body that bullets hit (see `Sim::hit_parts`)
 pub const HIT_RADIUS: f32 = 25.0;
 
+/// How far along a shot from `eye` along `dir` enters a body part, an upright cylinder
+fn through_part(eye: V3, dir: V3, part: &HitPart) -> Option<f32> {
+    let a = dir[0] * dir[0] + dir[2] * dir[2];
+    if a < 1e-9 {
+        return None;
+    }
+    let at = part.bottom;
+    let (ox, oz) = (eye[0] - at[0], eye[2] - at[2]);
+    let b = 2.0 * (ox * dir[0] + oz * dir[2]);
+    let c = ox * ox + oz * oz - HIT_RADIUS * HIT_RADIUS;
+    let disc = b * b - 4.0 * a * c;
+    if disc < 0.0 {
+        return None;
+    }
+    let t = (-b - disc.sqrt()) / (2.0 * a);
+    let y = eye[1] + dir[1] * t;
+    (t > 0.0 && (at[1]..=part.top).contains(&y)).then_some(t)
+}
+
 /// A unit direction turned `off` radians away from `dir`, toward the side `round` radians round it
 fn deflect(dir: V3, off: f32, round: f32) -> V3 {
     let up = if dir[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] };
@@ -92,6 +111,19 @@ struct Seen {
     flinch: Option<(&'static str, f32)>,
     peek: Option<peek::Peek>,
     time: f32,
+}
+
+/// A player's shot as the server judged it, for the network lab to compare with what the
+/// shooter saw
+#[derive(Clone, Debug)]
+pub struct Fired {
+    pub shooter: usize,
+    pub eye: V3,
+    pub dir: V3,
+    /// Where the others were judged to be: their slot, feet, and whether crouched
+    pub bodies: Vec<(usize, V3, bool)>,
+    /// The number of the shooter's input that fired it, which the server fills in
+    pub seq: u32,
 }
 
 /// One of the parts of a player's body that bullets hit: an upright cylinder of `HIT_RADIUS`
@@ -403,6 +435,8 @@ pub struct Sim {
     pub rewind: Vec<f32>,
     /// What each living player's body was doing at the end of each of the latest ticks, oldest first
     past: VecDeque<Vec<Option<Seen>>>,
+    /// Players' shots as they were judged, kept only when this is on (the network lab)
+    pub fired: Option<Vec<Fired>>,
     /// How each player's body is animated as the others see it, kept when players can be hit
     animators: crate::net::animation::Animators,
     eye_height: f32,
@@ -462,6 +496,7 @@ impl Sim {
             god: false,
             rewind: Vec::new(),
             past: VecDeque::new(),
+            fired: None,
             animators: Default::default(),
             spawns: Vec::new(),
             eye_height,
@@ -1113,7 +1148,26 @@ impl Sim {
         let (off, round) = self.players[slot].aim.throw(u);
         self.players[slot].aim.fired();
         let dir = deflect(aimed, off, round);
+        if self.fired.is_some() {
+            let back = self.rewind.get(slot).copied().unwrap_or(0.0);
+            let bodies = (0..self.players.len()).filter(|&i| i != slot)
+                .filter_map(|i| self.seen_then(i, back).map(|s| (i, s.feet, s.crouched))).collect();
+            self.fired.as_mut().unwrap().push(Fired { shooter: slot, eye, dir, bodies, seq: 0 });
+        }
         self.bullet(eye, dir, Shooter::Player(slot), ev);
+    }
+
+    /// The nearest of `bodies` (slot, feet, crouched) that a shot from `eye` along the unit
+    /// vector `dir` passes through before a wall, the bodies taken as upright cylinders
+    pub fn body_along(&self, eye: V3, dir: V3, bodies: &[(usize, V3, bool)]) -> Option<usize> {
+        let wall = self.world.bullet_hit(eye, dir, 20000.0).map_or(f32::INFINITY, |h| h.dist);
+        bodies.iter()
+            .filter_map(|&(i, feet, crouched)| {
+                self.hit_parts(feet, crouched, [0.0; 3]).into_iter().filter_map(|p| through_part(eye, dir, &p)).reduce(f32::min).map(|t| (i, t))
+            })
+            .filter(|&(_, t)| t <= wall)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
     }
 
     /// A bullet from `eye` along the unit vector `dir`, and what it strikes: a player, a
@@ -1512,19 +1566,10 @@ impl Sim {
                     return posed.map(|h| (i, h.distance, h.part));
                 }
                 let right = place.to_world([1.0, 0.0, 0.0]);
-                self.hit_parts(seen.feet, seen.crouched, seen.lean).into_iter().filter_map(|HitPart { bottom: at, top, part }| {
+                self.hit_parts(seen.feet, seen.crouched, seen.lean).into_iter().filter_map(|hit_part| {
+                    let t = through_part(eye, dir, &hit_part)?;
+                    let HitPart { bottom: at, part, .. } = hit_part;
                     let (ox, oz) = (eye[0] - at[0], eye[2] - at[2]);
-                    let b = 2.0 * (ox * dir[0] + oz * dir[2]);
-                    let c = ox * ox + oz * oz - HIT_RADIUS * HIT_RADIUS;
-                    let disc = b * b - 4.0 * a * c;
-                    if disc < 0.0 {
-                        return None;
-                    }
-                    let t = (-b - disc.sqrt()) / (2.0 * a);
-                    let y = eye[1] + dir[1] * t;
-                    if t <= 0.0 || !(at[1]..=top).contains(&y) {
-                        return None;
-                    }
                     // Below the belly, the leg on the side of the body the bullet goes in
                     let across = (ox + dir[0] * t) * (right[0] - place.pos[0]) + (oz + dir[2] * t) * (right[2] - place.pos[2]);
                     let part = part.unwrap_or(if across > 0.0 { combat::BodyPart::RightLeg } else { combat::BodyPart::LeftLeg });

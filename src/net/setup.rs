@@ -21,7 +21,8 @@ pub fn build_sim(setup: &Setup) -> Result<Sim> {
         map::read(Path::new(&setup.map)).with_context(|| format!("could not load the level {}", setup.map))?
     });
     let world = CollisionWorld::from_map(&level, Params::default());
-    let mut characters = Characters::load(Path::new(&setup.model), &setup.idle);
+    // No model named is none wanted
+    let mut characters = (!setup.model.is_empty()).then(|| Characters::load(Path::new(&setup.model), &setup.idle)).flatten();
     let npcs = match (&setup.mission, &mut characters) {
         (Some(mission), Some(c)) => {
             let teams = crate::mission::read(Path::new(mission))?;

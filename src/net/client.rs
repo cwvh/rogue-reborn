@@ -130,6 +130,11 @@ impl Client {
         self.status = Status::Lost;
     }
 
+    /// The number of the latest input sent
+    pub fn last_seq(&self) -> u32 {
+        self.seq.wrapping_sub(1)
+    }
+
     /// Keep a copy of every datagram the server sends from now on, for a recording
     pub fn start_tape(&mut self) {
         self.tape.get_or_insert_with(Vec::new);

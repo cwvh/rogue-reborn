@@ -259,7 +259,13 @@ impl Server {
             }
         }
         self.sim.rewind = rewind.clone();
+        let fired_before = self.sim.fired.as_ref().map_or(0, Vec::len);
         let events = self.sim.tick(&inputs, TICK);
+        if let Some(fired) = self.sim.fired.as_mut() {
+            for f in &mut fired[fired_before..] {
+                f.seq = self.remotes.iter().find(|r| r.slot == f.shooter).map_or(0, |r| r.applied_seq);
+            }
+        }
         self.tick += 1;
         if let Some(rec) = self.recorder.as_mut() {
             rec.ticked(&inputs, &rewind, &self.sim);

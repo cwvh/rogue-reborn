@@ -81,6 +81,39 @@ and the input queue. It is deterministic, so two runs differ only in what we cha
 Its numbers are only as good as the bots. They need reaction times and aim like a person's,
 and they need to know their side.
 
+How it is done (`net::lab`, `rrlab`; the tests use the same harness):
+
+- **Fights:** bots in the box room, everyone for themselves for now, some on the LAN and some
+  over the internet. A connection's ping is its round trip; jitter is a tenth of it, and 1% of
+  datagrams are lost.
+- **Peeking:** the box room has no cover, so the lab draws a line across it and calls it the
+  edge of a wall. One player holds still across the room and fires whenever their screen shows
+  the other past the line. The other steps out past it and back, again and again. The timing is
+  what matters, and it is the same as at a real corner.
+- **Hit agreement:** the server keeps each player's shot as it judged it (`Sim::fired`): the
+  eye, the direction, where it found the others, and which input fired it. The lab tries the
+  same ray against where the shooter's screen showed the others as they sent that input. Both
+  take bodies as plain cylinders, so only the netcode differs.
+- **The gap:** for each hit, how far the victim was on their own screen from where the shot
+  found them. Past the line, that is a hit behind cover.
+- With lag compensation off, agreement falls to about 30%, which shows the measure sees
+  disagreement when there is some.
+
+First findings (60 seconds a row):
+
+- The server agrees with the shooter's screen on 99 to 100% of shots, at every ping tried.
+- Peeker's advantage is about 95 ms even on the LAN, about 160 ms against a peeker at 100 ms,
+  and about 195 ms at 150 ms. Most of the LAN figure is the client showing others two snapshots
+  in the past (`VIEW_DELAY`), which is where to look first for tuning.
+- A peeker at 100 ms is hit behind the corner, on their own screen, on about a fifth of the
+  holder's hits. Both at 100 ms, about a third.
+- The gap is about 40 units on the LAN, 60 to 70 for a player at 100 to 150 ms.
+- Being told of one's own shot takes about 43 ms on the LAN, 160 ms at 100 ms; of one's death,
+  about 26 ms and 76 ms.
+- The server moves a player from where they predicted less than once a minute.
+- 16 players take about 92 KB a second of the host's upload, about 0.75 Mbit/s, and each client
+  about 5 KB a second.
+
 ### Fairness tests
 
 Tests that hold the lab's numbers once we know what is good. For example: "at 100 ms each way,
@@ -131,7 +164,7 @@ Not done yet: a way to watch a recording, from any player's eyes.
 1. Raise `MAX_PLAYERS` to 16, the original's limit, and check that a snapshot of 16 busy
    players fits a datagram. Give each player their own connection conditions. Done.
 2. Record network games, on the server and on the client. Done (`net::record`).
-3. The lab.
+3. The lab. Done, with bots fighting everyone for themselves until they know their side.
 4. Burst loss and latency spikes.
 5. Tests that hold the lab's numbers.
 

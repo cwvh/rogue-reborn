@@ -4,6 +4,7 @@
 pub mod animation;
 pub mod bot;
 pub mod client;
+pub mod lab;
 pub mod link;
 pub mod meter;
 pub mod proto;

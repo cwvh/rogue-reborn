@@ -1,182 +1,19 @@
 //! The server and its clients, run against each other on a pretend network and a pretend clock.
 
-use crate::net::bot::{Bot, Skill};
-use crate::net::client::{Client, Frame, Status};
-use crate::net::link::{Conditions, FakeLink, FakeNet};
+use crate::net::bot::Skill;
+use crate::net::client::Status;
+use crate::net::lab::{Game, Peer, demo_setup, spawn};
+use crate::net::link::Conditions;
 use crate::net::proto::Setup;
-use crate::net::record::{ClientRecorder, ClientRecording, ServerRecording};
-use crate::net::server::Server;
-use crate::net::setup::build_sim;
-use crate::sim::{self, Event, Input, MAX_PLAYERS, Sim, TICK};
-
-const BUILD: &str = "test";
+use crate::net::record::{ClientRecording, ServerRecording};
+use crate::sim::{self, Event, Input, MAX_PLAYERS, TICK};
 
 fn setup() -> Setup {
-    Setup {
-        map: "demo".to_string(),
-        model: "no-such-model.CRP".to_string(),
-        idle: "up_none_cyc".to_string(),
-        magazine: 30,
-        ammo: 30,
-        reserve: 90,
-        grenades: 3,
-        speed_scale: 1.0,
-        seed: 7,
-        culling: true,
-        pvp: false,
-        doors_open: None,
-        mission: None,
-        npcs: Vec::new(),
-    }
-}
-
-/// One player at a computer: a client, its copy of the game, and what the player does
-struct Peer {
-    client: Client,
-    link: FakeLink,
-    sim: Option<Sim>,
-    script: Box<dyn FnMut(u32) -> Input>,
-    /// A computer player, which plays instead of the script
-    bot: Option<Bot>,
-    /// Ticks this client has run
-    ticks: u32,
-    /// Whether the client is running: a client that is not is a computer that has been switched off
-    on: bool,
-    /// What the client has been told happened
-    events: Vec<Event>,
-    /// Recording what the player saw, and the frames they were shown
-    recorder: Option<ClientRecorder>,
-    frames: Vec<Frame>,
-}
-
-/// Where a recorded player stands until the server says
-const START: [f32; 3] = [0.0, 0.0, 300.0];
-
-struct Game {
-    net: FakeNet,
-    server: Server,
-    server_link: FakeLink,
-    peers: Vec<Peer>,
-    steps: u64,
-}
-
-/// Where player `i` starts: in rows of eight along the south wall
-fn spawn(i: usize) -> [f32; 3] {
-    [-280.0 + (i % 8) as f32 * 80.0, 0.0, -350.0 + (i / 8) as f32 * 100.0]
+    demo_setup()
 }
 
 fn run_key() -> Input {
     Input { run: true, ..Input::default() }
-}
-
-impl Game {
-    fn new(conditions: Conditions) -> Game {
-        Game::with_setup(conditions, setup())
-    }
-
-    fn with_setup(conditions: Conditions, setup: Setup) -> Game {
-        let net = FakeNet::new(11, conditions);
-        let server_link = net.endpoint();
-        let sim = build_sim(&setup).unwrap();
-        let spawns = (0..MAX_PLAYERS).map(spawn).collect();
-        let server = Server::new(sim, setup, BUILD, spawns);
-        Game { net, server, server_link, peers: Vec::new(), steps: 0 }
-    }
-
-    fn join_with(&mut self, build: &str, script: impl FnMut(u32) -> Input + 'static) -> usize {
-        let link = self.net.endpoint();
-        let client = Client::new(self.server_link.addr(), 1000 + self.peers.len() as u32, build);
-        self.peers.push(Peer { client, link, sim: None, script: Box::new(script), bot: None, ticks: 0, on: true, events: Vec::new(), recorder: None, frames: Vec::new() });
-        self.peers.len() - 1
-    }
-
-    fn join_bot(&mut self, skill: Skill, seed: u64) -> usize {
-        let peer = self.join(|_| Input::default());
-        self.peers[peer].bot = Some(Bot::new(skill, seed));
-        peer
-    }
-
-    fn join(&mut self, script: impl FnMut(u32) -> Input + 'static) -> usize {
-        self.join_with(BUILD, script)
-    }
-
-    /// A player whose computer records what they see, a frame each tick
-    fn join_recorded(&mut self, script: impl FnMut(u32) -> Input + 'static) -> usize {
-        let peer = self.join(script);
-        let p = &mut self.peers[peer];
-        p.client.start_tape();
-        p.recorder = Some(ClientRecorder::new(BUILD, 1000 + peer as u32));
-        peer
-    }
-
-    /// A player with a connection of their own, the same both ways
-    fn join_over(&mut self, conditions: Conditions, script: impl FnMut(u32) -> Input + 'static) -> usize {
-        let peer = self.join(script);
-        let (me, server) = (self.peers[peer].link.addr(), self.server_link.addr());
-        self.net.set_conditions_between(me, server, conditions);
-        self.net.set_conditions_between(server, me, conditions);
-        peer
-    }
-
-    /// Everyone's computer runs a tick, then the server looks at what has come in
-    fn step(&mut self) {
-        self.steps += 1;
-        let now = self.steps as f64 * TICK as f64;
-        self.net.set_time(now);
-        for p in self.peers.iter_mut().filter(|p| p.on) {
-            if p.sim.is_none() {
-                let setup = p.client.connect(now, &mut p.link).cloned();
-                if let Some(rec) = p.recorder.as_mut() {
-                    rec.connected(now, &mut p.client);
-                }
-                if let Some(setup) = setup {
-                    let mut sim = build_sim(&setup).unwrap();
-                    if let Some(rec) = p.recorder.as_mut() {
-                        // As the game's client does
-                        sim.activate_slot(p.client.slot(), START);
-                        rec.began(START, false, &sim);
-                    }
-                    p.sim = Some(sim);
-                }
-            }
-            if let Some(sim) = p.sim.as_mut() {
-                let view = (p.bot.is_some() || p.recorder.is_some()).then(|| p.client.view(now));
-                if let (Some(rec), Some(view)) = (p.recorder.as_mut(), &view) {
-                    rec.viewed(now);
-                    p.frames.push(view.clone());
-                }
-                let input = match (p.bot.as_mut(), &view) {
-                    (Some(bot), Some(view)) => bot.think(sim, p.client.slot(), view),
-                    _ => (p.script)(p.ticks),
-                };
-                p.ticks += 1;
-                let news = p.client.tick(now, &mut p.link, sim, input);
-                p.events.extend(news);
-                if let Some(rec) = p.recorder.as_mut() {
-                    rec.ticked(now, input, &mut p.client, sim);
-                }
-            }
-        }
-        self.server.update(now, &mut self.server_link);
-    }
-
-    fn run(&mut self, seconds: f32) {
-        for _ in 0..(seconds / TICK).round() as usize {
-            self.step();
-        }
-    }
-
-    fn sim_of(&self, peer: usize) -> &Sim {
-        self.peers[peer].sim.as_ref().expect("the client has not joined")
-    }
-
-    fn me(&self, peer: usize) -> [f32; 3] {
-        self.sim_of(peer).players[self.peers[peer].client.slot()].player.pos
-    }
-
-    fn server_pos(&self, slot: usize) -> [f32; 3] {
-        self.server.sim.players[slot].player.pos
-    }
 }
 
 fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -660,4 +497,42 @@ fn others_see_a_dead_player_fall_and_then_appear_where_they_come_back() {
         last = Some((pos, dead.is_some()));
     }
     assert!(comebacks >= 1, "never seen to die and come back");
+}
+
+#[test]
+fn the_lab_sees_the_server_agree_with_the_shooter_only_when_it_looks_back() {
+    use crate::net::lab::{internet, peek_judged};
+    let far = internet(0.15);
+    let judged = peek_judged(Conditions::lan(), far, 15.0, true);
+    let now = peek_judged(Conditions::lan(), far, 15.0, false);
+    assert!(judged.holder.shots > 50 && now.holder.shots > 50, "{judged:?}");
+    // Judged where the shooter saw them, the hits on screen are hits
+    assert!(judged.holder.agreement() > 0.95, "{judged:?}");
+    // Judged where they are now, the peeker has moved on from where the shooter saw them
+    assert!(now.holder.agreement() < 0.8, "{:?}", now.holder.agreement());
+}
+
+#[test]
+fn the_one_peeking_sees_first_and_more_so_with_lag() {
+    use crate::net::lab::{internet, peek};
+    let lan = peek(Conditions::lan(), Conditions::lan(), 12.0);
+    let far = peek(Conditions::lan(), internet(0.15), 12.0);
+    let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+    assert!(lan.advantage.len() >= 4 && far.advantage.len() >= 4);
+    // Even on the LAN: the holder sees the others a little in the past
+    assert!(mean(&lan.advantage) > 0.03, "{:?}", lan.advantage);
+    assert!(mean(&far.advantage) > mean(&lan.advantage) + 0.05, "{:?} against {:?}", far.advantage, lan.advantage);
+    // Shot as the holder saw them, the peeker is sometimes back behind the corner on their own screen
+    assert!(far.peeker.behind > 0, "{far:?}");
+}
+
+#[test]
+fn a_lab_fight_measures_players_on_the_lan_and_far_away() {
+    use crate::net::lab::fight;
+    let f = fight(4, 2, 0.1, 15.0);
+    assert!(f.lan.shots > 0 && f.remote.shots > 0, "{f:?}");
+    let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len().max(1) as f32;
+    // Far away, the news of a shot takes a round trip longer
+    assert!(mean(&f.remote.shot_delays) > mean(&f.lan.shot_delays) + 0.08, "{f:?}");
+    assert!(f.upload > 1000.0 && f.meters.len() == 6);
 }
