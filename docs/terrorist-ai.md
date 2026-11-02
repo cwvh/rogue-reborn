@@ -231,20 +231,60 @@ Ours (sim::terrorist): every sound the game makes at a place, the players' shots
 footsteps are heard by the terrorists within that reach, and through walls within half of it (a
 guess). Footsteps, four a second, are heard half as far as they sound for light gear (walking
 400, running 500), never through walls, and creeping not at all: heard to the sounds' full reach,
-every step made the terrorists far too sharp. One that hears something becomes alert and turns toward it with
-its weapon up, for ten seconds (a guess), so it is quicker to fire on whoever comes.
+every step made the terrorists far too sharp. One that hears something turns toward it with its
+weapon up, for ten seconds (a guess), so it is quicker to fire on whoever comes. How much more
+alert it grows is under Threats and awareness, below.
 
 What it does then is its team's plan's (mission.rs reads them: the plan's `ROE` lines, its steps,
 and its trigger plans). With no one to fight, Investigate and Advance go to see, at a walk or, with
-Blitz, at a run; Cautious creeps there; Defend stays put. Each terrorist grades how sure it is of
-a threat as the triggers do: Suspicious for a quiet sound, Distant for gunfire or a blast (a sound
-that carries 5000 or more), Immediate when it sees an enemy, Deadly when it is shot or one of its
-team is killed. A team's grade is its members' highest; GloballySuspicious and GloballyAware are
-anyone's Suspicious and Immediate. When one of a trigger plan's conditions holds, the team turns
-to it, once, the lowest Priority first (and `RemoveSamePriorityTriggers` rules out the others of
-its priority); `Sound Combat` is having heard gunfire, and `ThreatInZone N` a threat known to be in
-zone N: a player a terrorist is fighting, or something one has just heard, in one of its rooms.
-Alarms are not there yet.
+Blitz, at a run; Cautious creeps there; Defend stays put. When one of a trigger plan's conditions
+holds, the team turns to it, once, the lowest Priority first (and `RemoveSamePriorityTriggers`
+rules out the others of its priority); `Sound Combat` is having heard gunfire, and `ThreatInZone
+N` a threat one of them knows of in one of zone N's rooms. Alarms are not there yet.
+
+## Threats and awareness
+
+Each character keeps two grades, which the triggers test (0x5f8e80): its threat, and its
+awareness. A threat condition holds while one of the team is at just that level, not above it.
+So a team that goes straight to Deadly does not set off an ImmediateThreat plan until the
+threat falls back to Immediate. GloballySuspicious and GloballyAware are the same for awareness.
+
+A character keeps track of up to five threats (0x61e680), each with how it learned of it, where,
+and when it last noticed it. Its threat is the worst of them (0x61e8d0):
+
+| What it knows of | Threat |
+| --- | --- |
+| An enemy it sees now | Deadly |
+| An enemy it saw before, or one who shot it | Immediate |
+| Footsteps or gunfire within 2000 units of where it stands | Immediate |
+| The same further off | Distant |
+| A door, or a sound heard only through a wall | Suspicious |
+
+A quiet threat is forgotten 5 seconds after it was last noticed, and the others after 40
+(0x61ee60; 15 for characters its method +0x10 picks out, perhaps hostages). A threat whose player
+is dead or gone is forgotten at once. Noticing the same kind of threat within 50 units of one it
+knows of renews that one.
+
+Awareness is 0, 1 suspicious or 2 aware. It only rises, and it spreads to the whole team at once
+(0x61e530). It sets the alertness too: suspicious makes a bored character ready, and aware makes
+it alert. Neither ever falls below what the mission gave it. After 30 seconds with nothing new, a
+suspicious character is bored again, though still suspicious (0x61e4b0). An alert one stays alert.
+
+| What happens | Awareness |
+| --- | --- |
+| It sees an enemy (0x614260), or a dead terrorist (0x614240) | aware |
+| It hears gunfire or a blast, not through a wall (0x6142f0) | aware |
+| It glimpses an enemy, out past its sight range (0x6142d0) | suspicious |
+| It hears footsteps (0x6143e0), a door (0x614640), or gunfire through a wall | suspicious |
+
+Sounds have kinds, set by flags on the sound (0x614100). Ours has two: footsteps, and any other
+sound, which counts as gunfire when it carries 5000 or more. The original also marks some sounds
+as heard faintly; where that is set is not read yet, so ours takes a sound heard only through a
+wall as faint. The original adds a heard threat only for an enemy's sound; ours does not know
+who made a sound, so a terrorist's own gunfire counts too.
+
+Being shot is our own rule: the terrorist turns on the shooter, knows of them as a threat, and
+its team becomes aware. The original's handler for a hit is not read yet.
 
 A plan's steps are its way (`Plan::route`): `MoveTo` places and `PatrolPath` points to go to in
 turn, `PlanLoop`/`EndLoop` round and round, `PlanTrack`/`EndTrack` once, `ChangeSpeed` units a
@@ -299,8 +339,7 @@ not close doors behind them, or walk as their own weapon's hold.
 
 ## Not read yet
 
-- How a sighting becomes a threat: what makes it Suspicious, Distant, Immediate or Deadly, and
-  how awareness rises and falls (the brains stage, 0x53d030 and on).
+- Where a sound is marked as heard faintly, and what being hit does to a character's threats.
 - How fast a terrorist turns to face a target, what holds back its trigger, how it fires
   (bursts, the rate of fire) and reloads, and which skill it aims with (Assault, or Sniper with a
   sniper rifle).

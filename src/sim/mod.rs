@@ -434,7 +434,7 @@ pub struct Sim {
     nav: Option<nav::Grid>,
     /// What was made to be heard this tick besides the sounds it sends: where, and how far it
     /// carries
-    noises: Vec<(V3, f32, bool)>,
+    noises: Vec<(V3, f32, terrorist::Noise)>,
 }
 
 impl Sim {
@@ -853,13 +853,13 @@ impl Sim {
                 // Four steps a second, each as loud as the pace makes it
                 let reach = terrorist::footstep_reach(p.aim.pace);
                 if reach > 0.0 && (self.time * 4.0).floor() != ((self.time - dt) * 4.0).floor() {
-                    self.noises.push((p.player.pos, reach, false));
+                    self.noises.push((p.player.pos, reach, terrorist::Noise::Footstep));
                 }
             }
         }
         let mut noises = std::mem::take(&mut self.noises);
         noises.extend(ev.iter().filter_map(|e| match e {
-            Event::Sound { name, at: Some(at), .. } => Some((*at, self.reach_of(name), true)),
+            Event::Sound { name, at: Some(at), .. } => Some((*at, self.reach_of(name), terrorist::Noise::Sound)),
             _ => None,
         }));
         self.terrorists(dt, &noises, &mut ev);
@@ -1099,7 +1099,7 @@ impl Sim {
         p.ammo -= 1;
         p.next_shot = now + 60.0 / 800.0; // the MP5K fires about 800 rounds a minute
         p.flash_until = now + 0.05;
-        let noise = (p.player.pos, self.reach_of(PLAYER_SHOT), true);
+        let noise = (p.player.pos, self.reach_of(PLAYER_SHOT), terrorist::Noise::Sound);
         self.noises.push(noise);
 
         let eye = self.eye(slot);
@@ -1217,24 +1217,20 @@ impl Sim {
         };
         match best {
             Some((i, hit)) if wall.map_or(true, |w| hit.distance <= w) => {
-                // Shot, they turn on whoever shot them
+                // Shot, they turn on whoever shot them, and their team is aware
+                let from = self.players[slot].player.pos;
                 if let Some(mind) = self.npcs[i].mind.as_mut() {
                     mind.target = Some(slot);
                     mind.seen_at = now;
-                    mind.alertness = crate::mission::Alertness::Alert;
-                    mind.threat = terrorist::Threat::Deadly;
+                    mind.know(terrorist::Sign::Shot, Some(slot), from, now);
+                    let team = mind.team;
+                    self.make_aware(team, 2);
                 }
                 let effect = self.bullet_effect(ammo.as_deref(), hit.part, hit.distance);
                 next_rng(&mut self.rng);
                 let result = self.npcs[i].health.apply_hit(&hit, effect, now, (self.rng >> 33) as u32);
                 self.players[slot].target_hp = Some(self.npcs[i].health.hp);
                 ev.push(Event::Log(format!("t={now:.2} shot hit character {i}: {:?} from the {:?}, {:?}, hp now {}", hit.part, hit.facing, result, self.npcs[i].health.hp)));
-                // A death is deadly to the rest of its team
-                if let (HitResult::Killed, Some(team)) = (result, self.npcs[i].mind.as_ref().map(|m| m.team)) {
-                    for m in self.npcs.iter_mut().filter_map(|n| n.mind.as_mut()).filter(|m| m.team == team) {
-                        m.threat = terrorist::Threat::Deadly;
-                    }
-                }
                 let text = match result {
                     HitResult::Killed => {
                         self.players[slot].kills += 1;

@@ -37,19 +37,67 @@ pub const CREEP_SPEED: f32 = 257.0;
 /// A sound that carries this far is gunfire or a blast, not footsteps or a door
 const LOUD: f32 = 5000.0;
 
-/// How sure a terrorist is of a threat, as the mission's triggers grade it
+/// A noise a terrorist may hear: footsteps, which do not carry through walls, or any other
+/// sound
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Noise {
+    Footstep,
+    Sound,
+}
+
+/// How sure a terrorist is of a threat, as the mission's triggers grade it (0x61e8d0): the
+/// worst of the threats it knows of
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Threat {
     #[default]
     None,
-    /// It heard something: footsteps, a door
+    /// It heard something quiet: a door, or footsteps through a wall
     Suspicious,
-    /// It heard gunfire or a blast
+    /// It heard footsteps or gunfire far off
     Distant,
-    /// It sees an enemy
+    /// It heard them near, saw an enemy a while ago, or was shot
     Immediate,
-    /// It was shot, or one of its team was killed
+    /// It sees an enemy now
     Deadly,
+}
+
+/// A threat a terrorist knows of, and when it last noticed it (the original keeps five, 0x61e680)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Known {
+    pub sign: Sign,
+    /// The player it is, when known
+    pub who: Option<usize>,
+    pub at: V3,
+    pub since: f32,
+}
+
+/// How a terrorist came to know of a threat
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sign {
+    Seen,
+    Shot,
+    Heard,
+    /// A door, or footsteps through a wall
+    Quiet,
+}
+
+/// The most threats a terrorist keeps track of
+const KNOWN: usize = 5;
+/// Heard nearer than this, a threat is Immediate, else Distant (0x61e8d0)
+const NEAR_THREAT: f32 = 2000.0;
+/// Seconds a quiet threat is remembered, and any other (0x61ee60; 15 for whatever its method
+/// +0x10 picks out, hostages perhaps)
+const FORGET_QUIET: f32 = 5.0;
+const FORGET_THREAT: f32 = 40.0;
+/// Seconds of nothing new after which a suspicious terrorist is bored again (0x61e4b0)
+const CALM_SECONDS: f32 = 30.0;
+
+/// What a team's members are sure of, which its trigger plans go by: which threat levels and
+/// which awarenesses (0 none, 1 suspicious, 2 aware) any of them has
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TeamState {
+    pub threats: [bool; 5],
+    pub awareness: [bool; 3],
 }
 
 /// A team's orders from its mission: its plan, the plans it turns to when set off, and the
@@ -146,9 +194,16 @@ pub struct Mind {
     pub orders: Rc<Orders>,
     pub active: Option<usize>,
     pub fired: Vec<bool>,
-    /// How sure they are of a threat, and whether they heard gunfire (`Trigger Sound Combat`)
+    /// How sure they are of a threat, from what they know of, and whether they heard gunfire
+    /// (`Trigger Sound Combat`)
     pub threat: Threat,
+    pub known: Vec<Known>,
     pub heard_gunfire: bool,
+    /// How aware they are that something is up (0 none, 1 suspicious, 2 aware), when that was
+    /// last raised, and the alertness the mission gave them, which it never falls below
+    pub awareness: u8,
+    pub aware_at: f32,
+    pub start: Alertness,
     /// Where they are on their plan's way: the step, the loop it is in, the step their walking
     /// is for (none when it is to see what they heard), and the speed it set
     pub step: usize,
@@ -189,7 +244,8 @@ impl Mind {
     pub fn new(alertness: Alertness, skill: f32, self_control: f32, sight: f32, gun: Gun, magazine: u32, magazines: u32) -> Mind {
         Mind {
             alertness, skill, self_control, sight, target: None, seen_at: 0.0, aim: Aim::default(), aim_dir: None, swing: 0.0, quick: false, heard: None, asked: None, seek: None, path: Vec::new(), gait: Gait::Walk,
-            team: 0, orders: Rc::new(Orders::default()), active: None, fired: Vec::new(), threat: Threat::None, heard_gunfire: false,
+            team: 0, orders: Rc::new(Orders::default()), active: None, fired: Vec::new(), threat: Threat::None, known: Vec::new(), heard_gunfire: false,
+            awareness: 0, aware_at: 0.0, start: alertness,
             step: 0, loop_at: None, errand: None, speed: None, zones: Vec::new(), pause_until: 0.0, gun,
             ammo: magazine, magazines: magazines.saturating_sub(1), magazine, reload_until: None, next_shot: 0.0,
             sidearm: None, spent: None, blocked_since: None,
@@ -215,16 +271,17 @@ impl Mind {
     }
 
     /// Turn to the first trigger plan set off that has not gone off yet, by its priority, given
-    /// how sure its `team` is of a threat, how sure `anyone` is, and whether a threat is known to
-    /// be in a zone. Which, if one.
-    pub fn react(&mut self, team: Threat, anyone: Threat, in_zone: impl Fn(u32) -> bool) -> Option<usize> {
+    /// what its `team` is sure of and whether a threat is known to be in a zone. Which, if one.
+    /// A threat or awareness condition holds while one of the team is at just that level, as
+    /// in the original (0x5f8e80): a team that goes straight to Deadly skips Immediate.
+    pub fn react(&mut self, team: TeamState, in_zone: impl Fn(u32) -> bool) -> Option<usize> {
         let holds = |c: &Condition| match c {
-            Condition::GloballySuspicious => anyone >= Threat::Suspicious,
-            Condition::GloballyAware => anyone >= Threat::Immediate,
-            Condition::SuspiciousThreat => team >= Threat::Suspicious,
-            Condition::DistantThreat => team >= Threat::Distant,
-            Condition::ImmediateThreat => team >= Threat::Immediate,
-            Condition::DeadlyThreat => team >= Threat::Deadly,
+            Condition::GloballySuspicious => team.awareness[1],
+            Condition::GloballyAware => team.awareness[2],
+            Condition::SuspiciousThreat => team.threats[Threat::Suspicious as usize],
+            Condition::DistantThreat => team.threats[Threat::Distant as usize],
+            Condition::ImmediateThreat => team.threats[Threat::Immediate as usize],
+            Condition::DeadlyThreat => team.threats[Threat::Deadly as usize],
             // No alarms yet
             Condition::Sound(kind) => kind.eq_ignore_ascii_case("Combat") && self.heard_gunfire,
             Condition::ThreatInZone(zone) => in_zone(*zone),
@@ -247,6 +304,61 @@ impl Mind {
             self.path.clear();
         }
         Some(k)
+    }
+
+    /// Note a threat, or that one it knows of is still there: the same sign within 50 units
+    /// of where it was (0x61e680). With no room for it, the oldest is forgotten.
+    pub fn know(&mut self, sign: Sign, who: Option<usize>, at: V3, now: f32) {
+        let near = |k: &Known| k.sign == sign && k.who == who && super::dist3(k.at, at) < 50.0;
+        if let Some(k) = self.known.iter_mut().find(|k| near(k)) {
+            (k.at, k.since) = (at, now);
+            return;
+        }
+        if self.known.len() >= KNOWN {
+            let oldest = (0..self.known.len()).min_by(|&a, &b| self.known[a].since.total_cmp(&self.known[b].since)).unwrap();
+            self.known.remove(oldest);
+        }
+        self.known.push(Known { sign, who, at, since: now });
+    }
+
+    /// Forget the threats it has not noticed for long, and those that are `gone` (0x61ee60)
+    pub fn forget(&mut self, now: f32, gone: impl Fn(usize) -> bool) {
+        self.known.retain(|k| {
+            let keep = if k.sign == Sign::Quiet { FORGET_QUIET } else { FORGET_THREAT };
+            now - k.since <= keep && !k.who.is_some_and(&gone)
+        });
+    }
+
+    /// How sure it is of a threat, standing at `feet` (0x61e8d0)
+    pub fn rate(&self, feet: V3, now: f32) -> Threat {
+        self.known.iter().map(|k| match k.sign {
+            Sign::Seen if k.since >= now => Threat::Deadly,
+            Sign::Seen | Sign::Shot => Threat::Immediate,
+            Sign::Heard if super::dist3(k.at, feet) < NEAR_THREAT => Threat::Immediate,
+            Sign::Heard => Threat::Distant,
+            Sign::Quiet => Threat::Suspicious,
+        }).max().unwrap_or_default()
+    }
+
+    /// Become as aware as `level`, if more so, and as alert (0x61e530, 0x612fd0): never below
+    /// the alertness its mission gave it, and never less than alert once it is
+    pub fn aware(&mut self, level: u8, now: f32) {
+        let floor = self.start as u8;
+        if level > self.awareness && level >= floor {
+            self.awareness = level;
+        }
+        self.aware_at = now;
+        if self.alertness != Alertness::Alert && level >= floor {
+            self.alertness = [Alertness::Bored, Alertness::Ready, Alertness::Alert][level.min(2) as usize];
+        }
+    }
+
+    /// Suspicious, with nothing new for a while, it is bored again, though still suspicious
+    /// (0x61e4b0)
+    pub fn calm(&mut self, now: f32) {
+        if self.awareness == 1 && now - self.aware_at > CALM_SECONDS && (self.start as u8) < 1 {
+            self.aware(0, now);
+        }
     }
 
     /// The next place its plan's way sends it, past the steps that need no walking: patrolling
@@ -384,7 +496,7 @@ impl super::Sim {
     /// sees the players it can, turns toward the one it is after, and fires when its spread lets
     /// it; it stops to flinch and reloads when its magazine is empty. Hearing something makes it
     /// alert, and it turns toward it with its weapon up.
-    pub(super) fn terrorists(&mut self, dt: f32, noises: &[(V3, f32, bool)], ev: &mut Vec<super::Event>) {
+    pub(super) fn terrorists(&mut self, dt: f32, noises: &[(V3, f32, Noise)], ev: &mut Vec<super::Event>) {
         // Where they can walk, worked out the first time any of them is about
         if self.nav.is_none() && self.npcs.iter().any(|n| n.mind.is_some()) {
             // From where they stand, where players come in, and where they are
@@ -400,33 +512,31 @@ impl super::Sim {
         let (stand_eye, kneel_eye) = (params.eye_height, params.crouch_eye_height);
         let player_rooms: Vec<Vec<u32>> = self.players.iter().map(|p| self.rooms_at(p.player.pos, p.current_room)).collect();
         // What each team is sure of, and anyone, sets off their trigger plans
-        let mut teams: std::collections::HashMap<usize, Threat> = std::collections::HashMap::new();
-        let mut anyone = Threat::None;
+        let mut teams: std::collections::HashMap<usize, TeamState> = std::collections::HashMap::new();
         for m in self.npcs.iter().filter(|n| !n.health.is_dead()).filter_map(|n| n.mind.as_ref()) {
             let t = teams.entry(m.team).or_default();
-            *t = (*t).max(m.threat);
-            anyone = anyone.max(m.threat);
+            t.threats[m.threat as usize] = true;
+            t.awareness[m.awareness.min(2) as usize] = true;
         }
-        // Where threats are known to be: the players they fight, and what they have just heard
+        // Where threats are known to be
         let mut threat_rooms: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for m in self.npcs.iter().filter(|n| !n.health.is_dead()).filter_map(|n| n.mind.as_ref()) {
-            if let Some(p) = m.target.and_then(|t| self.players.get(t)) {
-                threat_rooms.extend(self.rooms_at(p.player.pos, p.current_room));
-            }
-            if let Some((at, _)) = m.heard.filter(|&(_, t)| now - t < HEARD_SECONDS) {
-                threat_rooms.extend(self.visibility.player_rooms(&self.level, at, None));
+            for k in &m.known {
+                threat_rooms.extend(self.visibility.player_rooms(&self.level, k.at, None));
             }
         }
         for (i, n) in self.npcs.iter_mut().enumerate().filter(|(_, n)| !n.health.is_dead()) {
             let Some(m) = n.mind.as_mut() else { continue };
             let zones = m.orders.clone();
             let in_zone = |z: u32| zones.zones.get(&z).is_some_and(|rooms| rooms.iter().any(|r| threat_rooms.contains(r)));
-            if let Some(k) = m.react(teams.get(&m.team).copied().unwrap_or_default(), anyone, in_zone) {
+            if let Some(k) = m.react(teams.get(&m.team).copied().unwrap_or_default(), in_zone) {
                 let r = &m.orders.reactions[k];
                 ev.push(super::Event::Log(format!("t={now:.2} character {i} turns to \"{}\": {:?} {:?}", r.name, r.plan.roe, r.plan.speed)));
             }
         }
         let mut searches = SEARCHES_PER_TICK;
+        // How aware each makes its team, which it passes on when the tick is done
+        let mut spread: Vec<(usize, u8)> = Vec::new();
         for i in 0..self.npcs.len() {
             let npc = &self.npcs[i];
             let Some(mut mind) = npc.mind.clone() else { continue };
@@ -438,20 +548,32 @@ impl super::Sim {
             let eye = [npc.pos[0], npc.floor + if kneel { kneel_eye } else { stand_eye }, npc.pos[2]];
             let rooms = self.rooms_at([npc.pos[0], npc.floor, npc.pos[2]], None);
 
-            // The nearest noise it hears: in reach, and through walls only half as far. Not its own.
-            let hears = noises.iter().zip(&noise_rooms).filter_map(|(&(at, reach, through_walls), rooms_there)| {
-                let rooms_there: &Vec<u32> = rooms_there;
+            // The nearest noise it hears: in reach, and through walls only half as far, faintly.
+            // Not its own.
+            let hears = noises.iter().zip(&noise_rooms).filter_map(|(&(at, reach, noise), rooms_there)| {
                 let d = super::dist3(eye, at);
                 let across = ((at[0] - eye[0]).powi(2) + (at[2] - eye[2]).powi(2)).sqrt();
-                let muffled = through_walls && d <= reach * MUFFLED;
-                let heard = across > 60.0 && d <= reach && (muffled || self.line_clear(eye, &rooms, at, rooms_there));
-                heard.then_some((at, d, rooms_there, reach))
+                if across <= 60.0 || d > reach {
+                    return None;
+                }
+                let muffled = noise == Noise::Sound && d <= reach * MUFFLED;
+                // A quiet sound means as much heard faintly or not
+                let clear = !(muffled && reach < LOUD) && self.line_clear(eye, &rooms, at, rooms_there);
+                (clear || muffled).then_some((at, d, reach, noise, !clear))
             }).min_by(|a, b| a.1.total_cmp(&b.1));
-            if let Some((at, _, _, reach)) = hears {
+            if let Some((at, _, reach, noise, faint)) = hears {
                 mind.heard = Some((at, now));
-                mind.alertness = Alertness::Alert;
                 let loud = reach >= LOUD;
-                mind.threat = mind.threat.max(if loud { Threat::Distant } else { Threat::Suspicious });
+                // What it makes of it: footsteps (0x6143e0), gunfire or a blast (0x6142f0), or a
+                // quiet sound, as a door is (0x614640)
+                let (aware, sign) = match noise {
+                    Noise::Footstep => (1, Sign::Heard),
+                    Noise::Sound if loud => (if faint { 1 } else { 2 }, Sign::Heard),
+                    Noise::Sound => (1, Sign::Quiet),
+                };
+                mind.aware(aware, now);
+                spread.push((mind.team, aware));
+                mind.know(sign, None, at, now);
                 mind.heard_gunfire |= loud;
                 // With no one to fight, it goes to see if its plan says to: unless it is on its
                 // way there already. Otherwise it stays put, its weapon up toward it.
@@ -503,6 +625,7 @@ impl super::Sim {
             // The players it sees: where it would aim at each, and how far that is
             let (_, range) = mind.view();
             let mut sees: Vec<(usize, V3, f32)> = Vec::new();
+            let mut glimpsed = false;
             for (slot, p) in self.players.iter().enumerate() {
                 if !p.active || !p.controlled || p.respawn_at.is_some() {
                     continue;
@@ -521,6 +644,22 @@ impl super::Sim {
                 let clear = |to: V3| self.line_clear(eye, &rooms, to, &player_rooms[slot]);
                 if looks && (clear(body) || clear(head)) {
                     sees.push((slot, aim_at, dist));
+                } else if !looks && mind.awareness < 2 && !glimpsed && mind.could_see(eye, npc.yaw, body, visible * 1.75) {
+                    // Out to 1.75 times as far it glimpses them, which makes it suspicious
+                    // (0x6142d0)
+                    glimpsed = clear(body) || clear(head);
+                }
+            }
+            // A dead terrorist it sees makes it aware (0x614240)
+            let body_seen = mind.awareness < 2 && self.npcs.iter().enumerate().any(|(k, o)| {
+                let body = [o.pos[0], o.floor + 20.0, o.pos[2]];
+                k != i && o.mind.is_some() && o.health.is_dead() && mind.could_see(eye, npc.yaw, body, 1.0)
+                    && self.line_clear(eye, &rooms, body, &self.rooms_at([o.pos[0], o.floor, o.pos[2]], None))
+            });
+            for (level, so) in [(1, glimpsed), (2, body_seen)] {
+                if so {
+                    mind.aware(level, now);
+                    spread.push((mind.team, level));
                 }
             }
             // The one it is after while it sees them, else the nearest; none when it cannot fight
@@ -532,9 +671,10 @@ impl super::Sim {
             }
             match seen {
                 Some((slot, _, _)) => {
-                    // It stops where it is to fight
+                    // It stops where it is to fight. Seeing them makes it and its team aware
+                    // (0x614260).
                     mind.path.clear();
-                    mind.threat = mind.threat.max(Threat::Immediate);
+                    mind.know(Sign::Seen, Some(slot), self.players[slot].player.pos, now);
                     if mind.target != Some(slot) {
                         // A new target: its spread opens afresh, and its aim starts again from
                         // where it faces
@@ -545,7 +685,8 @@ impl super::Sim {
                     }
                     mind.target = Some(slot);
                     mind.seen_at = now;
-                    mind.alertness = Alertness::Alert;
+                    mind.aware(2, now);
+                    spread.push((mind.team, 2));
                 }
                 None => {
                     let gone = mind.target.is_some_and(|t| self.players.get(t).is_none_or(|p| !p.active || p.respawn_at.is_some()));
@@ -556,6 +697,10 @@ impl super::Sim {
                     }
                 }
             }
+            let players = &self.players;
+            mind.forget(now, |p| players.get(p).is_none_or(|p| !p.active || p.respawn_at.is_some()));
+            mind.calm(now);
+            mind.threat = mind.rate([npc.pos[0], npc.floor, npc.pos[2]], now);
             // How long it takes to get its weapon up, from what it was doing
             let frames = |m: &str| self.characters.as_ref().map_or(RAISE_SECONDS * 30.0, |c| c.frames(m));
             let (_, raise_seconds) = raise(self.npcs[i].stance, frames);
@@ -749,7 +894,18 @@ impl super::Sim {
                 self.npcs[i].mind = Some(mind);
             }
         }
+        for (team, level) in spread {
+            self.make_aware(team, level);
+        }
         self.keep_apart(dt);
+    }
+
+    /// Makes a team as aware as `level`, as one of it passes on what it knows (0x61e530)
+    pub(super) fn make_aware(&mut self, team: usize, level: u8) {
+        let now = self.time;
+        for m in self.npcs.iter_mut().filter(|n| !n.health.is_dead()).filter_map(|n| n.mind.as_mut()).filter(|m| m.team == team) {
+            m.aware(level, now);
+        }
     }
 
     /// Pushes apart terrorists that stand closer than two bodies' width. Teammates walk the
@@ -843,8 +999,11 @@ impl super::Sim {
                     super::dist3(eye, body), m.could_see(eye, n.yaw, body, 1.0), clear(body), clear(head));
             }
             let active = m.active.and_then(|k| m.orders.reactions.get(k)).map_or("its plan", |r| r.name.as_str());
-            t += &format!("\n    {:?}, threat {:?}, following {active} ({:?}, {:?}), step {}",
-                m.alertness, m.threat, m.plan().roe, m.plan().speed, m.step);
+            t += &format!("\n    {:?}, awareness {}, threat {:?}, following {active} ({:?}, {:?}), step {}",
+                m.alertness, m.awareness, m.threat, m.plan().roe, m.plan().speed, m.step);
+            for k in &m.known {
+                t += &format!("\n    knows of {:?} {:?} at ({:.0}, {:.0}, {:.0}) {:.1}s ago", k.sign, k.who, k.at[0], k.at[1], k.at[2], now - k.since);
+            }
             t += &format!("\n    target {:?}, last seen {:.1}s ago, aiming {}, ammo {}/{} and {} magazines{}",
                 m.target, now - m.seen_at, n.aiming, m.ammo, m.magazine, m.magazines, if m.reload_until.is_some() { ", reloading" } else { "" });
             if m.sidearm.is_some() {
@@ -932,6 +1091,123 @@ mod tests {
     }
 
     /// A terrorist in the box room at `at`, facing `yaw`, and a player standing still across it
+    #[test]
+    fn a_threat_is_deadly_while_seen_and_fades_as_the_original_forgets_it() {
+        let mut m = mind(Alertness::Bored);
+        let feet = [0.0, 0.0, 0.0];
+        m.know(Sign::Seen, Some(0), [500.0, 0.0, 0.0], 1.0);
+        assert_eq!(m.rate(feet, 1.0), Threat::Deadly);
+        // Seen a while ago: Immediate, and forgotten after 40 seconds
+        assert_eq!(m.rate(feet, 2.0), Threat::Immediate);
+        m.forget(41.0, |_| false);
+        assert_eq!(m.rate(feet, 41.0), Threat::Immediate);
+        m.forget(41.5, |_| false);
+        assert_eq!(m.rate(feet, 41.5), Threat::None);
+        // Once the player is gone it is forgotten at once
+        m.know(Sign::Seen, Some(0), [500.0, 0.0, 0.0], 50.0);
+        m.forget(50.1, |p| p == 0);
+        assert!(m.known.is_empty());
+        // Heard: Immediate within 2000 units of where it stands, else Distant
+        m.know(Sign::Heard, None, [2500.0, 0.0, 0.0], 60.0);
+        assert_eq!(m.rate(feet, 60.0), Threat::Distant);
+        assert_eq!(m.rate([1000.0, 0.0, 0.0], 60.0), Threat::Immediate);
+        // A quiet one is Suspicious, and forgotten after 5 seconds
+        let mut m = mind(Alertness::Bored);
+        m.know(Sign::Quiet, None, [100.0, 0.0, 0.0], 0.0);
+        assert_eq!(m.rate(feet, 0.0), Threat::Suspicious);
+        m.forget(5.5, |_| false);
+        assert_eq!(m.rate(feet, 5.5), Threat::None);
+        // The same threat a little further on is the same one; it keeps five at most
+        for k in 0..8 {
+            m.know(Sign::Heard, None, [k as f32 * 30.0, 0.0, 0.0], k as f32);
+        }
+        m.know(Sign::Seen, Some(1), [0.0, 0.0, 900.0], 9.0);
+        assert_eq!(m.known.len(), 2);
+        for k in 0..6 {
+            m.know(Sign::Heard, None, [k as f32 * 1000.0, 0.0, 5000.0], 10.0 + k as f32);
+        }
+        assert_eq!(m.known.len(), 5);
+        assert!(m.known.iter().all(|k| k.since >= 11.0));
+    }
+
+    #[test]
+    fn awareness_spreads_through_a_team_and_a_suspicious_one_calms_down() {
+        let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
+        let mate = sim.npcs[0].clone();
+        let other = crate::sim::characters::Npc { mind: mate.mind.clone().map(|m| m.with_orders(1, Rc::new(Orders::default()))), ..mate.clone() };
+        sim.npcs.push(mate);
+        sim.npcs.push(other);
+        sim.make_aware(0, 1);
+        let state = |sim: &crate::sim::Sim, k: usize| sim.npcs[k].mind.as_ref().map(|m| (m.awareness, m.alertness)).unwrap();
+        assert_eq!([state(&sim, 0), state(&sim, 1), state(&sim, 2)], [(1, Alertness::Ready), (1, Alertness::Ready), (0, Alertness::Bored)]);
+        // With nothing new for 30 seconds, it is bored again, though still suspicious
+        let m = sim.npcs[0].mind.as_mut().unwrap();
+        m.calm(20.0);
+        assert_eq!(m.alertness, Alertness::Ready);
+        m.calm(31.0);
+        assert_eq!((m.awareness, m.alertness), (1, Alertness::Bored));
+        // Aware, it is alert for good
+        m.aware(2, 40.0);
+        m.calm(100.0);
+        assert_eq!((m.awareness, m.alertness), (2, Alertness::Alert));
+        // One the mission makes ready never falls below it
+        let mut m = mind(Alertness::Ready);
+        m.aware(1, 0.0);
+        m.calm(100.0);
+        assert_eq!(m.alertness, Alertness::Ready);
+    }
+
+    #[test]
+    fn a_threat_trigger_goes_off_only_at_its_own_level() {
+        let when = |c: Condition| Reaction { name: "go".into(), priority: 0, only: false, when: vec![c], plan: Plan::default() };
+        let mut m = mind(Alertness::Bored).with_orders(0, Rc::new(Orders { reactions: vec![when(Condition::ImmediateThreat)], ..Orders::default() }));
+        let mut team = TeamState::default();
+        team.threats[Threat::Deadly as usize] = true;
+        assert_eq!(m.react(team, |_| false), None);
+        team.threats[Threat::Immediate as usize] = true;
+        assert_eq!(m.react(team, |_| false), Some(0));
+        let mut m = mind(Alertness::Bored).with_orders(0, Rc::new(Orders { reactions: vec![when(Condition::GloballySuspicious)], ..Orders::default() }));
+        let mut team = TeamState::default();
+        team.awareness[2] = true;
+        assert_eq!(m.react(team, |_| false), None);
+        team.awareness[1] = true;
+        assert_eq!(m.react(team, |_| false), Some(0));
+    }
+
+    #[test]
+    fn a_terrorist_that_sees_a_player_is_sure_of_a_deadly_threat_and_its_team_aware() {
+        // Facing the player across the room
+        let mut sim = standoff([0.0, 0.0, 300.0], 180.0);
+        let mate = crate::sim::characters::Npc { pos: [300.0, 0.0, 300.0], yaw: 0.0, ..sim.npcs[0].clone() };
+        sim.npcs.push(mate);
+        wait(&mut sim, 2.0 * crate::sim::TICK);
+        let m = sim.npcs[0].mind.as_ref().unwrap();
+        assert_eq!((m.threat, m.awareness, m.alertness, m.target), (Threat::Deadly, 2, Alertness::Alert, Some(0)));
+        let mate = sim.npcs[1].mind.as_ref().unwrap();
+        assert_eq!((mate.awareness, mate.alertness), (2, Alertness::Alert));
+    }
+
+    #[test]
+    fn a_terrorist_glimpses_a_player_too_far_to_see_and_grows_suspicious() {
+        // It sees 300 units: bored, its view reaches 590, and it glimpses out to 1.75 times that
+        let mut sim = standoff([0.0, 0.0, 300.0], 180.0);
+        sim.npcs[0].mind.as_mut().unwrap().sight = 300.0;
+        wait(&mut sim, 0.5);
+        let m = sim.npcs[0].mind.as_ref().unwrap();
+        assert_eq!((m.awareness, m.alertness, m.target, m.threat), (1, Alertness::Ready, None, Threat::None));
+    }
+
+    #[test]
+    fn a_terrorist_that_sees_a_dead_one_becomes_aware() {
+        let mut sim = standoff([0.0, 0.0, 300.0], 90.0);
+        let dead = crate::sim::characters::Npc { pos: [400.0, 0.0, 300.0], ..sim.npcs[0].clone() };
+        sim.npcs.push(dead);
+        sim.npcs[1].health.state = crate::combat::NpcState::Dead { motion: "thdu_1", start: 0.0 };
+        wait(&mut sim, 2.0 * crate::sim::TICK);
+        let m = sim.npcs[0].mind.as_ref().unwrap();
+        assert_eq!((m.awareness, m.alertness, m.threat), (2, Alertness::Alert, Threat::None));
+    }
+
     fn standoff(at: V3, yaw: f32) -> crate::sim::Sim {
         use crate::collision::{CollisionWorld, Params};
         let level = Rc::new(crate::demo::map());
@@ -1028,8 +1304,10 @@ mod tests {
         for _ in 0..30 {
             sim.tick(&[moving(true)], crate::sim::TICK);
         }
-        assert!(sim.npcs[0].mind.as_ref().unwrap().heard.is_some());
-        assert_eq!(sim.npcs[0].mind.as_ref().unwrap().alertness, Alertness::Alert);
+        // Footsteps make it suspicious, and ready (0x6143e0)
+        let m = sim.npcs[0].mind.as_ref().unwrap();
+        assert!(m.heard.is_some());
+        assert_eq!((m.alertness, m.awareness, m.threat), (Alertness::Ready, 1, Threat::Immediate));
         // It turns round, sees them and fires
         let shots = wait(&mut sim, 3.0);
         assert!(!shots.is_empty());
@@ -1052,7 +1330,7 @@ mod tests {
         let orders = Orders { plan: Plan { roe: Roe::Investigate, ..Plan::default() }, ..Orders::default() };
         let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Rc::new(orders));
         sim.npcs[0].mind = Some(mind);
-        sim.noises.push(([200.0, 50.0, 300.0], 1000.0, true));
+        sim.noises.push(([200.0, 50.0, 300.0], 1000.0, Noise::Sound));
         let mut walked = false;
         for _ in 0..60 {
             wait(&mut sim, crate::sim::TICK);
@@ -1068,25 +1346,25 @@ mod tests {
     fn a_defending_terrorist_spooks_but_stays_put_and_its_trigger_plan_sends_it_running() {
         // Defending, it turns its weapon toward a sound but stays where it is
         let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
-        sim.noises.push(([200.0, 50.0, 300.0], 1000.0, true));
+        sim.noises.push(([200.0, 50.0, 300.0], 1000.0, Noise::Sound));
         wait(&mut sim, 0.5);
         let n = &sim.npcs[0];
         assert!(n.aiming && !n.walking && n.pos == [0.0, 0.0, 300.0]);
         assert_eq!(n.mind.as_ref().unwrap().threat, Threat::Suspicious);
-        // Its team's plan says to advance at a run on gunfire: it does
+        // Its team's plan says to advance at a run on gunfire near by: it does
         let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
         let rush = Reaction {
-            name: "Rush".into(), priority: 0, only: false, when: vec![Condition::DistantThreat],
+            name: "Rush".into(), priority: 0, only: false, when: vec![Condition::ImmediateThreat],
             plan: Plan { roe: Roe::Advance, speed: Speed::Blitz, ..Plan::default() },
         };
         let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Rc::new(Orders { reactions: vec![rush], ..Orders::default() }));
         sim.npcs[0].mind = Some(mind);
-        sim.noises.push(([200.0, 50.0, 300.0], 10000.0, true));
+        sim.noises.push(([200.0, 50.0, 300.0], 10000.0, Noise::Sound));
         wait(&mut sim, 2.0 * crate::sim::TICK);
-        sim.noises.push(([200.0, 50.0, 300.0], 10000.0, true));
+        sim.noises.push(([200.0, 50.0, 300.0], 10000.0, Noise::Sound));
         wait(&mut sim, crate::sim::TICK);
         let (n, m) = (&sim.npcs[0], sim.npcs[0].mind.as_ref().unwrap());
-        assert_eq!((m.active, m.plan().roe, m.threat), (Some(0), Roe::Advance, Threat::Distant));
+        assert_eq!((m.active, m.plan().roe, m.threat), (Some(0), Roe::Advance, Threat::Immediate));
         assert!(n.walking && n.gait == Gait::Run, "{:?}", n.pos);
     }
 
@@ -1138,9 +1416,9 @@ mod tests {
         }).collect();
         assert_eq!(rooms, [10, 11, 7].into_iter().collect());
         // A threat in zone 9 sets off its search, which rules out the other of its priority
-        assert_eq!(m.react(Threat::None, Threat::None, |z| z == 9), Some(0));
+        assert_eq!(m.react(TeamState::default(), |z| z == 9), Some(0));
         assert_eq!(m.next_place(3), Some(Place::Room(99)));
-        assert_eq!(m.react(Threat::None, Threat::None, |z| z == 1), None);
+        assert_eq!(m.react(TeamState::default(), |z| z == 1), None);
     }
 
     #[test]
@@ -1257,18 +1535,18 @@ mod tests {
         let shot = [130_000.0, 33332.0, 35006.4];
         let asked = |sim: &crate::sim::Sim| sim.npcs[0].mind.as_ref().unwrap().asked.map(|(_, t)| t);
         let mut ev = Vec::new();
-        sim.terrorists(0.1, &[(shot, 1e6, true)], &mut ev);
+        sim.terrorists(0.1, &[(shot, 1e6, Noise::Sound)], &mut ev);
         let first = asked(&sim).expect("looked for a way");
         assert!(sim.npcs[0].mind.as_ref().unwrap().path.is_empty());
         // Ten shots a second from the same place: it does not look again for a while
         for _ in 0..40 {
             sim.time += 0.1;
-            sim.terrorists(0.1, &[(shot, 1e6, true)], &mut ev);
+            sim.terrorists(0.1, &[(shot, 1e6, Noise::Sound)], &mut ev);
         }
         assert_eq!(asked(&sim), Some(first));
         // Later, it does
         sim.time += ASK_SAME;
-        sim.terrorists(0.1, &[(shot, 1e6, true)], &mut ev);
+        sim.terrorists(0.1, &[(shot, 1e6, Noise::Sound)], &mut ev);
         assert!(asked(&sim) > Some(first));
     }
 
@@ -1279,6 +1557,13 @@ mod tests {
         assert_eq!(report.len(), 1);
         assert!(report[0].starts_with("#0 team 0: at (30098, "), "{}", report[0]);
         assert!(report[0].contains("clear line to body false head false"), "{}", report[0]);
+        assert!(report[0].contains("Alert, awareness 0, threat None"), "{}", report[0]);
+        // And what it knows of
+        let Some(mut sim) = outside_205() else { return };
+        sim.npcs[0].mind.as_mut().unwrap().know(Sign::Heard, None, [1.0, 2.0, 3.0], 0.0);
+        sim.time = 1.5;
+        let report = sim.terrorist_report(0);
+        assert!(report[0].contains("knows of Heard None at (1, 2, 3) 1.5s ago"), "{}", report[0]);
     }
 
     #[test]
@@ -1289,7 +1574,7 @@ mod tests {
             .all(|(_, s)| s.closed());
         assert!(shut(&sim));
         let mut ev = Vec::new();
-        sim.terrorists(0.1, &[([30828.8, 33332.0, 35006.4], 10_000.0, true)], &mut ev);
+        sim.terrorists(0.1, &[([30828.8, 33332.0, 35006.4], 10_000.0, Noise::Sound)], &mut ev);
         assert!(!sim.npcs[0].mind.as_ref().unwrap().path.is_empty());
         let mut opened = false;
         for _ in 0..(20.0 / crate::sim::TICK) as usize {
@@ -1397,7 +1682,7 @@ mod tests {
         let mut went = Vec::new();
         for k in 0..30 {
             let mut ev = Vec::new();
-            let shot = [([at[0], at[1] + 150.0, at[2]], 6000.0, true)];
+            let shot = [([at[0], at[1] + 150.0, at[2]], 6000.0, Noise::Sound)];
             sim.terrorists(crate::sim::TICK, if k == 0 { &shot } else { &[] }, &mut ev);
             sim.time += crate::sim::TICK;
             let now = ev.iter().filter(|e| matches!(e, crate::sim::Event::Log(l) if l.contains("goes to see"))).count();
@@ -1460,7 +1745,7 @@ mod tests {
         sim.add_player(at);
         sim.god = true;
         wait(&mut sim, 0.1);
-        sim.noises.push(([at[0], at[1] + 150.0, at[2]], 6000.0, true));
+        sim.noises.push(([at[0], at[1] + 150.0, at[2]], 6000.0, Noise::Sound));
         wait(&mut sim, 20.0);
         let near: Vec<usize> = (0..sim.npcs.len()).filter(|&i| {
             let p = sim.npcs[i].pos;
