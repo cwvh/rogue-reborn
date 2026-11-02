@@ -26,6 +26,40 @@ pub const ALERT_TURN_RATE: f32 = 270.0;
 pub const RAISE_SECONDS: f32 = 0.5;
 /// The original's motions for standing up with the rifle from leaning and from slouching
 pub const RAISE_MOTIONS: [&str; 2] = ["rmt_llup", "rmt_slup"];
+
+/// The motions a terrorist's arms play with a weapon, each standing and then kneeling
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Arms {
+    pub hold: [&'static str; 2],
+    pub fire: [&'static str; 2],
+    pub reload: Option<[&'static str; 2]>,
+}
+
+/// The arms a terrorist's weapon gives it, as the original's tables have them for terrorists:
+/// the hold by how the weapon is held (0x5c7f70), firing by its kind (0x5c84c0), and the
+/// reload by how it reloads (0x5c87d0)
+pub fn arms(w: &crate::weapon::Weapon) -> Arms {
+    let hold = match w.hold.as_str() {
+        "pistol" | "compact" => ["rwru_p1", "rwrc_p1"],
+        "subgun" => ["rwru_s1", "rwrc_s1"],
+        "long arm" | "sniper" => ["rwru_l1", "rwrc_l1"],
+        _ => ["rmr_up", "rmr_cr"],
+    };
+    let fire = match w.class.as_str() {
+        "subgun" => ["rwru_s9", "twrc_s9"],
+        "long arm" | "sniper" | "bolt action" => ["rwru_l9", "rwrc_l9"],
+        "grenade launcher" => ["rwru_s9", "rwrc_s9"],
+        _ => ["rwru_p9", "rwrc_p9"],
+    };
+    let reload = match w.reload_class.as_str() {
+        "pistol" => Some(["ter_pis_mag_change", "mg_w1_cr"]),
+        "subgun" => Some(["ter_mag_change", "twm_mp3"]),
+        "shotgun" => Some(["twm_shu_loop", "twm_shu_loop"]),
+        "bolt action" => Some(["twm_shu", "twm_snc"]),
+        _ => None,
+    };
+    Arms { hold, fire, reload }
+}
 /// Through walls a sound carries this much of its reach (a guess)
 pub const MUFFLED: f32 = 0.5;
 /// Seconds a terrorist who heard something keeps its weapon up toward it (a guess)
@@ -255,7 +289,9 @@ pub struct Mind {
     /// Full magazines left
     pub magazines: u32,
     pub magazine: u32,
+    /// When its reload ends, and how long it takes
     pub reload_until: Option<f32>,
+    pub reload_for: f32,
     pub next_shot: f32,
     /// The sidearm it has not yet drawn: which of the characters' weapons it is, its gun, and
     /// its magazine and how many it has
@@ -290,7 +326,7 @@ impl Mind {
             team: 0, orders: Rc::new(Orders::default()), active: None, fired: Vec::new(), threat: Threat::None, known: Vec::new(), heard_gunfire: false,
             awareness: 0, aware_at: 0.0, start: alertness,
             step: 0, loop_at: None, errand: None, speed: None, zones: Vec::new(), pause_until: 0.0, gun,
-            ammo: magazine, magazines: magazines.saturating_sub(1), magazine, reload_until: None, next_shot: 0.0,
+            ammo: magazine, magazines: magazines.saturating_sub(1), magazine, reload_until: None, reload_for: super::RELOAD_SECONDS, next_shot: 0.0,
             sidearm: None, spent: None, blocked_since: None, member: 0, covering: false, engage_hostages: false, prey: None,
         }
     }
@@ -657,6 +693,7 @@ impl super::Sim {
                     // Empty, so that drawing it ends with loading its first magazine
                     (mind.gun, mind.magazine, mind.magazines, mind.ammo) = (gun, magazine, magazines, 0);
                     mind.reload_until = Some(now + DRAW_SECONDS);
+                    mind.reload_for = DRAW_SECONDS;
                     mind.aim = Aim::default();
                     draw = Some(weapon);
                     ev.push(super::Event::Log(format!("t={now:.2} character {i} draws its sidearm")));
@@ -796,6 +833,7 @@ impl super::Sim {
             if let Some(weapon) = draw {
                 npc.weapon = Some(weapon);
             }
+            npc.reload = mind.reload_until.map(|t| 1.0 - (t - now) / mind.reload_for.max(1e-3));
             // Its weapon up for someone it sees, or toward what it heard
             let listening = mind.heard.filter(|&(_, t)| now - t < HEARD_SECONDS && mind.spent.is_none());
             let aiming = mind.target.is_some() || listening.is_some() || prey.is_some();
@@ -954,8 +992,10 @@ impl super::Sim {
                 let weapon = npc.weapon.and_then(|w| self.characters.as_ref()?.weapons.get(w)).map(|(_, w)| w);
                 mind.ammo -= 1;
                 mind.next_shot = now + weapon.map_or(0.1, |w| w.interval());
+                // As long as its weapon's reload motion, else as long as a player's reload
                 if mind.ammo == 0 && mind.magazines > 0 {
-                    mind.reload_until = Some(now + super::RELOAD_SECONDS);
+                    mind.reload_for = self.characters.as_ref().and_then(|c| c.reload_seconds(npc.weapon, kneel)).unwrap_or(super::RELOAD_SECONDS);
+                    mind.reload_until = Some(now + mind.reload_for);
                 }
                 npc.last_shot = now;
                 (to, weapon.and_then(|w| w.sound.clone()))

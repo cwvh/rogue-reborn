@@ -186,7 +186,24 @@ from 1.7 degrees to 0.07 in 1.4 s, and it fires once that is 12 units wide at th
 A terrorist carries its kit's Secondary as well as its Primary (167 of the 330 in the missions
 do). When the primary and its magazines are empty, it draws the sidearm. The original switches
 weapons (see the flags above), but has no motion for a terrorist doing it, so ours takes a
-second (a guess), then loads the sidearm's first magazine. It still holds the sidearm as a rifle.
+second (a guess), then loads the sidearm's first magazine.
+
+A weapon file names three classes just before its model: its kind, how it reloads, and how it
+is held. An AK47 is "long arm", "subgun", "long arm"; an Uzi "machine pistol", "pistol",
+"pistol". The original picks a terrorist's motions from tables by them, with blocks of their
+own apart from the players':
+
+| | By | Pistol | Compact | Subgun | Long arm, sniper |
+| --- | --- | --- | --- | --- | --- |
+| Hold, standing and kneeling (0x5c7f70) | how it is held | `rwru_p1`, `rwrc_p1` | the same | `rwru_s1`, `rwrc_s1` | `rwru_l1`, `rwrc_l1` |
+| Fire (0x5c84c0) | its kind | `rwru_p9`, `rwrc_p9` (machine pistols too) | the same | `rwru_s9`, `twrc_s9` | `rwru_l9`, `rwrc_l9` |
+| Reload (0x5c87d0) | how it reloads | `ter_pis_mag_change`, `mg_w1_cr` | | `ter_mag_change`, `twm_mp3` | |
+
+Shotguns reload with `twm_shu_loop`, and bolt actions with `twm_shu` (`twm_snc` kneeling). With
+no hold the arms are `rmr_up` and `rmr_cr`. Ours plays these for each terrorist's weapon, and
+its reload lasts as long as its motion: 5.6 seconds standing with a rifle (167 frames), 2.4
+kneeling, and 1.7 with a pistol. The original's moving terrorists have motions of their own for
+some holds (0x5c84c0's first part); ours walk as players do.
 
 With nothing left to fire, a terrorist stops fighting. It runs from where the threat is, to the
 place farthest from it within 2500 units of walking, and cowers there. This is our own rule: we
@@ -391,8 +408,7 @@ Small enough to try out on the maps we play, and grow from:
    a sniper's rifle 0.6 s, a shotgun 0.8 s) and hurt as players' bullets do, with the weapon's own
    sound. They reload when the magazine is empty, from the magazines the kit gives them.
    They stand, or kneel when squatting or kneeling, with the gun up as a player fires.
-   Still to do: the delay the original may add before reacting, a reload and the weapons' own
-   holds in their bodies, and shotguns' pellets. Bullets do what the gunfire combat model says
+   Still to do: the delay the original may add before reacting, and shotguns' pellets. Bullets do what the gunfire combat model says
    (above).
 4. Then hearing (gunfire, footsteps), the guard and patrol plans (GuardSpot, MoveTo loops),
    triggers, and moving to cover.

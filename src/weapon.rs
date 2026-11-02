@@ -3,7 +3,7 @@
 //! Text files, one value per line, with no field names. Only the fields
 //! worked out so far are read: the magazine size and reserve ammunition
 //! (the first two integer-only lines), the sound of a shot (the first `.wav`),
-//! the kind of weapon and how it reloads (the two lines after the sounds), the
+//! the kind of weapon, how it reloads and how it is held (the three lines after the sounds), the
 //! model file (the first quoted `.qob`), the muzzle offset in model space (the
 //! first line of three numbers after it), and after the ammunition's name the
 //! numbers its spread is worked out from (see `sim::aim`).
@@ -29,6 +29,8 @@ pub struct Weapon {
     pub class: String,
     /// How it reloads: "subgun", "shotgun", "pistol" or "bolt action"
     pub reload_class: String,
+    /// How it is held: "pistol", "compact", "subgun", "long arm" or "sniper" (0x5dc7d0)
+    pub hold: String,
     /// The ammunition it fires, as the gunfire combat model names it (see `gfcm`)
     pub ammo: Option<String>,
     pub gun: Option<Gun>,
@@ -65,7 +67,7 @@ pub fn parse(text: &str) -> Result<Weapon> {
     }).context("model not found")?;
     let model = lines[model_at].trim_matches('"').to_string();
     let word = |i: Option<usize>| i.and_then(|i| lines.get(i)).map_or_else(String::new, |l| l.trim_matches('"').to_ascii_lowercase());
-    let (class, reload_class) = (word(model_at.checked_sub(3)), word(model_at.checked_sub(2)));
+    let (class, reload_class, hold) = (word(model_at.checked_sub(3)), word(model_at.checked_sub(2)), word(model_at.checked_sub(1)));
     let sound = lines.iter().find(|l| l.to_ascii_lowercase().ends_with(".wav\"")).map(|l| l.trim_matches('"').to_string());
 
     let muzzle = lines[model_at + 1..].iter().find_map(|l| {
@@ -86,7 +88,7 @@ pub fn parse(text: &str) -> Result<Weapon> {
         close: numbers[7],
     });
 
-    Ok(Weapon { id, magazine, reserve, model, muzzle, sound, class, reload_class, ammo, gun })
+    Ok(Weapon { id, magazine, reserve, model, muzzle, sound, class, reload_class, hold, ammo, gun })
 }
 
 #[cfg(test)]
@@ -105,7 +107,7 @@ mod tests {
         assert_eq!(w.model, "rsw_mp5k.qob");
         assert_eq!(w.muzzle, [0.0, -43.0, 13.0]);
         assert_eq!(w.sound.as_deref(), Some("C_sb5ks.wav"));
-        assert_eq!((w.class.as_str(), w.reload_class.as_str(), w.ammo.as_deref()), ("compact", "subgun", Some("9mmP(FMJ)")));
+        assert_eq!((w.class.as_str(), w.reload_class.as_str(), w.hold.as_str(), w.ammo.as_deref()), ("compact", "subgun", "compact", Some("9mmP(FMJ)")));
         // What sim::aim has for it
         let (gun, mp5k) = (w.gun.unwrap(), crate::sim::aim::MP5K);
         assert_eq!((gun.moving, gun.crouched, gun.recoil, gun.close), (mp5k.moving, mp5k.crouched, mp5k.recoil, mp5k.close));

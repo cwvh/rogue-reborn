@@ -55,6 +55,8 @@ pub struct Npc {
     pub mind: Option<super::terrorist::Mind>,
     /// Its name in the mission, which plans name it by
     pub name: String,
+    /// How far through a reload it is, 0 to 1
+    pub reload: Option<f32>,
 }
 
 impl Default for Npc {
@@ -62,7 +64,7 @@ impl Default for Npc {
         Npc {
             health: Health::new(), pos: [0.0; 3], floor: 0.0, yaw: 0.0, scale: [1.0; 3], stagger: 0.0,
             body: None, stance: None, weapon: None, aiming: false, last_shot: f32::NEG_INFINITY, aim_since: 0.0, walking: false, gait: Gait::Walk, mind: None,
-            name: String::new(),
+            name: String::new(), reload: None,
         }
     }
 }
@@ -100,6 +102,10 @@ pub struct Characters {
     pub idle: String,
     /// The motions players' bodies play, for posing them to be shot at
     pub player: crate::body::PlayerMotions,
+    /// Those terrorists play with each kind of arms their weapons give them, and which of
+    /// them goes with each of `weapons`
+    pub arm_sets: Vec<(super::terrorist::Arms, crate::body::PlayerMotions)>,
+    pub weapon_arms: Vec<usize>,
 }
 
 /// The motions characters play besides idling: flinches from wounds and the falls they die with
@@ -164,7 +170,7 @@ impl Characters {
             }
         }
         let player = crate::body::PlayerMotions::load(rig.as_ref().map(|r| &r.skeleton), |_, name| load_motion(name));
-        Some(Characters { model, rig, bodies: Vec::new(), weapons: Vec::new(), motions, idle: idle.to_string(), player })
+        Some(Characters { model, rig, bodies: Vec::new(), weapons: Vec::new(), motions, idle: idle.to_string(), player, arm_sets: Vec::new(), weapon_arms: Vec::new() })
     }
 
     /// The body a model makes with an actor's textures on it, loaded the first time it is
@@ -192,7 +198,13 @@ impl Characters {
         let path = find_file(Path::new("data/kit"), &Path::new(file).file_stem()?.to_string_lossy(), "wpn")?;
         match crate::weapon::read(&path) {
             Ok(w) => {
+                let arms = super::terrorist::arms(&w);
+                let set = self.arm_sets.iter().position(|(a, _)| *a == arms).unwrap_or_else(|| {
+                    self.arm_sets.push((arms, self.load_arms(arms)));
+                    self.arm_sets.len() - 1
+                });
                 self.weapons.push((file.to_string(), w));
+                self.weapon_arms.push(set);
                 Some(self.weapons.len() - 1)
             }
             Err(e) => {
@@ -200,6 +212,42 @@ impl Characters {
                 None
             }
         }
+    }
+
+    /// The players' motions with a terrorist's arms in place of theirs
+    fn load_arms(&self, arms: super::terrorist::Arms) -> crate::body::PlayerMotions {
+        let reload = arms.reload.unwrap_or(["", ""]);
+        let skeleton = self.rig.as_ref().map(|r| &r.skeleton);
+        let mut set = crate::body::PlayerMotions::load(skeleton, |slot, default| {
+            let name = match slot {
+                "idle" => arms.hold[0],
+                "crouch_idle" => arms.hold[1],
+                "fire" => arms.fire[0],
+                "reload" | "reload_empty" => reload[0],
+                "crouch_reload" | "crouch_reload_empty" => reload[1],
+                _ => default,
+            };
+            (!name.is_empty()).then(|| load_motion(name)).flatten()
+        });
+        set.crouch_fire = load_motion(arms.fire[1]).map(|mut m| {
+            if let Some(skel) = skeleton {
+                skel.plant(&mut m, 0.0);
+            }
+            m
+        });
+        set
+    }
+
+    /// The motions a character's body plays: its weapon's arms, else the players'
+    pub fn arms_of(&self, npc: &Npc) -> &crate::body::PlayerMotions {
+        npc.weapon.and_then(|w| self.weapon_arms.get(w)).and_then(|&k| self.arm_sets.get(k)).map_or(&self.player, |(_, m)| m)
+    }
+
+    /// Seconds a character's reload takes with a weapon, standing or kneeling: its motion's
+    /// length
+    pub fn reload_seconds(&self, weapon: Option<usize>, kneeling: bool) -> Option<f32> {
+        let m = weapon.and_then(|w| self.weapon_arms.get(w)).and_then(|&k| self.arm_sets.get(k))?.1.reload(crate::sim::movement::Reloading { progress: 0.0, empty: false }, kneeling)?;
+        Some(m.frames.max(1) as f32 / 30.0)
     }
 
     /// The model a character wears and its rig
@@ -259,12 +307,20 @@ impl Characters {
     /// it (see `terrorist::raise`), standing up with it or easing into aiming from waiting
     fn aiming_pose(&self, npc: &Npc, skeleton: &Skeleton, now: f32, idle_frame: f32) -> Option<(V3, Vec<[f32; 4]>)> {
         let firing = now - npc.last_shot < 0.15;
+        let kneeling = super::terrorist::kneels(npc.stance);
+        let arms = self.arms_of(npc);
+        // Reloading, its weapon's reload plays through, whole
+        let reload = npc.reload.and_then(|t| Some((t, arms.reload(crate::sim::movement::Reloading { progress: t, empty: false }, kneeling)?)));
+        if let Some((t, m)) = reload {
+            let (root, rots) = m.sample(t.clamp(0.0, 1.0) * (m.frames.max(1) - 1) as f32);
+            return Some(([0.0, root[1], 0.0], rots));
+        }
         let doing = crate::body::Doing {
             movement: crate::sim::movement::Movement::Fire,
-            frame: 0.0, crouched: super::terrorist::kneels(npc.stance), reloading: None, firing: true, flinch: None, peek: None,
+            frame: 0.0, crouched: kneeling, reloading: None, firing: true, flinch: None, peek: None,
             hip_turn: 0.0, changing: None, shuffle: None, clock: if firing { now } else { 0.0 },
         };
-        let pose = crate::body::pose(&self.player, skeleton, &doing)?;
+        let pose = crate::body::pose(arms, skeleton, &doing)?;
         let up = ([0.0, pose.root[1], 0.0], pose.rotations);
         let (motion, seconds) = super::terrorist::raise(npc.stance, |m| self.frames(m));
         let t = now - npc.aim_since;
@@ -298,13 +354,14 @@ impl Characters {
             Gait::Run => (Movement::Run, 1.0),
         };
         // The motion loops, at the pace players' play at
-        let frames = self.player.get(movement, false).map_or(1, |m| m.frames.max(1)) as f32;
+        let arms = self.arms_of(npc);
+        let frames = arms.get(movement, false).map_or(1, |m| m.frames.max(1)) as f32;
         let doing = crate::body::Doing {
             movement,
             frame: (now * 30.0 * super::ANIM_PACE * pace) % frames, crouched: false, reloading: None, firing: npc.aiming, flinch: None, peek: None,
             hip_turn: 0.0, changing: None, shuffle: None, clock: 0.0,
         };
-        let pose = crate::body::pose(&self.player, skeleton, &doing)?;
+        let pose = crate::body::pose(arms, skeleton, &doing)?;
         Some(([0.0, pose.root[1], 0.0], pose.rotations))
     }
 
@@ -510,5 +567,39 @@ mod tests {
         }
         assert!(placed == 0 || in_walls.len() * 50 < placed, "{} of {placed} in walls: {in_walls:?}", in_walls.len());
         assert!(placed == 0 || sidearms > 0, "no one carries a sidearm");
+    }
+
+    #[test]
+    fn a_terrorist_holds_fires_and_reloads_as_its_weapon_has_it() {
+        use super::super::terrorist::arms;
+        let read = |f: &str| crate::weapon::read(&Path::new("data/kit").join(f)).ok();
+        let Some(ak) = read("tw_ak47.wpn") else { return };
+        assert_eq!((arms(&ak).hold, arms(&ak).fire, arms(&ak).reload), (["rwru_l1", "rwrc_l1"], ["rwru_l9", "rwrc_l9"], Some(["ter_mag_change", "twm_mp3"])));
+        // An Uzi is held and reloaded as a pistol is
+        let uzi = read("tw_uzi.wpn").unwrap();
+        assert_eq!((arms(&uzi).hold, arms(&uzi).fire, arms(&uzi).reload), (["rwru_p1", "rwrc_p1"], ["rwru_p9", "rwrc_p9"], Some(["ter_pis_mag_change", "mg_w1_cr"])));
+        assert_eq!(arms(&read("sw_de357.wpn").unwrap()), arms(&uzi));
+        assert_eq!(arms(&read("tw_dragunov.wpn").unwrap()), arms(&ak));
+
+        // In the game: the weapons that are held alike share their motions, all of them there
+        let Some(mut chars) = Characters::load(Path::new("data/character/team_hrt/blue_M_a.CRP"), "up_none_cyc") else { return };
+        let [ak, ak74, pistol] = ["tw_ak47.wpn", "tw_ak74.wpn", "sw_de357.wpn"].map(|w| chars.add_weapon(w));
+        assert_eq!(chars.weapon_arms[ak.unwrap()], chars.weapon_arms[ak74.unwrap()]);
+        assert_ne!(chars.weapon_arms[ak.unwrap()], chars.weapon_arms[pistol.unwrap()]);
+        for (_, set) in &chars.arm_sets {
+            assert!(set.idle.is_some() && set.crouch_idle.is_some() && set.fire.is_some() && set.crouch_fire.is_some() && set.reload.is_some() && set.crouch_reload.is_some());
+        }
+        // A reload takes as long as its motion
+        let pistol_reload = chars.reload_seconds(pistol, false).unwrap();
+        assert_eq!(pistol_reload, load_motion("ter_pis_mag_change").unwrap().frames as f32 / 30.0);
+        assert!(chars.reload_seconds(None, false).is_none());
+
+        // Aiming with a pistol is not aiming with a rifle, and reloading is neither
+        let npc = |weapon: Option<usize>, reload: Option<f32>| Npc { weapon, reload, aiming: true, stance: Some(crate::mission::Stance::Stand), ..Npc::default() };
+        let bones = |n: &Npc| chars.bones(n, 10.0, 0.0).unwrap();
+        let hand = |b: &Vec<crate::skeleton::Transform>| format!("{:?}", b[b.len() / 2]);
+        let (rifle, handgun, reloading) = (bones(&npc(ak, None)), bones(&npc(pistol, None)), bones(&npc(ak, Some(0.5))));
+        assert_ne!(hand(&rifle), hand(&handgun));
+        assert_ne!(hand(&rifle), hand(&reloading));
     }
 }

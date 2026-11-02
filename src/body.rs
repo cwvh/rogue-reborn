@@ -20,6 +20,9 @@ pub struct PlayerMotions {
     pub walk_left: Option<Motion>,
     pub walk_right: Option<Motion>,
     pub fire: Option<Motion>,
+    /// Firing kneeling, for a set that has a motion of its own for it (a terrorist's); else
+    /// the arms play `fire`
+    pub crouch_fire: Option<Motion>,
     /// Reloading with rounds left in the magazine, and once it is empty
     pub reload: Option<Motion>,
     pub reload_empty: Option<Motion>,
@@ -51,6 +54,9 @@ impl PlayerMotions {
     /// The motion for a movement, standing or crouched. Firing, reloading and throwing are
     /// the same motions crouched: the body kneels and the arms play them.
     pub fn get(&self, m: Movement, crouched: bool) -> Option<&Motion> {
+        if let (Movement::Fire, true, Some(fire)) = (m, crouched, &self.crouch_fire) {
+            return Some(fire);
+        }
         match (m, crouched) {
             (Movement::Idle, false) => &self.idle,
             (Movement::Walk, false) => &self.walk,
@@ -127,6 +133,7 @@ impl PlayerMotions {
             walk_left: pick("walk_left", "tms_l1"),
             walk_right: pick("walk_right", "tms_r1"),
             fire: planted("fire", "fire_up_mp5k"),
+            crouch_fire: None,
             reload: planted("reload", RELOAD_MOTION),
             reload_empty: planted("reload_empty", EMPTY_RELOAD_MOTION),
             throw: planted("throw", "gr_ov_up"),
