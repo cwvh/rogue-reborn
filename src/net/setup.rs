@@ -2,7 +2,7 @@
 //! the game this way, so that the copies start the same.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use anyhow::{Context, Result};
 
@@ -15,7 +15,7 @@ use crate::sim::{Config, Sim};
 
 /// A game with the characters in place and nobody playing yet
 pub fn build_sim(setup: &Setup) -> Result<Sim> {
-    let level = Arc::new(if setup.map == "demo" {
+    let level = Rc::new(if setup.map == "demo" {
         crate::demo::map()
     } else {
         map::read(Path::new(&setup.map)).with_context(|| format!("could not load the level {}", setup.map))?

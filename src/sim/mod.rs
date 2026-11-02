@@ -16,7 +16,7 @@ pub mod peek;
 pub mod terrorist;
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::collision::{CollisionWorld, Player, SolidRoom};
 use crate::combat::{self, HitResult};
@@ -384,7 +384,7 @@ impl PlayerState {
 
 /// The whole game
 pub struct Sim {
-    pub level: Arc<Map>,
+    pub level: Rc<Map>,
     pub world: CollisionWorld,
     pub visibility: Visibility,
     /// Seconds since the start
@@ -418,7 +418,7 @@ pub struct Sim {
     pub characters: Option<Characters>,
     pub npcs: Vec<Npc>,
     /// What bullets do (data/kit/gfcm.txt), or without it each part of the body takes so much
-    pub gunfire: Option<Arc<crate::gfcm::Gunfire>>,
+    pub gunfire: Option<crate::gfcm::Gunfire>,
 
     pub doors: Vec<Door>,
     pub door_states: Vec<DoorState>,
@@ -429,9 +429,9 @@ pub struct Sim {
     /// When each pane broke
     pub broken_at: Vec<Option<f32>>,
     /// How far each sound carries (data/sound/soundvol.txt), by its lowercase name
-    reaches: Arc<std::collections::HashMap<String, f32>>,
+    reaches: std::collections::HashMap<String, f32>,
     /// Where characters can walk, made the first time one has somewhere to go
-    nav: Option<Arc<nav::Grid>>,
+    nav: Option<nav::Grid>,
     /// What was made to be heard this tick besides the sounds it sends: where, and how far it
     /// carries
     noises: Vec<(V3, f32, bool)>,
@@ -439,7 +439,7 @@ pub struct Sim {
 
 impl Sim {
     /// A game with nobody in it yet: see `add_player`
-    pub fn new(level: Arc<Map>, world: CollisionWorld, config: Config, characters: Option<Characters>, npcs: Vec<Npc>) -> Sim {
+    pub fn new(level: Rc<Map>, world: CollisionWorld, config: Config, characters: Option<Characters>, npcs: Vec<Npc>) -> Sim {
         let visibility = Visibility::new(&level);
         let doors: Vec<Door> = world.doors().cloned().collect();
         let panes = glass::panes(&level);
@@ -472,8 +472,8 @@ impl Sim {
             applied_rooms: None,
             characters,
             npcs,
-            gunfire: crate::gfcm::read(std::path::Path::new("data/kit/gfcm.txt")).ok().map(Arc::new),
-            reaches: Arc::new(std::fs::read_to_string("data/sound/soundvol.txt").map(|t| crate::sound::reaches(&t)).unwrap_or_default()),
+            gunfire: crate::gfcm::read(std::path::Path::new("data/kit/gfcm.txt")).ok(),
+            reaches: std::fs::read_to_string("data/sound/soundvol.txt").map(|t| crate::sound::reaches(&t)).unwrap_or_default(),
             noises: Vec::new(),
             nav: None,
         }
@@ -1712,7 +1712,7 @@ mod tests {
 
     /// A sim of the demo room with nobody in it but the player
     fn demo() -> Sim {
-        let level = Arc::new(crate::demo::map());
+        let level = Rc::new(crate::demo::map());
         let world = CollisionWorld::from_map(&level, Params::default());
         let config = Config { magazine: 30, ammo: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };
         let mut sim = Sim::new(level, world, config, None, Vec::new());
@@ -1804,7 +1804,7 @@ mod tests {
             eprintln!("skipping: {} not found", path.display());
             return None;
         }
-        let level = Arc::new(crate::map::read(path).expect("rm11 loads"));
+        let level = Rc::new(crate::map::read(path).expect("rm11 loads"));
         let world = CollisionWorld::from_map(&level, Params::default());
         let config = Config { magazine: 30, ammo: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };
         let mut sim = Sim::new(level, world, config, None, Vec::new());
@@ -2168,7 +2168,7 @@ mod tests {
 
     #[test]
     fn a_bullet_does_what_the_gunfire_chart_rolls_for_it() {
-        let Some(gunfire) = crate::gfcm::read(std::path::Path::new("data/kit/gfcm.txt")).ok().map(Arc::new) else { return };
+        let Ok(gunfire) = crate::gfcm::read(std::path::Path::new("data/kit/gfcm.txt")) else { return };
         // A chest shot close up: wounds, or kills outright
         let (mut wounded, mut killed) = (0, 0);
         for seed in 0..40 {

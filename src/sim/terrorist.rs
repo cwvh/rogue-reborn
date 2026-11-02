@@ -4,7 +4,7 @@
 //! are guesses here. They take aim at a player only near where they face, and their aim swings
 //! across to them, ever faster, before they fire.
 
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::mission::{Alertness, Condition, Plan, Reaction, Roe, Speed, Stance, Step};
 use crate::sim::characters::Gait;
@@ -143,7 +143,7 @@ pub struct Mind {
     /// Their team, its orders, which of its trigger plans it has turned to (the last of them
     /// leads) and which have gone off
     pub team: usize,
-    pub orders: Arc<Orders>,
+    pub orders: Rc<Orders>,
     pub active: Option<usize>,
     pub fired: Vec<bool>,
     /// How sure they are of a threat, and whether they heard gunfire (`Trigger Sound Combat`)
@@ -189,7 +189,7 @@ impl Mind {
     pub fn new(alertness: Alertness, skill: f32, self_control: f32, sight: f32, gun: Gun, magazine: u32, magazines: u32) -> Mind {
         Mind {
             alertness, skill, self_control, sight, target: None, seen_at: 0.0, aim: Aim::default(), aim_dir: None, swing: 0.0, quick: false, heard: None, asked: None, seek: None, path: Vec::new(), gait: Gait::Walk,
-            team: 0, orders: Arc::new(Orders::default()), active: None, fired: Vec::new(), threat: Threat::None, heard_gunfire: false,
+            team: 0, orders: Rc::new(Orders::default()), active: None, fired: Vec::new(), threat: Threat::None, heard_gunfire: false,
             step: 0, loop_at: None, errand: None, speed: None, zones: Vec::new(), pause_until: 0.0, gun,
             ammo: magazine, magazines: magazines.saturating_sub(1), magazine, reload_until: None, next_shot: 0.0,
             sidearm: None, spent: None, blocked_since: None,
@@ -203,7 +203,7 @@ impl Mind {
     }
 
     /// One of a team, with its orders
-    pub fn with_orders(mut self, team: usize, orders: Arc<Orders>) -> Mind {
+    pub fn with_orders(mut self, team: usize, orders: Rc<Orders>) -> Mind {
         self.fired = vec![false; orders.reactions.len()];
         (self.team, self.orders) = (team, orders);
         self
@@ -392,7 +392,7 @@ impl super::Sim {
                 .chain(self.spawns.iter().copied())
                 .chain(self.players.iter().filter(|p| p.active).map(|p| p.player.pos));
             let seeds: Vec<(V3, Vec<u32>)> = feet.map(|f| (f, self.rooms_at(f, None))).collect();
-            self.nav = Some(Arc::new(super::nav::Grid::new(&self.world, &self.level, &self.visibility, &seeds)));
+            self.nav = Some(super::nav::Grid::new(&self.world, &self.level, &self.visibility, &seeds));
         }
         let noise_rooms: Vec<Vec<u32>> = noises.iter().map(|&(at, _, _)| self.visibility.player_rooms(&self.level, at, None)).collect();
         let now = self.time;
@@ -934,7 +934,7 @@ mod tests {
     /// A terrorist in the box room at `at`, facing `yaw`, and a player standing still across it
     fn standoff(at: V3, yaw: f32) -> crate::sim::Sim {
         use crate::collision::{CollisionWorld, Params};
-        let level = std::sync::Arc::new(crate::demo::map());
+        let level = Rc::new(crate::demo::map());
         let world = CollisionWorld::from_map(&level, Params::default());
         let config = crate::sim::Config { magazine: 30, ammo: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };
         let npc = crate::sim::characters::Npc {
@@ -995,7 +995,7 @@ mod tests {
         // Only the rooms around the player are solid, so it saw through it and shot them.
         use crate::collision::{CollisionWorld, Params};
         let Ok(level) = crate::map::read(std::path::Path::new("data/map/rm05/rm05.map")) else { return };
-        let level = std::sync::Arc::new(level);
+        let level = Rc::new(level);
         let world = CollisionWorld::from_map(&level, Params::default());
         let floor = world.ground_at(37789.0, 34346.0, 32877.0).unwrap();
         let npc = crate::sim::characters::Npc {
@@ -1050,7 +1050,7 @@ mod tests {
     fn a_terrorist_walks_to_what_it_heard_and_stops_there() {
         let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
         let orders = Orders { plan: Plan { roe: Roe::Investigate, ..Plan::default() }, ..Orders::default() };
-        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Arc::new(orders));
+        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Rc::new(orders));
         sim.npcs[0].mind = Some(mind);
         sim.noises.push(([200.0, 50.0, 300.0], 1000.0, true));
         let mut walked = false;
@@ -1079,7 +1079,7 @@ mod tests {
             name: "Rush".into(), priority: 0, only: false, when: vec![Condition::DistantThreat],
             plan: Plan { roe: Roe::Advance, speed: Speed::Blitz, ..Plan::default() },
         };
-        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Arc::new(Orders { reactions: vec![rush], ..Orders::default() }));
+        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Rc::new(Orders { reactions: vec![rush], ..Orders::default() }));
         sim.npcs[0].mind = Some(mind);
         sim.noises.push(([200.0, 50.0, 300.0], 10000.0, true));
         wait(&mut sim, 2.0 * crate::sim::TICK);
@@ -1095,7 +1095,7 @@ mod tests {
         let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
         let route = vec![Step::Loop, Step::Move([200.0, 0.0, 300.0]), Step::Move([-200.0, 0.0, 300.0]), Step::EndLoop];
         let plan = Plan { roe: Roe::Investigate, route, ..Plan::default() };
-        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Arc::new(Orders { plan, ..Orders::default() }));
+        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Rc::new(Orders { plan, ..Orders::default() }));
         sim.npcs[0].mind = Some(mind);
         // Out one way, back the other, and out again
         let (mut east, mut west, mut turns) = (0.0f32, 0.0f32, 0);
@@ -1116,7 +1116,7 @@ mod tests {
         // A guard goes to its spot, and stays
         let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
         let plan = Plan { route: vec![Step::Move([200.0, 0.0, 300.0]), Step::Guard, Step::Move([-200.0, 0.0, 300.0])], ..Plan::default() };
-        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Arc::new(Orders { plan, ..Orders::default() }));
+        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Rc::new(Orders { plan, ..Orders::default() }));
         sim.npcs[0].mind = Some(mind);
         wait(&mut sim, 3.0);
         assert!((sim.npcs[0].pos[0] - 200.0).abs() <= 31.0 && !sim.npcs[0].walking, "{:?}", sim.npcs[0].pos);
@@ -1131,7 +1131,7 @@ mod tests {
             plan: Plan { roe: Roe::Investigate, speed: Speed::Blitz, route: vec![Step::ClearZones, Step::AddZone(zone), Step::PatrolZones], ..Plan::default() },
         };
         let orders = Orders { plan, reactions: vec![search(0, true, 9), search(0, false, 1)], zones };
-        let mut m = mind(Alertness::Bored).with_orders(0, Arc::new(orders));
+        let mut m = mind(Alertness::Bored).with_orders(0, Rc::new(orders));
         let rooms: std::collections::HashSet<u32> = (0..20).filter_map(|pick| match m.next_place(pick) {
             Some(Place::Room(r)) => Some(r),
             _ => None,
@@ -1194,7 +1194,7 @@ mod tests {
         // room 1 too, and the room's walls once went unseen from outside
         use crate::collision::{CollisionWorld, Params};
         let Ok(level) = crate::map::read(std::path::Path::new("data/map/rm16/rm16.map")) else { return };
-        let level = std::sync::Arc::new(level);
+        let level = Rc::new(level);
         let world = CollisionWorld::from_map(&level, Params::default());
         let floor = world.ground_at(30098.0, 34276.0, 32979.0).unwrap();
         let npc = crate::sim::characters::Npc {
@@ -1233,13 +1233,13 @@ mod tests {
     /// A terrorist outside rm16's house that goes to see what it hears, facing away from room 205
     fn outside_205() -> Option<crate::sim::Sim> {
         use crate::collision::{CollisionWorld, Params};
-        let level = std::sync::Arc::new(crate::map::read(std::path::Path::new("data/map/rm16/rm16.map")).ok()?);
+        let level = Rc::new(crate::map::read(std::path::Path::new("data/map/rm16/rm16.map")).ok()?);
         let world = CollisionWorld::from_map(&level, Params::default());
         let floor = world.ground_at(30098.0, 34276.0, 32979.0).unwrap();
         let orders = Orders { plan: Plan { roe: Roe::Investigate, ..Plan::default() }, ..Orders::default() };
         let npc = crate::sim::characters::Npc {
             pos: [30098.0, floor, 34276.0], floor, yaw: 225.0, stance: Some(Stance::Stand),
-            mind: Some(Mind::new(Alertness::Alert, 0.4, 0.3, 4000.0, MP5K, 30, 3).with_orders(0, Arc::new(orders))),
+            mind: Some(Mind::new(Alertness::Alert, 0.4, 0.3, 4000.0, MP5K, 30, 3).with_orders(0, Rc::new(orders))),
             ..Default::default()
         };
         let config = crate::sim::Config { magazine: 30, ammo: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };
@@ -1313,7 +1313,7 @@ mod tests {
         let map_path = std::path::Path::new("data/map/rm16/rm16.map");
         let Some((file, teams)) = mission::teams(map_path, Difficulty::Easy) else { return };
         let Some(mut chars) = crate::sim::characters::Characters::load(std::path::Path::new("data/character/team_hrt/blue_M_a.CRP"), "up_none_cyc") else { return };
-        let level = std::sync::Arc::new(crate::map::read(map_path).unwrap());
+        let level = Rc::new(crate::map::read(map_path).unwrap());
         let world = CollisionWorld::from_map(&level, Params::default());
         let npcs = crate::sim::characters::place_terrorists(&teams, 7, &mission::setting(&file), &world, &mut chars);
         let config = crate::sim::Config { magazine: 30, ammo: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };
@@ -1340,7 +1340,7 @@ mod tests {
         let map_path = std::path::Path::new("data/map/rm16/rm16.map");
         let Some((file, teams)) = mission::teams(map_path, Difficulty::Easy) else { return };
         let Some(mut chars) = crate::sim::characters::Characters::load(std::path::Path::new("data/character/team_hrt/blue_M_a.CRP"), "up_none_cyc") else { return };
-        let level = std::sync::Arc::new(crate::map::read(map_path).unwrap());
+        let level = Rc::new(crate::map::read(map_path).unwrap());
         let world = CollisionWorld::from_map(&level, Params::default());
         let npcs = crate::sim::characters::place_terrorists(&teams, 7, &mission::setting(&file), &world, &mut chars);
         let config = crate::sim::Config { magazine: 30, ammo: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };
@@ -1350,7 +1350,7 @@ mod tests {
         let started = std::time::Instant::now();
         sim.terrorists(0.01, &[], &mut Vec::new());
         eprintln!("the grid took {:?}", started.elapsed());
-        let grid = sim.nav.clone().unwrap();
+        let grid = sim.nav.as_ref().unwrap();
         let there = sim.rooms_at(to, None);
         let head = sim.world.params().height;
         for (i, n) in sim.npcs.iter().enumerate() {
@@ -1386,7 +1386,7 @@ mod tests {
         let map_path = std::path::Path::new("data/map/rm16/rm16.map");
         let Some((file, teams)) = mission::teams(map_path, Difficulty::Easy) else { return };
         let Some(mut chars) = crate::sim::characters::Characters::load(std::path::Path::new("data/character/team_hrt/blue_M_a.CRP"), "up_none_cyc") else { return };
-        let level = std::sync::Arc::new(crate::map::read(map_path).unwrap());
+        let level = Rc::new(crate::map::read(map_path).unwrap());
         let world = CollisionWorld::from_map(&level, Params::default());
         let npcs = crate::sim::characters::place_terrorists(&teams, 7, &mission::setting(&file), &world, &mut chars);
         let config = crate::sim::Config { magazine: 30, ammo: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };
@@ -1451,7 +1451,7 @@ mod tests {
         let map_path = std::path::Path::new("data/map/rm16/rm16.map");
         let Some((file, teams)) = mission::teams(map_path, Difficulty::Easy) else { return };
         let Some(mut chars) = crate::sim::characters::Characters::load(std::path::Path::new("data/character/team_hrt/blue_M_a.CRP"), "up_none_cyc") else { return };
-        let level = std::sync::Arc::new(crate::map::read(map_path).unwrap());
+        let level = Rc::new(crate::map::read(map_path).unwrap());
         let world = CollisionWorld::from_map(&level, Params::default());
         let npcs = crate::sim::characters::place_terrorists(&teams, 7, &mission::setting(&file), &world, &mut chars);
         let config = crate::sim::Config { magazine: 30, ammo: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };

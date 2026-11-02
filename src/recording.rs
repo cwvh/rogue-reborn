@@ -287,7 +287,7 @@ mod tests {
     use super::*;
     use crate::collision::{CollisionWorld, Params};
     use crate::sim::Config;
-    use std::sync::Arc;
+    use std::rc::Rc;
 
     fn header() -> Header {
         Header {
@@ -300,7 +300,7 @@ mod tests {
     }
 
     fn demo_sim() -> Sim {
-        let level = Arc::new(crate::demo::map());
+        let level = Rc::new(crate::demo::map());
         let world = CollisionWorld::from_map(&level, Params::default());
         let config = Config { magazine: 30, ammo: 30, reserve: 90, grenades: 3, speed_scale: 1.0, seed: 7, culling: true };
         let mut sim = Sim::new(level, world, config, None, Vec::new());

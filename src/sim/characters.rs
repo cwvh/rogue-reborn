@@ -373,7 +373,7 @@ pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, setting: &cra
     let mut rng = seed | 1;
     let mut npcs = Vec::new();
     for (team_index, team) in teams.iter().enumerate().filter(|(_, t)| t.terrorists) {
-        let orders = std::sync::Arc::new(super::terrorist::Orders { plan: team.plan.clone(), reactions: team.reactions.clone(), zones: setting.zones.clone() });
+        let orders = std::rc::Rc::new(super::terrorist::Orders { plan: team.plan.clone(), reactions: team.reactions.clone(), zones: setting.zones.clone() });
         let pick = (crate::util::next_rng(&mut rng) >> 33) as usize % team.starts.len();
         let (at, heading) = team.starts[pick];
         let yaw = heading * 360.0 / 256.0;

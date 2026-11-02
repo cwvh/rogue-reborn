@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
-use std::sync::Arc;
+use std::rc::Rc;
 use std::net::ToSocketAddrs;
 use rogue_reborn::{map, rsb, actor, combat, demo, grenade, blastlight, concussion, recording, skeleton, sim, sound, weapon, ambience, glass};
 use rogue_reborn::net::client::{Client, Status};
@@ -181,7 +181,7 @@ fn main() {
     };
     let map_path = map_buf.as_path();
     let map_num = extract_map_num(map_path).unwrap_or_else(|| String::from("m00"));
-    let level = Arc::new(if args.demo { demo::map() } else { map::read(map_path).expect("Failed to load map") });
+    let level = Rc::new(if args.demo { demo::map() } else { map::read(map_path).expect("Failed to load map") });
 
     // Build a flattened mesh from the MAP geometry
     let mesh = build_mesh(&level);
