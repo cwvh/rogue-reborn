@@ -149,10 +149,15 @@ pub fn spawns(npcs: usize) -> Vec<[f32; 3]> {
     points
 }
 
-/// Where up to `MAX_PLAYERS` players start, side by side near the south wall
+/// Where up to `MAX_PLAYERS` players start, side by side near the south wall, eight to a row
 pub fn player_spawns(count: usize) -> Vec<[f32; 3]> {
+    const PER_ROW: usize = 8;
     let count = count.clamp(1, crate::sim::MAX_PLAYERS);
-    (0..count).map(|i| [(i as f32 - (count as f32 - 1.0) / 2.0) * 90.0, 0.0, -DEPTH / 2.0 + 150.0]).collect()
+    (0..count).map(|i| {
+        let (row, col) = (i / PER_ROW, i % PER_ROW);
+        let in_row = (count - row * PER_ROW).min(PER_ROW);
+        [(col as f32 - (in_row as f32 - 1.0) / 2.0) * 90.0, 0.0, -DEPTH / 2.0 + 150.0 + row as f32 * 100.0]
+    }).collect()
 }
 
 #[cfg(test)]
@@ -179,6 +184,19 @@ mod tests {
             assert!(p[0].abs() < WIDTH / 2.0 - 50.0 && p[2].abs() < DEPTH / 2.0 - 50.0, "{p:?}");
             for q in &points[..i] {
                 assert!((p[0] - q[0]).hypot(p[2] - q[2]) >= 100.0, "{p:?} and {q:?} are too close");
+            }
+        }
+    }
+
+    #[test]
+    fn a_full_game_of_players_starts_inside_the_room_and_apart() {
+        let players = player_spawns(crate::sim::MAX_PLAYERS);
+        let npcs = spawns(MAX_NPCS);
+        assert_eq!(players.len(), crate::sim::MAX_PLAYERS);
+        for (i, p) in players.iter().enumerate() {
+            assert!(p[0].abs() < WIDTH / 2.0 - 50.0 && p[2].abs() < DEPTH / 2.0 - 50.0, "{p:?}");
+            for q in players[..i].iter().chain(&npcs[1..]) {
+                assert!((p[0] - q[0]).hypot(p[2] - q[2]) >= 80.0, "{p:?} and {q:?} are too close");
             }
         }
     }

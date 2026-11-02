@@ -53,17 +53,25 @@ struct Game {
     steps: u64,
 }
 
+/// Where player `i` starts: in rows of eight along the south wall
+fn spawn(i: usize) -> [f32; 3] {
+    [-280.0 + (i % 8) as f32 * 80.0, 0.0, -350.0 + (i / 8) as f32 * 100.0]
+}
+
 fn run_key() -> Input {
     Input { run: true, ..Input::default() }
 }
 
 impl Game {
     fn new(conditions: Conditions) -> Game {
+        Game::with_setup(conditions, setup())
+    }
+
+    fn with_setup(conditions: Conditions, setup: Setup) -> Game {
         let net = FakeNet::new(11, conditions);
         let server_link = net.endpoint();
-        let setup = setup();
         let sim = build_sim(&setup).unwrap();
-        let spawns = (0..MAX_PLAYERS).map(|i| [-300.0 + i as f32 * 80.0, 0.0, -350.0]).collect();
+        let spawns = (0..MAX_PLAYERS).map(spawn).collect();
         let server = Server::new(sim, setup, BUILD, spawns);
         Game { net, server, server_link, peers: Vec::new(), steps: 0 }
     }
@@ -83,6 +91,15 @@ impl Game {
 
     fn join(&mut self, script: impl FnMut(u32) -> Input + 'static) -> usize {
         self.join_with(BUILD, script)
+    }
+
+    /// A player with a connection of their own, the same both ways
+    fn join_over(&mut self, conditions: Conditions, script: impl FnMut(u32) -> Input + 'static) -> usize {
+        let peer = self.join(script);
+        let (me, server) = (self.peers[peer].link.addr(), self.server_link.addr());
+        self.net.set_conditions_between(me, server, conditions);
+        self.net.set_conditions_between(server, me, conditions);
+        peer
     }
 
     /// Everyone's computer runs a tick, then the server looks at what has come in
@@ -329,10 +346,38 @@ fn a_full_game_of_busy_players_fits_in_the_datagrams() {
     }
     game.run(20.0);
     assert_eq!(game.server.players(), MAX_PLAYERS);
+    // Snapshots go in one datagram, but for a few in full as players joined
+    let split = game.server.snapshots_split;
+    assert!(split <= MAX_PLAYERS as u64, "{split} of {} snapshots went in parts", game.server.snapshots_sent);
     // The grenades went off, and everyone heard
     for p in &game.peers {
         assert!(p.events.iter().any(|e| matches!(e, Event::Blast { .. })));
     }
+}
+
+#[test]
+fn a_snapshot_too_big_for_a_datagram_reaches_the_clients_in_parts() {
+    // Everyone throws grenade after grenade, more than one datagram can tell of
+    let mut game = Game::with_setup(Conditions::poor(), Setup { grenades: 40, ..setup() });
+    for i in 0..MAX_PLAYERS {
+        game.join(move |t| {
+            let mut input = Input { grenade: t == 10, fire: t > 20 && t % 6 < 3, ..Input::default() };
+            input.set_look(i as f32 * 22.5, 30.0);
+            input
+        });
+    }
+    // The most grenades in the air at once, on the server and as each client saw
+    let mut most = 0;
+    let mut seen = vec![0; MAX_PLAYERS];
+    for _ in 0..(6.0 / TICK) as usize {
+        game.step();
+        most = most.max(game.server.sim.thrown.len());
+        for (p, seen) in game.peers.iter().zip(seen.iter_mut()) {
+            *seen = (*seen).max(p.sim.as_ref().map_or(0, |s| s.thrown.len()));
+        }
+    }
+    assert!(game.server.snapshots_split > 100, "only {} snapshots went in parts", game.server.snapshots_split);
+    assert!(seen.iter().all(|&n| n + 5 >= most), "{most} grenades at most, but the clients saw {seen:?}");
 }
 
 #[test]
@@ -458,6 +503,30 @@ fn the_lag_meter_sees_the_latency_jitter_and_loss_of_a_bad_connection() {
 }
 
 #[test]
+fn a_player_far_away_does_not_slow_the_ones_on_the_lan() {
+    // Three players on the LAN with the server, and one over a poor internet connection
+    let mut game = Game::new(Conditions::lan());
+    let walk = |t: u32| Input { forward: (t / 60) % 2 == 0, run: true, ..Input::default() };
+    let lan: Vec<usize> = (0..3).map(|_| game.join(walk)).collect();
+    let far = game.join_over(Conditions::poor(), walk);
+    for _ in 0..(10.0 / TICK) as usize {
+        game.step();
+        let now = game.steps as f64 * TICK as f64;
+        for p in game.peers.iter_mut() {
+            p.client.view(now);
+        }
+    }
+    let far = game.peers[far].client.meter.figures();
+    for &p in &lan {
+        let f = game.peers[p].client.meter.figures();
+        assert!(f.ping < 0.07, "{f:?}");
+        assert_eq!(f.fixes, 0, "{f:?}");
+        assert!(far.ping > f.ping + 0.2, "{far:?} against {f:?}");
+    }
+    assert!(far.loss > 0.02, "{far:?}");
+}
+
+#[test]
 fn others_see_a_dead_player_fall_and_then_appear_where_they_come_back() {
     let mut game = Game::new(Conditions::broadband());
     game.server.sim.pvp = true;
@@ -478,7 +547,7 @@ fn others_see_a_dead_player_fall_and_then_appear_where_they_come_back() {
                 // Not standing up where they fell, and not slid there from it
                 let fell = died_at.expect("seen to die first");
                 assert!(distance(pos, fell) > 1.0, "came back at {pos:?}, where they died");
-                assert!((0..MAX_PLAYERS).any(|i| distance(pos, [-300.0 + i as f32 * 80.0, 0.0, -350.0]) < 30.0), "came back at {pos:?}, which is no spawn point");
+                assert!((0..MAX_PLAYERS).any(|i| distance(pos, spawn(i)) < 30.0), "came back at {pos:?}, which is no spawn point");
                 comebacks += 1;
             }
             (Some((before, false)), false) => assert!(distance(pos, before) < 50.0, "slid from {before:?} to {pos:?}"),

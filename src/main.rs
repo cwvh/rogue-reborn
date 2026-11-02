@@ -1711,7 +1711,8 @@ fn main() {
                         let doing = Doing {
                             throwing: p.throw.map(|t| (game_time - t.start) / sim::THROW_SECONDS),
                             reloading: p.reloading(game_time),
-                            firing: p.gun_trigger && p.ammo > 0,
+                            // The server sends others' trigger only while their gun has rounds
+                            firing: p.gun_trigger,
                             crouched: p.player.crouched,
                         };
                         let frames = |m: Movement| player_motions.get(m, doing.crouched).map_or(1, |m| m.frames.max(1)) as f32;

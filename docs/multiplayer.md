@@ -34,7 +34,22 @@ There are no human playtests for now. Bots stand in for players until there are.
 - Single-player recordings, with a checksum every second (`recording`).
 
 The game is everyone for themselves, with a respawn after 3.7 s. There are no sides, rounds,
-time limit or scores. Players start at the mission's spawn points. `MAX_PLAYERS` is 8.
+time limit or scores. Players start at the mission's spawn points. `MAX_PLAYERS` is 16.
+
+### Fitting a snapshot in a datagram
+
+A datagram holds 1200 bytes. A snapshot is sent as what changed since one the client has. With
+16 players all on the move and 16 characters, that is about 800 bytes, with room for events.
+
+- **Other players are sent less.** Only a client's own player carries what is on their screen:
+  fall speed, ammo, grenades left, throw charge and messages. Another player is about 55 bytes
+  in full, against 73. Their trigger is sent only while their gun fires. So no client is told
+  an enemy's ammo.
+- **A grenade is sent as where it is and how far it has turned**, 17 bytes. Only the server
+  moves grenades and sets them off.
+- **A snapshot too big for a datagram goes in parts**, up to 16 (`proto::split`, `Parts`). This
+  is for a snapshot in full, when a client joins or falls too far behind, and for a crowd of
+  grenades. A part lost loses the whole snapshot, and the server sends the next as usual.
 
 ## The test suite and the lab
 
@@ -98,7 +113,7 @@ test.
 ### Order
 
 1. Raise `MAX_PLAYERS` to 16, the original's limit, and check that a snapshot of 16 busy
-   players fits a datagram. Give each player their own connection conditions.
+   players fits a datagram. Give each player their own connection conditions. Done.
 2. Record network games, on the server and on the client.
 3. The lab.
 4. Burst loss and latency spikes.
@@ -321,6 +336,14 @@ We follow the original where it plays well, and do better where we can. Ideas to
   could rejoin and watch the side they were on until the round ends. The server would know them
   by the token their client joined with, kept for the session. For now they are dropped, and
   rejoin in the lobby.
+- **Send only what a client could see or hear.** A client would be told only of the players
+  and characters it could see or hear. That saves the most, and makes a wallhack useless, since
+  the client does not know where hidden enemies are. It touches sounds (footsteps, gunfire),
+  the dead player's view of their side, and the bots, which see through the client.
+- **Characters sent by their changes.** A character that changes at all is sent whole, 23
+  bytes. A Terrorist Hunt has 20 to 30 terrorists, so many moving at once would send many
+  snapshots in parts. Sending only what changed, as for players, or only the characters a
+  client could see, would fix that.
 - **A new host when the host leaves.** The server is its own process, so it can go on without
   the host's client and hand the host's rights to another player. It still runs on the old
   host's machine and upload, so their leaving the game is not the same as their wanting it

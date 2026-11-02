@@ -41,6 +41,11 @@ impl Conditions {
     /// A perfect connection
     pub const NONE: Conditions = Conditions { latency: 0.0, jitter: 0.0, loss: 0.0, duplicate: 0.0 };
 
+    /// A wired LAN: well under a millisecond each way
+    pub fn lan() -> Conditions {
+        Conditions { latency: 0.0005, jitter: 0.0002, loss: 0.0, duplicate: 0.0 }
+    }
+
     /// Typical of a decent home connection to a nearby server
     pub fn broadband() -> Conditions {
         Conditions { latency: 0.03, jitter: 0.01, loss: 0.01, duplicate: 0.0 }

@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::net::link::{Addr, Link};
-use crate::net::proto::{Setup, Snapshot, ToClient, ToServer};
+use crate::net::proto::{Setup, Snapshot, ToClient, ToServer, split};
 use crate::sim::{Event, Input, Sim, TICK};
 
 type V3 = [f32; 3];
@@ -112,6 +112,8 @@ pub struct Server {
     /// How many snapshots have been sent, and how many bytes they came to
     pub snapshots_sent: u64,
     pub snapshot_bytes: u64,
+    /// Snapshots too big for a datagram, sent in parts
+    pub snapshots_split: u64,
 }
 
 impl Server {
@@ -119,7 +121,7 @@ impl Server {
         assert!(!spawns.is_empty(), "players need somewhere to start");
         let mut sim = sim;
         sim.spawns = spawns.clone();
-        Server { sim, setup, build: build.to_string(), spawns, spawned: 0, remotes: Vec::new(), tick: 0, next_tick_at: None, events: VecDeque::new(), next_event: 1, snapshot_every: SNAPSHOT_EVERY, lag_compensation: true, snapshots_sent: 0, snapshot_bytes: 0 }
+        Server { sim, setup, build: build.to_string(), spawns, spawned: 0, remotes: Vec::new(), tick: 0, next_tick_at: None, events: VecDeque::new(), next_event: 1, snapshot_every: SNAPSHOT_EVERY, lag_compensation: true, snapshots_sent: 0, snapshot_bytes: 0, snapshots_split: 0 }
     }
 
     /// Send snapshots this many times a second (the nearest the 60 ticks a second allow)
@@ -268,9 +270,15 @@ impl Server {
         // What the client is known to have is what this one is told as the difference from
         let base = r.sent.iter().find(|s| r.acked > 0 && s.tick == r.acked);
         let (bytes, sent) = ToClient::Snapshot(snap).encode_against(base);
-        link.send(r.addr, &bytes);
         self.snapshots_sent += 1;
         self.snapshot_bytes += bytes.len() as u64;
+        let datagrams = split(self.tick, bytes);
+        if datagrams.len() > 1 {
+            self.snapshots_split += 1;
+        }
+        for d in &datagrams {
+            link.send(r.addr, d);
+        }
         let r = &mut self.remotes[i];
         r.sent.push_back(stored);
         while r.sent.len() > REMEMBERED {

@@ -123,7 +123,7 @@ pub const THROW_RELEASE: f32 = 0.35;
 const DOOR_REACH: f32 = 220.0;
 
 /// The most players in a game
-pub const MAX_PLAYERS: usize = 8;
+pub const MAX_PLAYERS: usize = 16;
 
 /// A grenade throw under way
 #[derive(Clone, Copy, Debug, PartialEq)]

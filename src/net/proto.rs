@@ -5,6 +5,8 @@
 //! state of everything a client draws, with the events since the client last confirmed one.
 //! Datagrams may be lost, repeated or reordered, and every message is meant to survive that.
 
+use std::collections::VecDeque;
+
 use anyhow::{Result, bail, ensure};
 
 use crate::bytes::{Before, Reader, Writer};
@@ -20,7 +22,7 @@ use crate::sim::{Cause, Event, Input, MAX_PLAYERS, Sim, Struck, TICK, Throw};
 type V3 = [f32; 3];
 
 /// Bumped whenever the messages change, so that a client and server that disagree notice
-pub const PROTOCOL: u8 = 10;
+pub const PROTOCOL: u8 = 11;
 
 const MAGIC: u16 = 0x5252;
 
@@ -88,6 +90,71 @@ pub enum ToClient {
     Snapshot(Snapshot),
     /// The server is closing the connection
     Goodbye { token: u32 },
+    /// One of the parts of a message too big for a datagram (see `split`)
+    Part { tick: u32, index: u8, count: u8, bytes: Vec<u8> },
+}
+
+/// The most of a message one part carries: a datagram less the part's own header
+const PART: usize = MAX_PACKET - 10;
+
+/// The most parts a message may be split into
+pub const MAX_PARTS: usize = 16;
+
+/// A message as datagrams: itself if it fits in one, or else in parts. A part lost loses the
+/// whole, so only what must is split: a snapshot in full, or with many characters in it.
+pub fn split(tick: u32, bytes: Vec<u8>) -> Vec<Vec<u8>> {
+    if bytes.len() <= MAX_PACKET {
+        return vec![bytes];
+    }
+    let count = bytes.len().div_ceil(PART);
+    assert!(count <= MAX_PARTS, "a message of {} bytes is too big even in parts", bytes.len());
+    bytes.chunks(PART).enumerate().map(|(index, chunk)| {
+        let mut w = Writer::new();
+        header(&mut w, 4);
+        w.u32(tick);
+        w.u8(index as u8);
+        w.u8(count as u8);
+        w.0.extend_from_slice(chunk);
+        w.0
+    }).collect()
+}
+
+/// The parts of messages that have come so far, put back together once all have
+#[derive(Default)]
+pub struct Parts {
+    /// For a few ticks, the parts of that tick's message
+    pending: VecDeque<(u32, Vec<Option<Vec<u8>>>)>,
+}
+
+impl Parts {
+    /// Keep a part. Returns the whole message once it is the last to come.
+    pub fn add(&mut self, tick: u32, index: u8, count: u8, bytes: Vec<u8>) -> Option<Vec<u8>> {
+        let (index, count) = (index as usize, count as usize);
+        if index >= count || count > MAX_PARTS {
+            return None;
+        }
+        let at = match self.pending.iter().position(|(t, _)| *t == tick) {
+            Some(at) => at,
+            None => {
+                // Only the newest few are waited for: an older one would be out of date
+                if self.pending.len() == 4 {
+                    self.pending.pop_front();
+                }
+                self.pending.push_back((tick, vec![None; count]));
+                self.pending.len() - 1
+            }
+        };
+        let parts = &mut self.pending[at].1;
+        if parts.len() != count {
+            return None;
+        }
+        parts[index] = Some(bytes);
+        if parts.iter().any(Option::is_none) {
+            return None;
+        }
+        let (_, parts) = self.pending.remove(at)?;
+        Some(parts.into_iter().flatten().flatten().collect())
+    }
 }
 
 /// A player as the others need to see them, and as they themselves need to know
@@ -138,14 +205,12 @@ pub struct NpcSnap {
     pub stance: Option<crate::mission::Stance>,
 }
 
+/// A grenade, as clients draw it. Only the server moves grenades and sets them off.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThrownSnap {
     pub owner: u8,
     pub pos: V3,
-    pub vel: V3,
-    pub fuse: f32,
     pub spin: f32,
-    pub at_rest: bool,
 }
 
 /// The state of the game at one tick
@@ -170,32 +235,34 @@ pub struct Snapshot {
 impl Snapshot {
     /// The game as it stands, for the player in `receiver`. The events are the caller's to add.
     pub fn capture(sim: &Sim, tick: u32, receiver: usize, ack_seq: u32) -> Snapshot {
-        let players = sim.players.iter().enumerate().filter(|(_, p)| p.active).map(|(i, p)| PlayerSnap {
+        // Another player is sent without what only their own screen shows, and their trigger
+        // only while it fires
+        let players = sim.players.iter().enumerate().filter(|(_, p)| p.active).map(|(i, p)| (i, p, i == receiver)).map(|(i, p, mine)| PlayerSnap {
             slot: i as u8,
             pos: p.player.pos,
-            vel_y: p.player.vel_y,
+            vel_y: if mine { p.player.vel_y } else { 0.0 },
             on_ground: p.player.on_ground,
             crouched: p.player.crouched,
             look: p.look,
             controlled: p.controlled,
-            ammo: p.ammo,
-            reserve: p.reserve,
+            ammo: if mine { p.ammo } else { 0 },
+            reserve: if mine { p.reserve } else { 0 },
             reload_until: p.reload_until,
             flash_until: p.flash_until,
-            gun_trigger: p.gun_trigger,
+            gun_trigger: p.gun_trigger && (mine || p.ammo > 0),
             kills: p.kills,
             deaths: p.deaths,
             hp: p.hp,
             respawn_at: p.respawn_at,
             hit: p.hit.map(|h| (h.motion, tick.wrapping_sub(((sim.time - h.start) / TICK).round() as u32) as u8)),
             equipped_grenade: p.equipped_grenade,
-            grenades_left: p.grenades_left,
-            charge_from: p.charge_from,
+            grenades_left: if mine { p.grenades_left } else { 0 },
+            charge_from: if mine { p.charge_from } else { None },
             throw: p.throw,
-            message: (i == receiver && p.message.1 > sim.time).then(|| p.message.clone()),
-            target_hp: if i == receiver { p.target_hp } else { None },
+            message: (mine && p.message.1 > sim.time).then(|| p.message.clone()),
+            target_hp: if mine { p.target_hp } else { None },
             peek: p.peek,
-            aim: (i == receiver).then_some(p.aim),
+            aim: mine.then_some(p.aim),
         }).collect();
         Snapshot {
             tick,
@@ -204,14 +271,7 @@ impl Snapshot {
             culling: sim.culling,
             players,
             npcs: sim.npcs.iter().map(|n| NpcSnap { pos: n.pos, yaw: n.yaw, hp: n.health.hp, state: n.health.state, aiming: n.aiming, walking: n.walking, gait: n.gait, stance: n.stance }).collect(),
-            thrown: sim.thrown.iter().map(|t| ThrownSnap {
-                owner: t.owner as u8,
-                pos: t.grenade.pos,
-                vel: t.grenade.vel,
-                fuse: t.grenade.fuse,
-                spin: t.grenade.spin,
-                at_rest: t.grenade.at_rest,
-            }).collect(),
+            thrown: sim.thrown.iter().map(|t| ThrownSnap { owner: t.owner as u8, pos: t.grenade.pos, spin: t.grenade.spin }).collect(),
             doors: sim.door_states.iter().map(|s| (s.open, s.opening)).collect(),
             broken: sim.broken_at.iter().enumerate().filter_map(|(i, t)| t.map(|t| (i as u16, t))).collect(),
             events: Vec::new(),
@@ -233,14 +293,16 @@ impl Snapshot {
             let p = &mut sim.players[slot];
             if slot != me {
                 p.player.pos = s.pos;
-                p.player.vel_y = s.vel_y;
                 p.player.on_ground = s.on_ground;
                 p.player.crouched = s.crouched;
                 p.look = s.look;
+            } else {
+                p.ammo = s.ammo;
+                p.reserve = s.reserve;
+                p.grenades_left = s.grenades_left;
+                p.charge_from = s.charge_from;
             }
             p.controlled = s.controlled;
-            p.ammo = s.ammo;
-            p.reserve = s.reserve;
             p.reload_until = s.reload_until;
             p.flash_until = s.flash_until;
             p.gun_trigger = s.gun_trigger;
@@ -250,8 +312,6 @@ impl Snapshot {
             p.respawn_at = s.respawn_at;
             p.hit = s.hit.map(|(motion, at)| Struck { motion, start: self.time - (self.tick as u8).wrapping_sub(at) as f32 * TICK });
             p.equipped_grenade = s.equipped_grenade;
-            p.grenades_left = s.grenades_left;
-            p.charge_from = s.charge_from;
             p.throw = s.throw;
             if slot != me {
                 p.peek = s.peek;
@@ -283,7 +343,7 @@ impl Snapshot {
         }
 
         sim.thrown = self.thrown.iter().map(|t| crate::sim::Thrown {
-            grenade: Grenade { pos: t.pos, vel: t.vel, fuse: t.fuse, spin: t.spin, at_rest: t.at_rest },
+            grenade: Grenade { pos: t.pos, vel: [0.0; 3], fuse: crate::grenade::FUSE, spin: t.spin, at_rest: false },
             owner: t.owner as usize,
         }).collect();
 
@@ -542,51 +602,54 @@ fn read_hit(r: &mut Reader) -> Result<Option<(&'static str, u8)>> {
 }
 
 /// A player in full, after their slot
+/// A player in full. Only a player with an aim, the receiver's own, carries what is on their
+/// screen: their fall speed, ammo, grenades, throw charge and messages.
 fn write_player(w: &mut Writer, p: &PlayerSnap) {
+    w.u8(flag_byte(p));
+    let detailed = p.aim.is_some();
     w.v3(p.pos);
-    w.f32(p.vel_y);
     w.u16(p.look.0);
     w.u16(p.look.1);
     write_hit(w, p.hit);
-    w.u16(p.ammo as u16);
-    w.u16(p.reserve as u16);
     write_opt_f32(w, p.reload_until);
     w.f32(p.flash_until);
     w.u16(p.kills as u16);
-    w.u8(p.grenades_left as u8);
-    write_opt_f32(w, p.charge_from);
     write_throw(w, p.throw);
-    w.u8(flag_byte(p));
-    write_message(w, &p.message);
-    write_opt_f32(w, p.target_hp);
     w.u16(p.deaths as u16);
     w.f32(p.hp);
     write_opt_f32(w, p.respawn_at);
     write_peek(w, p.peek);
+    if detailed {
+        w.f32(p.vel_y);
+        w.u16(p.ammo as u16);
+        w.u16(p.reserve as u16);
+        w.u8(p.grenades_left as u8);
+        write_opt_f32(w, p.charge_from);
+        write_message(w, &p.message);
+        write_opt_f32(w, p.target_hp);
+    }
     if let Some(a) = &p.aim {
         write_aim(w, a);
     }
 }
 
 fn read_player(r: &mut Reader, slot: u8) -> Result<PlayerSnap> {
+    let flags = r.u8()?;
+    let on = |n: u8| flags >> n & 1 != 0;
     let pos = r.v3()?;
-    let vel_y = r.f32()?;
     let look = (r.u16()?, r.u16()?);
     let hit = read_hit(r)?;
-    let ammo = r.u16()? as u32;
-    let reserve = r.u16()? as u32;
     let reload_until = r.opt_f32()?;
     let flash_until = r.f32()?;
     let kills = r.u16()? as u32;
-    let grenades_left = r.u8()? as u32;
-    let charge_from = r.opt_f32()?;
     let throw = read_throw(r)?;
-    let flags = r.u8()?;
-    let on = |n: u8| flags >> n & 1 != 0;
-    let message = read_message(r)?;
-    let target_hp = r.opt_f32()?;
     let (deaths, hp, respawn_at) = (r.u16()? as u32, r.f32()?, r.opt_f32()?);
     let peek = read_peek(r)?;
+    let (mut vel_y, mut ammo, mut reserve, mut grenades_left, mut charge_from, mut message, mut target_hp) = (0.0, 0, 0, 0, None, None, None);
+    if on(5) {
+        (vel_y, ammo, reserve, grenades_left) = (r.f32()?, r.u16()? as u32, r.u16()? as u32, r.u8()? as u32);
+        (charge_from, message, target_hp) = (r.opt_f32()?, read_message(r)?, r.opt_f32()?);
+    }
     let aim = if on(5) { Some(read_aim(r)?) } else { None };
     Ok(PlayerSnap {
         slot, pos, vel_y, on_ground: on(0), crouched: on(4), look, controlled: on(1), ammo, reserve, reload_until,
@@ -771,14 +834,11 @@ fn read_npc(r: &mut Reader) -> Result<NpcSnap> {
 fn write_thrown(w: &mut Writer, t: &ThrownSnap) {
     w.u8(t.owner);
     w.v3(t.pos);
-    w.v3(t.vel);
-    w.f32(t.fuse);
     w.f32(t.spin);
-    w.bool(t.at_rest);
 }
 
 fn read_thrown(r: &mut Reader) -> Result<ThrownSnap> {
-    Ok(ThrownSnap { owner: r.u8()?, pos: r.v3()?, vel: r.v3()?, fuse: r.f32()?, spin: r.f32()?, at_rest: r.bool()? })
+    Ok(ThrownSnap { owner: r.u8()?, pos: r.v3()?, spin: r.f32()? })
 }
 
 /// Everything in a snapshot but its events, as it differs from `base` if there is one
@@ -960,8 +1020,9 @@ impl ToServer {
 }
 
 impl ToClient {
-    /// The message as bytes. A snapshot leaves out the events that do not fit in a datagram;
-    /// `sent_events` says how many were put in.
+    /// The message as bytes. A snapshot leaves out the events that do not fit in a datagram, or
+    /// for one too big for a datagram, in the last of its parts; `sent_events` says how many
+    /// were put in.
     pub fn encode(&self) -> (Vec<u8>, usize) {
         self.encode_against(None)
     }
@@ -990,6 +1051,7 @@ impl ToClient {
                 w.u32(base.map_or(0, |b| b.tick + 1));
                 write_state(&mut w, s, base);
                 // Events go in as long as they fit
+                let room = if w.0.len() < MAX_PACKET { MAX_PACKET } else { (w.0.len() + 1).div_ceil(PART) * PART };
                 let mut body = Writer::new();
                 for (id, e) in &s.events {
                     let mut one = Writer::new();
@@ -998,7 +1060,7 @@ impl ToClient {
                         sent += 1;
                         continue;
                     }
-                    if w.0.len() + 1 + body.0.len() + 4 + one.0.len() > MAX_PACKET {
+                    if w.0.len() + 1 + body.0.len() + 4 + one.0.len() > room {
                         break;
                     }
                     body.u32(*id);
@@ -1012,6 +1074,13 @@ impl ToClient {
             ToClient::Goodbye { token } => {
                 header(&mut w, 3);
                 w.u32(*token);
+            }
+            ToClient::Part { tick, index, count, bytes } => {
+                header(&mut w, 4);
+                w.u32(*tick);
+                w.u8(*index);
+                w.u8(*count);
+                w.0.extend_from_slice(bytes);
             }
         }
         (w.0, sent)
@@ -1040,6 +1109,10 @@ impl ToClient {
                 ToClient::Snapshot(snap)
             }
             3 => ToClient::Goodbye { token: r.u32()? },
+            4 => {
+                let (tick, index, count) = (r.u32()?, r.u8()?, r.u8()?);
+                ToClient::Part { tick, index, count, bytes: r.rest().to_vec() }
+            }
             k => bail!("no such message as {k}"),
         };
         ensure!(r.left() == 0, "{} bytes left over", r.left());
@@ -1086,7 +1159,7 @@ mod tests {
                 NpcSnap { pos: [2.0, 0.0, 2.0], yaw: 60.0, hp: 40.0, state: NpcState::Reacting { motion: "thwu_bf", start: 14.5 }, aiming: true, walking: false, gait: crate::sim::characters::Gait::Walk, stance: Some(crate::mission::Stance::SitInChair) },
                 NpcSnap { pos: [3.0, 0.0, 2.0], yaw: 90.0, hp: 0.0, state: NpcState::Dead { motion: "hw_bk_up2", start: 12.0 }, aiming: false, walking: false, gait: crate::sim::characters::Gait::Walk, stance: None },
             ],
-            thrown: vec![ThrownSnap { owner: 1, pos: [5.0; 3], vel: [1.0, 2.0, 3.0], fuse: 1.5, spin: 40.0, at_rest: false }],
+            thrown: vec![ThrownSnap { owner: 1, pos: [5.0; 3], spin: 40.0 }],
             doors: vec![(0.0, false), (0.5, true), (1.0, true)],
             broken: vec![(3, 10.5), (200, 11.0)],
             events: vec![
@@ -1172,15 +1245,75 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_full_snapshot_fits_in_a_datagram() {
+    /// Another player as the receiver is sent them: without what only their own screen shows
+    fn other(slot: u8) -> PlayerSnap {
+        PlayerSnap { vel_y: 0.0, ammo: 0, reserve: 0, grenades_left: 0, charge_from: None, message: None, target_hp: None, aim: None, ..player(slot) }
+    }
+
+    /// A snapshot of a full game: every player, and `npcs` characters
+    fn crowded(npcs: usize) -> Snapshot {
         let mut snap = snapshot();
-        // Only the receiver's own player carries what is on their screen
-        snap.players = (0..MAX_PLAYERS as u8).map(|i| if i == 0 { player(0) } else { PlayerSnap { message: None, target_hp: None, aim: None, ..player(i) } }).collect();
-        snap.npcs = (0..16).map(|_| NpcSnap { pos: [1.0; 3], yaw: 1.0, hp: 1.0, state: NpcState::Reacting { motion: "thwu_bb", start: 1.0 }, aiming: true, walking: true, gait: crate::sim::characters::Gait::Creep, stance: Some(crate::mission::Stance::Slouch) }).collect();
-        snap.events.clear();
-        let (bytes, _) = ToClient::Snapshot(snap).encode();
-        assert!(bytes.len() < MAX_PACKET - 40, "{} bytes before any events", bytes.len());
+        snap.players = (0..MAX_PLAYERS as u8).map(|i| if i == 0 { player(0) } else { other(i) }).collect();
+        snap.npcs = (0..npcs).map(|i| NpcSnap { pos: [i as f32; 3], yaw: 1.0, hp: 1.0, state: NpcState::Reacting { motion: "thwu_bb", start: 1.0 }, aiming: true, walking: true, gait: crate::sim::characters::Gait::Creep, stance: Some(crate::mission::Stance::Slouch) }).collect();
+        snap
+    }
+
+    #[test]
+    fn a_full_game_on_the_move_fits_in_a_datagram() {
+        let mut base = crowded(16);
+        base.events.clear();
+        // Everyone moves, looks round and fires, and every character moves
+        let mut next = base.clone();
+        next.tick += 2;
+        for p in next.players.iter_mut() {
+            p.pos[0] += 3.0;
+            p.look.0 += 50;
+            p.gun_trigger = !p.gun_trigger;
+            p.flash_until += 0.1;
+        }
+        for n in next.npcs.iter_mut() {
+            n.pos[2] += 2.0;
+            n.yaw += 4.0;
+        }
+        let (bytes, _) = ToClient::Snapshot(next).encode_against(Some(&base));
+        // With room left for a busy tick's events
+        assert!(bytes.len() < MAX_PACKET - 300, "{} bytes before any events", bytes.len());
+    }
+
+    #[test]
+    fn a_snapshot_too_big_for_a_datagram_comes_through_in_parts() {
+        // A full game in full, with a hunt's worth of terrorists and a level of doors
+        let mut snap = crowded(40);
+        snap.doors = (0..150).map(|i| (i as f32 / 150.0, i % 2 == 0)).collect();
+        let (bytes, sent) = ToClient::Snapshot(snap.clone()).encode();
+        assert_eq!(sent, snap.events.len(), "the events fit in the last part");
+        let datagrams = split(snap.tick, bytes.clone());
+        assert!(datagrams.len() > 1);
+        assert!(datagrams.iter().all(|d| d.len() <= MAX_PACKET));
+
+        let part = |d: &Vec<u8>| match ToClient::decode(d).unwrap() {
+            ToClient::Part { tick, index, count, bytes } => (tick, index, count, bytes),
+            m => panic!("{m:?}"),
+        };
+        // Out of order, and one twice
+        let mut parts = Parts::default();
+        let mut whole = None;
+        for d in datagrams.iter().rev().chain(&datagrams[..1]) {
+            let (tick, index, count, bytes) = part(d);
+            if let Some(w) = parts.add(tick, index, count, bytes) {
+                assert!(whole.is_none(), "put together twice");
+                whole = Some(w);
+            }
+        }
+        assert_eq!(whole.as_ref(), Some(&bytes));
+        assert_eq!(ToClient::decode(&bytes).unwrap(), ToClient::Snapshot(snap.clone()));
+
+        // One lost, and the rest are never a snapshot
+        let mut parts = Parts::default();
+        for d in &datagrams[1..] {
+            let (tick, index, count, bytes) = part(d);
+            assert!(parts.add(tick, index, count, bytes).is_none());
+        }
     }
 
     fn delta_trip(base: &Snapshot, next: &Snapshot) -> (Snapshot, usize) {
@@ -1220,7 +1353,7 @@ mod tests {
         next.players[1].hit = Some(("thwu_ll", 3));
         next.npcs[1].state = NpcState::Dead { motion: "hw_bk_up2", start: 15.0 };
         next.npcs[1].hp = 0.0;
-        next.thrown.push(ThrownSnap { owner: 0, pos: [1.0; 3], vel: [0.0; 3], fuse: 2.0, spin: 0.0, at_rest: true });
+        next.thrown.push(ThrownSnap { owner: 0, pos: [1.0; 3], spin: 0.0 });
         next.doors[2] = (0.25, false);
         next.broken.push((50, 16.0));
         next.broken.sort_by_key(|b| b.0);

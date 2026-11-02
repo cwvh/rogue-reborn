@@ -12,7 +12,7 @@ use crate::collision::Player;
 use crate::net::animation::TELEPORT;
 use crate::net::link::{Addr, Link};
 use crate::net::meter::Meter;
-use crate::net::proto::{INPUTS_PER_PACKET, Setup, Snapshot, ToClient, ToServer};
+use crate::net::proto::{INPUTS_PER_PACKET, Parts, Setup, Snapshot, ToClient, ToServer};
 use crate::sim::{Event, Input, Sim, TICK};
 
 type V3 = [f32; 3];
@@ -91,6 +91,8 @@ pub struct Client {
     /// The latest snapshots received, without their events: what the server may say a snapshot
     /// is the difference from
     received: VecDeque<Snapshot>,
+    /// Parts of snapshots too big for a datagram
+    parts: Parts,
     /// When (client time) the newest snapshot arrived
     arrived: f64,
     /// The server tick that other players are shown at, which runs at the pace of the clock
@@ -106,7 +108,7 @@ impl Client {
             server, token, build: build.to_string(), status: Status::Connecting, setup: None, slot: 0, seq: 1,
             recent: VecDeque::new(), pending: VecDeque::new(), last_snapshot: 0, event_seen: 0, heard: 0.0,
             asked: f64::NEG_INFINITY, correction: 0.0, snapshots: 0,
-            history: VecDeque::new(), received: VecDeque::new(), arrived: 0.0, view_tick: None, view_at: 0.0,
+            history: VecDeque::new(), received: VecDeque::new(), parts: Parts::default(), arrived: 0.0, view_tick: None, view_at: 0.0,
             meter: Meter::default(),
         }
     }
@@ -148,6 +150,16 @@ impl Client {
             self.meter.received(now, bytes.len());
             let received = &self.received;
             let Ok(msg) = ToClient::decode_with(&bytes, &|tick| received.iter().find(|s| s.tick == tick)) else { continue };
+            // A message in parts is read once the last of them comes
+            let msg = match msg {
+                ToClient::Part { tick, index, count, bytes } => {
+                    let Some(whole) = self.parts.add(tick, index, count, bytes) else { continue };
+                    let received = &self.received;
+                    let Ok(msg) = ToClient::decode_with(&whole, &|tick| received.iter().find(|s| s.tick == tick)) else { continue };
+                    msg
+                }
+                msg => msg,
+            };
             match msg {
                 ToClient::Accept { token, slot, setup, .. } if token == self.token => {
                     self.heard = now;

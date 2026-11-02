@@ -124,6 +124,12 @@ impl<'a> Reader<'a> {
     pub fn left(&self) -> usize {
         self.bytes.len() - self.at
     }
+    /// Everything not read yet
+    pub fn rest(&mut self) -> &'a [u8] {
+        let rest = &self.bytes[self.at..];
+        self.at = self.bytes.len();
+        rest
+    }
     pub fn bool(&mut self) -> Result<bool> {
         Ok(self.u8()? != 0)
     }
