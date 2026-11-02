@@ -125,7 +125,7 @@ fn main() {
         });
         let mut link = Impaired::new(
             UdpLink::bind("0.0.0.0:0").expect("cannot open a socket"),
-            Conditions { latency: args.sim_latency, jitter: args.sim_jitter, loss: args.sim_loss, duplicate: 0.0 },
+            Conditions { latency: args.sim_latency, jitter: args.sim_jitter, loss: args.sim_loss, duplicate: 0.0, ..Conditions::NONE },
             std::process::id() as u64,
         );
         let to_server = link.inner_mut().addr_of(server);

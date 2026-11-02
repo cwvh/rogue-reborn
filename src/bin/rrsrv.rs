@@ -258,7 +258,7 @@ fn main() {
             eprintln!("rrsrv: cannot listen on port {}: {e}", args.port);
             std::process::exit(1);
         }),
-        Conditions { latency: args.sim_latency, jitter: args.sim_jitter, loss: args.sim_loss, duplicate: 0.0 },
+        Conditions { latency: args.sim_latency, jitter: args.sim_jitter, loss: args.sim_loss, duplicate: 0.0, ..Conditions::NONE },
         args.seed,
     );
     println!("rrsrv build {build} listening on port {} for up to {} players: {map_name}, {n_npcs} characters", args.port, args.max_players);

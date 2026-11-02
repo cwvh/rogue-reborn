@@ -85,6 +85,13 @@ pub struct Peer {
     pub view: Option<Frame>,
     /// Over the internet rather than on the LAN
     pub remote: bool,
+    /// How fast this computer's clock runs, against true time (1 is true)
+    pub clock: f64,
+    /// While true time is in this span, the computer does nothing at all, as when the game is
+    /// stuck or its window is put aside
+    pub frozen: Option<(f64, f64)>,
+    /// Ticks its clock has run
+    ran: u64,
     /// For the lab: what was on screen as each of the latest inputs was sent
     shown: VecDeque<Shown>,
     /// For the lab: how many of their own shots and deaths they have been told of
@@ -103,6 +110,9 @@ struct Shown {
 
 /// How long what was on screen is kept, in ticks: longer than any input waits to be used
 const SHOWN: usize = 240;
+
+/// The most ticks a computer runs at once to catch up, as the game's client does; it drops the rest
+const CATCH_UP: u64 = 5;
 
 /// The figures for a player, or for players of a kind
 #[derive(Clone, Debug, Default)]
@@ -206,7 +216,7 @@ impl Game {
         let client = Client::new(self.server_link.addr(), 1000 + self.peers.len() as u32, build);
         self.peers.push(Peer {
             client, link, sim: None, script: Box::new(script), bot: None, sees: None, ticks: 0, on: true, events: Vec::new(),
-            recorder: None, frames: Vec::new(), view: None, remote: false, shown: VecDeque::new(), told_shots: 0, told_deaths: 0,
+            recorder: None, frames: Vec::new(), view: None, remote: false, clock: 1.0, frozen: None, ran: self.steps, shown: VecDeque::new(), told_shots: 0, told_deaths: 0,
         });
         self.peers.len() - 1
     }
@@ -253,12 +263,34 @@ impl Game {
         self.peers[peer].remote = conditions.latency > 0.005;
     }
 
-    /// Everyone's computer runs a tick, then the server looks at what has come in
+    /// Everyone's computer runs as many ticks as its clock has come to, usually one, then the
+    /// server looks at what has come in
     pub fn step(&mut self) {
         self.steps += 1;
         let now = self.steps as f64 * TICK as f64;
         self.net.set_time(now);
+        let steps = self.steps;
         for p in self.peers.iter_mut().filter(|p| p.on) {
+            if p.frozen.is_some_and(|(from, until)| (from..until).contains(&now)) {
+                continue;
+            }
+            // Its own clock
+            let (own, due) = if p.clock == 1.0 { (now, steps) } else { (now * p.clock, (steps as f64 * p.clock + 1e-9) as u64) };
+            let ticks = due.saturating_sub(p.ran).min(CATCH_UP);
+            p.ran = due;
+            for _ in 0..ticks {
+                Game::tick_peer(p, own, &mut self.lab);
+            }
+        }
+        let happened = self.server.update(now, &mut self.server_link);
+        if self.lab.is_some() {
+            self.judge(now, &happened);
+        }
+    }
+
+    /// One tick of a player's computer, at `now` by its clock
+    fn tick_peer(p: &mut Peer, now: f64, lab: &mut Option<Lab>) {
+        {
             if p.sim.is_none() {
                 let setup = p.client.connect(now, &mut p.link).cloned();
                 if let Some(rec) = p.recorder.as_mut() {
@@ -274,9 +306,9 @@ impl Game {
                     p.sim = Some(sim);
                 }
             }
-            let Some(sim) = p.sim.as_mut() else { continue };
+            let Some(sim) = p.sim.as_mut() else { return };
             let slot = p.client.slot();
-            let looks = p.bot.is_some() || p.sees.is_some() || p.recorder.is_some() || self.lab.is_some();
+            let looks = p.bot.is_some() || p.sees.is_some() || p.recorder.is_some() || lab.is_some();
             let view = looks.then(|| p.client.view(now));
             p.view = view.clone();
             if let (Some(rec), Some(view)) = (p.recorder.as_mut(), &view) {
@@ -293,7 +325,7 @@ impl Game {
             if let Some(rec) = p.recorder.as_mut() {
                 rec.ticked(now, input, &mut p.client, sim);
             }
-            if let (Some(lab), Some(view), true) = (self.lab.as_mut(), &view, slot < sim.players.len()) {
+            if let (Some(lab), Some(view), true) = (lab.as_mut(), &view, slot < sim.players.len()) {
                 let bodies = view.players.iter().filter(|s| s.0 != slot && s.3.is_none())
                     .map(|&(i, feet, _, _)| (i, feet, sim.players.get(i).is_some_and(|q| q.player.crouched))).collect();
                 p.shown.push_back(Shown { seq: p.client.last_seq(), sent: now, eye: sim.eye(slot), bodies });
@@ -319,10 +351,6 @@ impl Game {
                 }
             }
             p.events.extend(news);
-        }
-        let happened = self.server.update(now, &mut self.server_link);
-        if self.lab.is_some() {
-            self.judge(now, &happened);
         }
     }
 
@@ -389,7 +417,7 @@ fn grow(list: &mut Vec<Vec<f64>>, i: usize) -> &mut Vec<f64> {
 
 /// A connection over the internet with this round trip (seconds), a little uneven and lossy
 pub fn internet(ping: f64) -> Conditions {
-    Conditions { latency: ping / 2.0, jitter: ping / 10.0, loss: 0.01, duplicate: 0.0 }
+    Conditions { latency: ping / 2.0, jitter: ping / 10.0, loss: 0.01, duplicate: 0.0, ..Conditions::NONE }
 }
 
 /// What a fight comes to
@@ -409,15 +437,15 @@ fn lab_setup() -> Setup {
     Setup { pvp: true, reserve: 30000, ..demo_setup() }
 }
 
-/// `lan` bots on the LAN and `remote` over the internet with this round trip fight for `seconds`
-pub fn fight(lan: usize, remote: usize, ping: f64, seconds: f32) -> Fight {
+/// `lan` bots on the LAN and `remote` over `far` fight for `seconds`
+pub fn fight(lan: usize, remote: usize, far: Conditions, seconds: f32) -> Fight {
     let mut game = Game::with_setup(Conditions::lan(), lab_setup());
     game.measure();
     let skills = [Skill::hard(), Skill::normal(), Skill::easy()];
     for i in 0..lan + remote {
         let p = game.join_bot(skills[i % 3], 100 + i as u64);
         if i >= lan {
-            game.connect_over(p, internet(ping));
+            game.connect_over(p, far);
         }
     }
     game.run(seconds);

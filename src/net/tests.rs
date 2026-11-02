@@ -123,7 +123,7 @@ fn players_see_one_another_move() {
 
 #[test]
 fn an_event_is_heard_once_even_when_the_network_loses_and_repeats_datagrams() {
-    let mut game = Game::new(Conditions { latency: 0.05, jitter: 0.03, loss: 0.35, duplicate: 0.35 });
+    let mut game = Game::new(Conditions { latency: 0.05, jitter: 0.03, loss: 0.35, duplicate: 0.35, ..Conditions::NONE });
     let a = game.join(|t| match t {
         20 => Input { grenade: true, fire: true, run: true, ..Input::default() },
         21..=50 => Input { fire: true, run: true, ..Input::default() },
@@ -432,7 +432,7 @@ fn the_lag_meter_reads_a_clean_connection_as_clean() {
 #[test]
 fn the_lag_meter_sees_the_latency_jitter_and_loss_of_a_bad_connection() {
     let clean = metered(Conditions::NONE);
-    let f = metered(Conditions { latency: 0.08, jitter: 0.04, loss: 0.08, duplicate: 0.0 });
+    let f = metered(Conditions { latency: 0.08, jitter: 0.04, loss: 0.08, duplicate: 0.0, ..Conditions::NONE });
     // 80 ms each way, 20 more each way on average from the jitter, and the inputs the server
     // holds back so that a late one does not leave it with nothing (that lag is felt too)
     let added = f.ping - clean.ping;
@@ -528,11 +528,69 @@ fn the_one_peeking_sees_first_and_more_so_with_lag() {
 
 #[test]
 fn a_lab_fight_measures_players_on_the_lan_and_far_away() {
-    use crate::net::lab::fight;
-    let f = fight(4, 2, 0.1, 15.0);
+    use crate::net::lab::{fight, internet};
+    let f = fight(4, 2, internet(0.1), 15.0);
     assert!(f.lan.shots > 0 && f.remote.shots > 0, "{f:?}");
     let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len().max(1) as f32;
     // Far away, the news of a shot takes a round trip longer
     assert!(mean(&f.remote.shot_delays) > mean(&f.lan.shot_delays) + 0.08, "{f:?}");
     assert!(f.upload > 1000.0 && f.meters.len() == 6);
+}
+
+#[test]
+fn a_player_whose_computer_freezes_stops_on_the_server_and_plays_on_after() {
+    let mut game = Game::new(Conditions::lan());
+    // Running forward and back, the trigger held
+    let a = game.join(|t| Input { forward: (t / 60) % 2 == 0, back: (t / 60) % 2 == 1, fire: true, run: true, ..Input::default() });
+    game.run(2.2);
+    let slot = game.peers[a].client.slot();
+    let (before, ammo) = (game.server_pos(slot), game.server.sim.players[slot].ammo + game.server.sim.players[slot].reserve);
+    game.peers[a].frozen = Some((2.2, 4.2));
+    game.run(1.9);
+    // A moment's running and firing, and then nothing
+    let moved = distance(game.server_pos(slot), before);
+    let fired = ammo - game.server.sim.players[slot].ammo - game.server.sim.players[slot].reserve;
+    assert!(moved < 260.0, "ran on {moved} units");
+    assert!(fired <= 6, "fired {fired} rounds");
+    game.run(2.0);
+    assert_eq!(game.peers[a].client.status, Status::Connected);
+    let after = game.server_pos(slot);
+    game.run(0.5);
+    assert!(distance(game.server_pos(slot), after) > 100.0, "not moving again");
+}
+
+/// A player walking about on broadband for `seconds`, with a clock that runs at `rate`: their
+/// ping at the end, and the fixes to their prediction all along
+fn drifting(rate: f64, seconds: f32) -> (f32, u32) {
+    let mut game = Game::new(Conditions::broadband());
+    let a = game.join(|t| Input { forward: (t / 50) % 2 == 0, right: (t / 70) % 2 == 0, run: true, ..Input::default() });
+    game.peers[a].clock = rate;
+    let mut fixes = 0;
+    for _ in 0..(seconds / TICK) as usize {
+        game.step();
+        fixes += (game.peers[a].client.correction > 1.0) as u32;
+    }
+    (game.peers[a].client.meter.figures().ping, fixes)
+}
+
+#[test]
+fn a_clock_that_runs_fast_does_not_pile_up_inputs_on_the_server() {
+    let (true_ping, _) = drifting(1.0, 60.0);
+    // A tenth of a millisecond a second fast, for ten minutes, and a clock that is far off
+    for (rate, seconds) in [(1.0001, 600.0), (1.005, 60.0), (0.995, 60.0)] {
+        let (ping, fixes) = drifting(rate, seconds);
+        assert!(ping < true_ping + 0.012, "{ping} against {true_ping} at {rate}");
+        assert!(fixes as f32 <= seconds / 10.0, "{fixes} fixes at {rate}");
+    }
+}
+
+#[test]
+fn players_on_wifi_keep_playing_through_its_bursts_and_stalls() {
+    use crate::net::lab::fight;
+    let f = fight(4, 2, Conditions::wifi(), 40.0);
+    assert!(f.remote.shots > 10, "{f:?}");
+    // Shots from a held trigger are judged as the shooter would have seen them; what is left is
+    // a stall longer than the server looks back, and the shooter's own place mispredicted
+    assert!(f.remote.agreement() > 0.85, "{:?}", f.remote.agreement());
+    assert!(f.lan.agreement() > 0.97, "{:?}", f.lan.agreement());
 }

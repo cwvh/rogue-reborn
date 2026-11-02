@@ -124,6 +124,8 @@ pub struct Fired {
     pub bodies: Vec<(usize, V3, bool)>,
     /// The number of the shooter's input that fired it, which the server fills in
     pub seq: u32,
+    /// How many ticks back the others were judged (`Sim::rewind`)
+    pub back: f32,
 }
 
 /// One of the parts of a player's body that bullets hit: an upright cylinder of `HIT_RADIUS`
@@ -234,6 +236,11 @@ impl Input {
     /// The same input a tick later: what is held stays held, and the presses are over
     pub fn held(&self) -> Input {
         Input { use_key: false, reload: false, gun: false, grenade: false, toggle_culling: false, ..*self }
+    }
+
+    /// Hands off: nothing pressed or held, looking the same way, crouched or not as before
+    pub fn let_go(&self) -> Input {
+        Input { yaw: self.yaw, pitch: self.pitch, crouch: self.crouch, ..Input::default() }
     }
 }
 
@@ -1152,7 +1159,7 @@ impl Sim {
             let back = self.rewind.get(slot).copied().unwrap_or(0.0);
             let bodies = (0..self.players.len()).filter(|&i| i != slot)
                 .filter_map(|i| self.seen_then(i, back).map(|s| (i, s.feet, s.crouched))).collect();
-            self.fired.as_mut().unwrap().push(Fired { shooter: slot, eye, dir, bodies, seq: 0 });
+            self.fired.as_mut().unwrap().push(Fired { shooter: slot, eye, dir, bodies, seq: 0, back });
         }
         self.bullet(eye, dir, Shooter::Player(slot), ev);
     }

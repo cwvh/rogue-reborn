@@ -35,25 +35,85 @@ pub struct Conditions {
     pub loss: f32,
     /// The chance of one arriving twice
     pub duplicate: f32,
+    /// Now and then everything is lost for a while, as on Wi-Fi: a burst starts once in this
+    /// many seconds on average (0 for never), and lasts this many seconds on average
+    pub burst_every: f64,
+    pub burst_for: f64,
+    /// Now and then everything is held up for a while and then comes in a rush, as on a busy
+    /// link: once in this many seconds on average (0 for never), for this many on average
+    pub stall_every: f64,
+    pub stall_for: f64,
 }
 
 impl Conditions {
     /// A perfect connection
-    pub const NONE: Conditions = Conditions { latency: 0.0, jitter: 0.0, loss: 0.0, duplicate: 0.0 };
+    pub const NONE: Conditions = Conditions { latency: 0.0, jitter: 0.0, loss: 0.0, duplicate: 0.0, burst_every: 0.0, burst_for: 0.0, stall_every: 0.0, stall_for: 0.0 };
 
     /// A wired LAN: well under a millisecond each way
     pub fn lan() -> Conditions {
-        Conditions { latency: 0.0005, jitter: 0.0002, loss: 0.0, duplicate: 0.0 }
+        Conditions { latency: 0.0005, jitter: 0.0002, ..Conditions::NONE }
     }
 
     /// Typical of a decent home connection to a nearby server
     pub fn broadband() -> Conditions {
-        Conditions { latency: 0.03, jitter: 0.01, loss: 0.01, duplicate: 0.0 }
+        Conditions { latency: 0.03, jitter: 0.01, loss: 0.01, ..Conditions::NONE }
     }
 
     /// Typical of a poor connection
     pub fn poor() -> Conditions {
-        Conditions { latency: 0.12, jitter: 0.06, loss: 0.08, duplicate: 0.01 }
+        Conditions { latency: 0.12, jitter: 0.06, loss: 0.08, duplicate: 0.01, ..Conditions::NONE }
+    }
+
+    /// Wi-Fi in a busy house: a fair connection that every few seconds loses everything for a
+    /// moment, and now and then stalls
+    pub fn wifi() -> Conditions {
+        Conditions { latency: 0.03, jitter: 0.01, loss: 0.01, burst_every: 5.0, burst_for: 0.2, stall_every: 15.0, stall_for: 0.3, ..Conditions::NONE }
+    }
+}
+
+/// When a link's bursts of loss and its stalls come, drawn as time goes on
+#[derive(Clone, Debug)]
+struct Outages {
+    rng: u64,
+    next_burst: Option<f64>,
+    burst_until: f64,
+    next_stall: Option<f64>,
+    stall_until: f64,
+}
+
+impl Outages {
+    fn new(seed: u64) -> Outages {
+        Outages { rng: seed | 1, next_burst: None, burst_until: f64::MIN, next_stall: None, stall_until: f64::MIN }
+    }
+
+    /// A random time to wait, `mean` seconds on average, as when things happen at random
+    fn wait(&mut self, mean: f64) -> f64 {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 7;
+        self.rng ^= self.rng << 17;
+        let u = (self.rng >> 11) as f64 / (1u64 << 53) as f64;
+        -(1.0 - u).ln() * mean
+    }
+
+    /// At `now`: whether everything is being lost, and until when everything is held up
+    fn at(&mut self, now: f64, c: &Conditions) -> (bool, f64) {
+        if c.burst_every > 0.0 {
+            let mut next = match self.next_burst { Some(t) => t, None => now + self.wait(c.burst_every) };
+            while now >= next {
+                self.burst_until = next + self.wait(c.burst_for);
+                next += self.wait(c.burst_every);
+            }
+            self.next_burst = Some(next);
+        }
+        if c.stall_every > 0.0 {
+            let mut next = match self.next_stall { Some(t) => t, None => now + self.wait(c.stall_every) };
+            while now >= next {
+                self.stall_until = next + self.wait(c.stall_for);
+                next += self.wait(c.stall_every);
+            }
+            self.next_stall = Some(next);
+        }
+        (now < self.burst_until, self.stall_until)
     }
 }
 
@@ -84,15 +144,16 @@ impl Impairment {
         (self.rng >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    /// Put a datagram in the pipe at time `now`
-    fn put(&mut self, now: f64, peer: Addr, bytes: &[u8]) {
+    /// Put a datagram in the pipe at time `now`, on a link with these outages
+    fn put(&mut self, now: f64, peer: Addr, bytes: &[u8], outages: &mut Outages) {
         let c = self.conditions;
-        if self.random() < c.loss as f64 {
+        let (lost, held_until) = outages.at(now, &c);
+        if lost || self.random() < c.loss as f64 {
             return;
         }
         let copies = if self.random() < c.duplicate as f64 { 2 } else { 1 };
         for _ in 0..copies {
-            let at = now + c.latency + c.jitter * self.random();
+            let at = now.max(held_until) + c.latency + c.jitter * self.random();
             self.held.push(Held { at, peer, bytes: bytes.to_vec() });
         }
     }
@@ -123,11 +184,13 @@ struct Net {
     conditions: Conditions,
     /// Conditions for datagrams from one endpoint to another, in place of the usual ones
     between: HashMap<(Addr, Addr), Conditions>,
+    /// The bursts and stalls of the link from each endpoint to each other
+    outages: HashMap<(Addr, Addr), Outages>,
 }
 
 impl FakeNet {
     pub fn new(seed: u64, conditions: Conditions) -> FakeNet {
-        FakeNet { inner: Rc::new(RefCell::new(Net { now: 0.0, pipes: Vec::new(), seed, conditions, between: HashMap::new() })) }
+        FakeNet { inner: Rc::new(RefCell::new(Net { now: 0.0, pipes: Vec::new(), seed, conditions, between: HashMap::new(), outages: HashMap::new() })) }
     }
 
     /// Join the network
@@ -193,7 +256,10 @@ impl Link for FakeLink {
         if let Some(c) = net.between.get(&(self.addr, to)).copied() {
             net.pipes[to as usize - 1].conditions = c;
         }
-        net.pipes[to as usize - 1].put(now, self.addr, bytes);
+        let seed = net.seed ^ (self.addr << 32 | to).wrapping_mul(0x9E3779B97F4A7C15);
+        let mut outages = net.outages.remove(&(self.addr, to)).unwrap_or_else(|| Outages::new(seed));
+        net.pipes[to as usize - 1].put(now, self.addr, bytes, &mut outages);
+        net.outages.insert((self.addr, to), outages);
         net.pipes[to as usize - 1].conditions = saved;
     }
 
@@ -267,11 +333,15 @@ pub struct Impaired<L: Link> {
     now: f64,
     outgoing: Impairment,
     incoming: Impairment,
+    outages: (Outages, Outages),
 }
 
 impl<L: Link> Impaired<L> {
     pub fn new(inner: L, conditions: Conditions, seed: u64) -> Impaired<L> {
-        Impaired { inner, now: 0.0, outgoing: Impairment::new(conditions, seed), incoming: Impairment::new(conditions, seed ^ 0x5DEECE66D) }
+        Impaired {
+            inner, now: 0.0, outgoing: Impairment::new(conditions, seed), incoming: Impairment::new(conditions, seed ^ 0x5DEECE66D),
+            outages: (Outages::new(seed ^ 0xB5), Outages::new(seed ^ 0xC3)),
+        }
     }
 
     pub fn set_time(&mut self, now: f64) {
@@ -292,14 +362,14 @@ impl<L: Link> Impaired<L> {
             self.inner.send(to, &bytes);
         }
         while let Some((from, bytes)) = self.inner.recv() {
-            self.incoming.put(self.now, from, &bytes);
+            self.incoming.put(self.now, from, &bytes, &mut self.outages.1);
         }
     }
 }
 
 impl<L: Link> Link for Impaired<L> {
     fn send(&mut self, to: Addr, bytes: &[u8]) {
-        self.outgoing.put(self.now, to, bytes);
+        self.outgoing.put(self.now, to, bytes, &mut self.outages.0);
         self.pump();
     }
 
@@ -348,7 +418,7 @@ mod tests {
 
     #[test]
     fn jitter_puts_datagrams_out_of_order_and_duplicates_repeat_them() {
-        let (net, mut a, mut b) = pair(Conditions { latency: 0.02, jitter: 0.05, loss: 0.0, duplicate: 0.5 });
+        let (net, mut a, mut b) = pair(Conditions { latency: 0.02, jitter: 0.05, loss: 0.0, duplicate: 0.5, ..Conditions::NONE });
         for i in 0..200u32 {
             net.set_time(i as f64 * 0.001);
             a.send(b.addr(), &i.to_le_bytes());
@@ -360,6 +430,49 @@ mod tests {
         for i in 0..200 {
             assert!(got.contains(&i));
         }
+    }
+
+    /// Send a numbered datagram every 10 ms for `seconds`, and say when each arrived
+    fn arrivals(conditions: Conditions, seconds: f64) -> Vec<Option<f64>> {
+        let (net, mut a, mut b) = pair(conditions);
+        let n = (seconds / 0.01) as usize;
+        let mut came = vec![None; n];
+        for i in 0..n + 200 {
+            let now = i as f64 * 0.01;
+            net.set_time(now);
+            if i < n {
+                a.send(b.addr(), &(i as u32).to_le_bytes());
+            }
+            while let Some((_, p)) = b.recv() {
+                came[u32::from_le_bytes(p.try_into().unwrap()) as usize] = Some(now);
+            }
+        }
+        came
+    }
+
+    #[test]
+    fn a_burst_loses_everything_for_a_while() {
+        // A fifth of a second lost, every two seconds on average
+        let came = arrivals(Conditions { burst_every: 2.0, burst_for: 0.2, ..Conditions::NONE }, 200.0);
+        let lost: Vec<usize> = (0..came.len()).filter(|&i| came[i].is_none()).collect();
+        let share = lost.len() as f32 / came.len() as f32;
+        assert!((0.05..0.15).contains(&share), "{share} lost");
+        // In runs, not here and there
+        let runs = 1 + lost.windows(2).filter(|w| w[1] != w[0] + 1).count();
+        let run = lost.len() as f32 / runs as f32;
+        assert!((10.0..35.0).contains(&run), "runs of {run} datagrams");
+    }
+
+    #[test]
+    fn a_stall_holds_everything_up_and_lets_it_through_in_a_rush() {
+        let came = arrivals(Conditions { latency: 0.02, stall_every: 2.0, stall_for: 0.3, ..Conditions::NONE }, 100.0);
+        assert!(came.iter().all(Option::is_some), "a stall loses nothing");
+        let late: Vec<f64> = came.iter().enumerate().map(|(i, t)| t.unwrap() - i as f64 * 0.01).collect();
+        let held = late.iter().filter(|&&d| d > 0.1).count();
+        assert!((200..2000).contains(&held), "{held} of {} held up", late.len());
+        assert!(late.iter().cloned().fold(0.0, f64::max) > 0.4);
+        // Most go straight through
+        assert!(late.iter().filter(|&&d| d < 0.04).count() > late.len() * 3 / 4);
     }
 
     #[test]

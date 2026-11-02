@@ -33,6 +33,17 @@ const MAX_QUEUE: usize = 6;
 /// If an input is missing but this many later ones are waiting, the missing one is given up on
 const GIVE_UP_AFTER: usize = 3;
 
+/// A client's clock is never quite the server's. One that runs fast sends inputs a little faster
+/// than they are used, and they would wait longer and longer in the queue. Every `SETTLE`
+/// ticks, a client that had `SPARE` inputs waiting even at the emptiest moment is steadily
+/// ahead, and one of its inputs is skipped.
+const SETTLE: u32 = 60;
+const SPARE: usize = 2;
+
+/// With no input coming, the last one is held this many ticks, to bridge a short loss, and then
+/// let go: a client that has stopped, stuck or put aside, does not run on and fire by itself
+const HOLD: u32 = 15;
+
 /// The furthest back (ticks) that a shot is judged against where the others were: half a second
 const MAX_REWIND: f32 = 30.0;
 
@@ -47,8 +58,15 @@ struct Remote {
     queue: BTreeMap<u32, (Input, u32)>,
     /// The number of the next input to use, once the first has arrived
     next_seq: Option<u32>,
-    /// What the player did last, which goes on if their inputs stop coming
+    /// What the player did last, which goes on for a while if their inputs stop coming
     last_input: Input,
+    /// Ticks since an input came to use
+    starved: u32,
+    /// The moment the client showed as it sent the last input used (`ToServer::Input::view`)
+    last_view: u32,
+    /// The fewest inputs waiting beyond the one used, and ticks, since the queue was last looked at
+    low: usize,
+    looked: u32,
     /// The number of the latest input used
     applied_seq: u32,
     /// Events up to this number are known to have arrived
@@ -66,10 +84,35 @@ impl Remote {
     /// The input for this tick
     fn take(&mut self) -> (Input, u32) {
         let Some(mut next) = self.next_seq else { return (self.last_input.held(), 0) };
+        // The last input again, as at the moment the client would have shown by now, so that a
+        // shot from a held trigger is judged as the shooter would have seen it
+        let missing = |r: &mut Remote| {
+            r.starved += 1;
+            let view = if r.last_view == 0 { 0 } else { r.last_view + 16 * r.starved };
+            (if r.starved > HOLD { r.last_input.let_go() } else { r.last_input.held() }, view)
+        };
         // Too far behind: drop the oldest and catch up
         while self.queue.len() > MAX_QUEUE {
             self.queue.pop_first();
             next = self.queue.keys().next().copied().unwrap_or(next);
+        }
+        // Steadily ahead: skip one, keeping what it pressed
+        self.low = self.low.min(self.queue.len().saturating_sub(1));
+        self.looked += 1;
+        if self.looked >= SETTLE {
+            if self.low >= SPARE {
+                if let Some((skipped, _)) = self.queue.remove(&next) {
+                    next = self.queue.keys().next().copied().unwrap_or(next + 1);
+                    if let Some((input, _)) = self.queue.get_mut(&next) {
+                        input.use_key |= skipped.use_key;
+                        input.reload |= skipped.reload;
+                        input.gun |= skipped.gun;
+                        input.grenade |= skipped.grenade;
+                        input.toggle_culling |= skipped.toggle_culling;
+                    }
+                }
+            }
+            (self.low, self.looked) = (usize::MAX, 0);
         }
         let seq = if self.queue.contains_key(&next) {
             Some(next)
@@ -84,11 +127,13 @@ impl Remote {
                 self.next_seq = Some(s + 1);
                 self.applied_seq = s;
                 self.last_input = input;
+                self.last_view = view;
+                self.starved = 0;
                 (input, view)
             }
             None => {
                 self.next_seq = Some(next);
-                (self.last_input.held(), 0)
+                missing(self)
             }
         }
     }
@@ -201,7 +246,7 @@ impl Server {
                     rec.joined(slot, spawn);
                 }
                 self.remotes.push(Remote {
-                    addr: from, token, slot, queue: BTreeMap::new(), next_seq: None, last_input: Input { run: true, ..Input::default() },
+                    addr: from, token, slot, queue: BTreeMap::new(), next_seq: None, last_input: Input { run: true, ..Input::default() }, starved: 0, last_view: 0, low: usize::MAX, looked: 0,
                     applied_seq: 0, event_ack: self.next_event - 1, in_flight: VecDeque::new(), heard: now, acked: 0, sent: VecDeque::new(),
                 });
                 self.accept(link, from, token, slot);
@@ -263,7 +308,8 @@ impl Server {
         let events = self.sim.tick(&inputs, TICK);
         if let Some(fired) = self.sim.fired.as_mut() {
             for f in &mut fired[fired_before..] {
-                f.seq = self.remotes.iter().find(|r| r.slot == f.shooter).map_or(0, |r| r.applied_seq);
+                // The input the client sent for this tick, though it may never have come
+                f.seq = self.remotes.iter().find(|r| r.slot == f.shooter).map_or(0, |r| r.applied_seq + r.starved);
             }
         }
         self.tick += 1;

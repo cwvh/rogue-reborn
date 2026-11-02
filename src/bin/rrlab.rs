@@ -59,7 +59,9 @@ fn main() {
         }
     }
 
-    println!("Fights: bots in the box room, everyone for themselves, {seconds:.0} s each");
+    println!("Fights: bots in the box room, everyone for themselves, {seconds:.0} s each. A ping is a");
+    println!("round trip. Wi-Fi is 60 ms with everything lost for a fifth of a second every five");
+    println!("seconds or so, and held up for about a third of a second every fifteen.");
     println!();
     println!("A shot agrees when the server and the shooter's screen hit the same player, or both miss.");
     println!("Honored: hits on the shooter's screen the server gave. Unseen: hits the server gave that");
@@ -69,11 +71,17 @@ fn main() {
     println!("{:<22} {:^39} {:^39}", "", "shooters on the LAN", "shooters over the internet");
     println!("{:<22} {:>6} {:>6} {:>8} {:>7} {:>5} {:>5} {:>6} {:>6} {:>8} {:>7} {:>5} {:>5}",
         "players", "shots", "agree", "honored", "unseen", "gap", "p95", "shots", "agree", "honored", "unseen", "gap", "p95");
-    let rows: Vec<(usize, usize, f64)> = vec![(8, 0, 0.0), (8, 2, 0.05), (8, 2, 0.10), (8, 2, 0.15), (14, 2, 0.10)];
+    let rows = [
+        ("8 LAN", 8, 0, Conditions::lan()),
+        ("8 LAN, 2 at 50 ms", 8, 2, internet(0.05)),
+        ("8 LAN, 2 at 100 ms", 8, 2, internet(0.10)),
+        ("8 LAN, 2 at 150 ms", 8, 2, internet(0.15)),
+        ("8 LAN, 2 on Wi-Fi", 8, 2, Conditions::wifi()),
+        ("14 LAN, 2 at 100 ms", 14, 2, internet(0.10)),
+    ];
     let mut fights = Vec::new();
-    for &(lan, remote, ping) in &rows {
-        let f = fight(lan, remote, ping, seconds);
-        let label = if remote == 0 { format!("{lan} LAN") } else { format!("{lan} LAN, {remote} at {:.0} ms", ping * 1000.0) };
+    for (label, lan, remote, far) in rows {
+        let f = fight(lan, remote, far, seconds);
         println!("{label:<22} {} {}", hits(&f.lan), if remote == 0 { String::new() } else { hits(&f.remote) });
         fights.push((label, f));
     }
@@ -112,6 +120,8 @@ fn main() {
         ("LAN / 150 ms", lan, internet(0.15), true),
         ("100 ms / LAN", internet(0.10), lan, true),
         ("100 ms / 100 ms", internet(0.10), internet(0.10), true),
+        ("LAN / Wi-Fi", lan, Conditions::wifi(), true),
+        ("Wi-Fi / LAN", Conditions::wifi(), lan, true),
         ("100 ms / LAN, judged now", internet(0.10), lan, false),
     ];
     for (label, holder, peeker, looking_back) in rows {

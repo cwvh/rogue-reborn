@@ -126,6 +126,29 @@ More realistic conditions for them and the lab:
 - Latency spikes, and a client that freezes for 2 s.
 - Clocks that drift apart.
 
+How it is done, and what it found:
+
+- **Bursts and stalls** (`Conditions`): now and then a link loses everything for a while, or
+  holds everything up and then lets it through in a rush. They start at random, each link on
+  its own. `Conditions::wifi()` is a fair connection with a burst of a fifth of a second every
+  five seconds or so, and a stall of a third of a second every fifteen.
+- **A freeze** (`Peer::frozen`): the computer does nothing for a while. It found that the
+  server held a frozen player's last input until it gave up on them at 5 s: they ran on and
+  fired by themselves, and were moved 270 units when they came back. Now the server holds a
+  missing input a quarter of a second, which bridges a burst, and then lets go: no moving or
+  firing, the same look.
+- **Drift** (`Peer::clock`): each computer's clock can run fast or slow. It found that a clock
+  only 0.01% fast fills the server's queue of inputs in about eight minutes, and the player
+  then waits 30 ms longer for everything they do, for the rest of the game. Now the server
+  skips an input when a client has had two to spare all through the last second, keeping what
+  that input pressed.
+- **Held triggers**: a shot fired from a held input, while the client's own were lost, was
+  judged against where the others are now. Now it is judged as the client would have shown
+  them by then. Players on Wi-Fi went from 88% to 91% agreement.
+- What is left for Wi-Fi: a stall longer than the half second the server looks back, after
+  which the shooter fires at a picture too old to honor; and the shooter's own place
+  mispredicted after a burst. Wi-Fi in the peek holds 99%.
+
 ### Recording network games
 
 - **On the server:** every player's inputs each tick, and the joins and leaves. The server is
@@ -165,7 +188,7 @@ Not done yet: a way to watch a recording, from any player's eyes.
    players fits a datagram. Give each player their own connection conditions. Done.
 2. Record network games, on the server and on the client. Done (`net::record`).
 3. The lab. Done, with bots fighting everyone for themselves until they know their side.
-4. Burst loss and latency spikes.
+4. Burst loss and latency spikes. Done, with freezes and drifting clocks.
 5. Tests that hold the lab's numbers.
 
 ## The original's match flow
