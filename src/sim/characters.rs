@@ -59,6 +59,14 @@ pub struct Npc {
     pub reload: Option<f32>,
 }
 
+impl Npc {
+    /// How it is placed for a hit to pick its flinch or fall: resting in its stance unless it
+    /// is aiming or walking
+    pub fn posture(&self) -> crate::combat::Posture {
+        crate::combat::Posture { stance: self.stance, resting: !self.aiming && !self.walking }
+    }
+}
+
 impl Default for Npc {
     fn default() -> Npc {
         Npc {
@@ -109,11 +117,15 @@ pub struct Characters {
 }
 
 /// The motions characters play besides idling: flinches from wounds and the falls they die with
-pub const REACTION_MOTIONS: [&str; 29] = [
+pub const REACTION_MOTIONS: [&str; 52] = [
     "thwu_bf", "thwu_bl", "thwu_bb", "thwu_br", "thwu_la", "thwu_ra", "thwu_ll", "thwu_rl",
     "thdu_1", "thdu_2", "thdu_3", "thdu_4", "thdu_e1", "thdu_e2",
     "hw_fr_up2_g", "hw_lf_up2_g", "hw_bk_up2_g", "hw_bk_up2", "hw_rt_up2",
     "thiu_cf", "thiu_cl", "thiu_cb", "thiu_ab", "thiu_hf", "thiu_hb", "thiu_la", "thiu_ra", "thiu_ll", "thiu_rl",
+    // From their stances: low, sitting, and resting in one
+    "rhwc_bf", "rhwc_bl", "rhwc_bb", "rhwc_br", "thws_1",
+    "thdc_1", "thdc_2", "thdc_e1", "thdc_e2", "hw_fr_cr2", "hw_lf_cr2", "hw_bk_cr2", "hw_rt_cr2", "thds_1", "thds_2",
+    "rhd_cr1", "rhd_cr2", "rhd_ll1", "rhd_ll2", "rhd_vh3", "rhd_sl1", "thdh_1", "thdh_2",
 ];
 
 /// A motion from the game's data, by name
@@ -248,6 +260,28 @@ impl Characters {
     pub fn reload_seconds(&self, weapon: Option<usize>, kneeling: bool) -> Option<f32> {
         let m = weapon.and_then(|w| self.weapon_arms.get(w)).and_then(|&k| self.arm_sets.get(k))?.1.reload(crate::sim::movement::Reloading { progress: 0.0, empty: false }, kneeling)?;
         Some(m.frames.max(1) as f32 / 30.0)
+    }
+
+    /// Where a dead character's weapon lies, as a matrix in its model's space, once it has
+    /// dropped it: `DROP_AFTER` into its fall, flat on its side on the floor under where its
+    /// hand (bone `hand`, the weapon `off` it) was then, pointing as it pointed. None while
+    /// it still holds it.
+    pub fn dropped_weapon(&self, npc: &Npc, now: f32, hand: usize, off: &skeleton::Transform) -> Option<[f32; 16]> {
+        let NpcState::Dead { start, .. } = npc.health.state else { return None };
+        if now < start + DROP_AFTER {
+            return None;
+        }
+        let bones = self.bones(npc, start + DROP_AFTER, 0.0)?;
+        let b = bones.get(hand)?;
+        let at = [0, 1, 2].map(|k| b.pos[k] + motion::quat_rotate(b.rot, off.pos)[k]);
+        // The weapon's barrel runs along its model's -y, as its muzzle shows
+        let barrel = motion::quat_rotate(b.rot, [0.0, -1.0, 0.0]);
+        let len = (barrel[0] * barrel[0] + barrel[2] * barrel[2]).sqrt();
+        let flat = if len > 1e-3 { [barrel[0] / len, 0.0, barrel[2] / len] } else { [0.0, 0.0, 1.0] };
+        // Its side down: its x up, its y back along the barrel, and z across
+        let (x, y) = ([0.0, 1.0, 0.0], [-flat[0], 0.0, -flat[2]]);
+        let z = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
+        Some([x[0], x[1], x[2], 0.0, y[0], y[1], y[2], 0.0, z[0], z[1], z[2], 0.0, at[0], LIE, at[2], 1.0])
     }
 
     /// The model a character wears and its rig
@@ -407,6 +441,9 @@ impl Characters {
 
 /// How far apart the members of a team stand, side by side across where it starts
 const TEAM_SPACING: f32 = 70.0;
+/// Seconds into its fall a character drops its weapon, and how high it lies, on its side
+pub const DROP_AFTER: f32 = 0.3;
+const LIE: f32 = 3.0;
 
 /// The kit a member wears, and their actor, if the game has them
 fn dress(member: &crate::mission::Member) -> (crate::kit::Kit, Option<Actor>) {
@@ -601,5 +638,24 @@ mod tests {
         let (rifle, handgun, reloading) = (bones(&npc(ak, None)), bones(&npc(pistol, None)), bones(&npc(ak, Some(0.5))));
         assert_ne!(hand(&rifle), hand(&handgun));
         assert_ne!(hand(&rifle), hand(&reloading));
+    }
+
+    #[test]
+    fn a_dead_terrorist_drops_its_weapon_flat_on_the_floor_by_its_hand() {
+        let Some(chars) = Characters::load(Path::new("data/character/team_hrt/blue_M_a.CRP"), "up_none_cyc") else { return };
+        let Some(hand) = chars.rig.as_ref().and_then(|r| r.skeleton.bones.iter().position(|b| b.name == "RightHand")) else { return };
+        let off = skeleton::Transform { rot: [0.0, 0.0, 0.0, 1.0], pos: [0.0; 3] };
+        let mut npc = Npc::default();
+        // Alive, and a moment into its fall, it holds it
+        assert!(chars.dropped_weapon(&npc, 5.0, hand, &off).is_none());
+        npc.health.state = NpcState::Dead { motion: "thdu_1", start: 2.0 };
+        assert!(chars.dropped_weapon(&npc, 2.0 + DROP_AFTER / 2.0, hand, &off).is_none());
+        // Then it lies on its side, level, where the hand was, and stays there
+        let m = chars.dropped_weapon(&npc, 2.0 + DROP_AFTER, hand, &off).unwrap();
+        assert_eq!(chars.dropped_weapon(&npc, 30.0, hand, &off), Some(m));
+        let hand_at = chars.bones(&npc, 2.0 + DROP_AFTER, 0.0).unwrap()[hand].pos;
+        assert_eq!(([m[0], m[1], m[2]], m[13]), ([0.0, 1.0, 0.0], LIE));
+        assert!(m[5].abs() < 1e-6 && (m[4] * m[4] + m[6] * m[6] - 1.0).abs() < 1e-4, "the barrel is not level: {m:?}");
+        assert_eq!((m[12], m[14]), (hand_at[0], hand_at[2]));
     }
 }

@@ -1214,7 +1214,8 @@ impl Sim {
             if wall.is_none_or(|w| hit.distance <= w) {
                 let effect = self.bullet_effect(ammo.as_deref(), hit.part, hit.distance);
                 next_rng(&mut self.rng);
-                let result = self.npcs[i].health.apply_hit(&hit, effect, now, (self.rng >> 33) as u32);
+                let how = self.npcs[i].posture();
+                let result = self.npcs[i].health.apply_hit(&hit, effect, now, (self.rng >> 33) as u32, how);
                 ev.push(Event::Log(format!("t={now:.2} character {shooter}'s shot hit character {i}: {:?} from the {:?}, {:?}, hp now {}", hit.part, hit.facing, result, self.npcs[i].health.hp)));
                 ev.push(Event::Sound { name: "C_BHTHT.WAV".to_string(), at: Some(hit.point), gain: 1.0 });
                 let name = voice(matches!(result, HitResult::Killed), (self.rng >> 40) as u32);
@@ -1242,7 +1243,8 @@ impl Sim {
                 }
                 let effect = self.bullet_effect(ammo.as_deref(), hit.part, hit.distance);
                 next_rng(&mut self.rng);
-                let result = self.npcs[i].health.apply_hit(&hit, effect, now, (self.rng >> 33) as u32);
+                let how = self.npcs[i].posture();
+                let result = self.npcs[i].health.apply_hit(&hit, effect, now, (self.rng >> 33) as u32, how);
                 self.players[slot].target_hp = Some(self.npcs[i].health.hp);
                 ev.push(Event::Log(format!("t={now:.2} shot hit character {i}: {:?} from the {:?}, {:?}, hp now {}", hit.part, hit.facing, result, self.npcs[i].health.hp)));
                 let text = match result {
@@ -1413,7 +1415,8 @@ impl Sim {
                 continue;
             }
             let from = place.facing_of_shot(unit3([chest[0] - c[0], chest[1] - c[1], chest[2] - c[2]]));
-            let result = self.npcs[i].health.apply_blast(100.0 * strength, from, now);
+            let how = self.npcs[i].posture();
+            let result = self.npcs[i].health.apply_blast(100.0 * strength, from, now, how);
             if let Some(p) = self.players.get_mut(owner) {
                 p.target_hp = Some(self.npcs[i].health.hp);
             }
@@ -1608,11 +1611,13 @@ impl Sim {
         ev.push(Event::Sound { name: "C_BHTHT.WAV".to_string(), at: Some(at), gain: 1.0 });
         ev.push(Event::Sound { name: voice(killed, roll), at: Some(pos), gain: 1.0 });
         let p = &mut self.players[victim];
+        // Players flinch and fall as those on their feet do
+        let up = combat::Posture::default();
         let motion = match (wound, killed) {
-            (Wound::Shot(part, from), false) => combat::hit_reaction(part, from),
-            (Wound::Blast(from), false) => combat::hit_reaction(combat::BodyPart::Torso, from),
-            (Wound::Shot(part, from), true) => combat::death_motion(part, from, roll >> 8),
-            (Wound::Blast(from), true) => combat::blast_death_motion(from),
+            (Wound::Shot(part, from), false) => combat::hit_reaction(part, from, up).unwrap_or("thwu_bf"),
+            (Wound::Blast(from), false) => combat::hit_reaction(combat::BodyPart::Torso, from, up).unwrap_or("thwu_bf"),
+            (Wound::Shot(part, from), true) => combat::death_motion(part, from, roll >> 8, up),
+            (Wound::Blast(from), true) => combat::blast_death_motion(from, up),
         };
         p.hit = Some(Struck { motion, start: now });
         ev.push(Event::Log(format!("t={now:.2} player {victim} {} with {motion}", if killed { "falls" } else { "flinches" })));

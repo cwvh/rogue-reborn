@@ -1590,12 +1590,18 @@ fn main() {
                         if blinking { blink.or(main) } else { main }
                     });
                     draw_character(model, arrays, verts, textures, face, textured, glow_on([spot.pos[0], y, spot.pos[2]]));
-                    // Their weapon in the right hand, as the players hold theirs
+                    // Their weapon in the right hand, as the players hold theirs, or on the
+                    // floor once they have dropped it dying
                     let held = spot.weapon.and_then(|w| held_draws.get(w)).and_then(Option::as_ref);
                     if let (Some(bones), Some(wd), Some((hand, off))) = (&bones, held, &weapon_attach) {
                         glPushMatrix();
-                        glMultMatrixf(bones[*hand].matrix().as_ptr());
-                        glMultMatrixf(off.matrix().as_ptr());
+                        match chars.dropped_weapon(spot, game_time, *hand, off) {
+                            Some(lying) => glMultMatrixf(lying.as_ptr()),
+                            None => {
+                                glMultMatrixf(bones[*hand].matrix().as_ptr());
+                                glMultMatrixf(off.matrix().as_ptr());
+                            }
+                        }
                         draw_weapon(wd, textured, game_time - spot.last_shot < 0.05);
                         glPopMatrix();
                     }

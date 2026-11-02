@@ -1564,6 +1564,18 @@ mod tests {
     }
 
     #[test]
+    fn a_kneeling_hostage_flinches_and_falls_from_kneeling() {
+        let Some(mut sim) = hunt(true) else { return };
+        sim.npcs[1].stance = Some(Stance::Kneel);
+        let log = away(&mut sim, 10.0);
+        let hits: Vec<&String> = log.iter().filter(|l| l.contains("hit character 1")).collect();
+        assert!(!hits.is_empty() && sim.npcs[1].health.is_dead(), "{log:?}");
+        // Resting in its stance, as a hostage always is, it falls out of it
+        let crate::combat::NpcState::Dead { motion, .. } = sim.npcs[1].health.state else { unreachable!() };
+        assert!(motion.starts_with("rhd_cr"), "{motion}");
+    }
+
+    #[test]
     fn a_terrorist_not_to_fire_on_hostages_goes_to_one_and_waits() {
         let Some(mut sim) = hunt(false) else { return };
         let log = away(&mut sim, 6.0);

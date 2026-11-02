@@ -8,6 +8,7 @@
 
 use crate::crp::{Crp, Skin};
 use crate::skeleton::Skeleton;
+use crate::mission::Stance;
 
 type V3 = [f32; 3];
 
@@ -87,12 +88,37 @@ pub enum Facing {
     Right,
 }
 
-/// Name of the motion a character flinches with when a hit wounds it, staying on its feet. As the
-/// original picks it: a hit on a limb has that limb's, and any other the one for the side the shot
-/// came from. (Its `thiu_` motions, which fall to the ground, are for being incapacitated.)
-pub fn hit_reaction(part: BodyPart, from: Facing) -> &'static str {
+/// How a character is placed when it is hit, which says how it flinches and falls: its stance
+/// (none for one on its feet, as players are), and whether it is resting in it, not roused
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Posture {
+    pub stance: Option<Stance>,
+    pub resting: bool,
+}
+
+/// Whether a stance is low: kneeling, cowering or squatting
+fn low(stance: Option<Stance>) -> bool {
+    matches!(stance, Some(Stance::Kneel | Stance::Cower | Stance::Squat))
+}
+
+/// Name of the motion a character flinches with when a hit wounds it, as the original picks it
+/// (0x5ca760). On its feet, a hit on a limb has that limb's, and any other the one for the side
+/// the shot came from. Low, it has the one for the side; sitting, one of its own; in a chair or
+/// slouched, none. (Its `thiu_` motions, which fall to the ground, are for being incapacitated.)
+pub fn hit_reaction(part: BodyPart, from: Facing, how: Posture) -> Option<&'static str> {
     use BodyPart::*;
-    match (part, from) {
+    match how.stance {
+        Some(Stance::SitInChair | Stance::Slouch) => return None,
+        Some(Stance::Sit) => return Some("thws_1"),
+        _ if low(how.stance) => return Some(match from {
+            Facing::Front => "rhwc_bf",
+            Facing::Left => "rhwc_bl",
+            Facing::Back => "rhwc_bb",
+            Facing::Right => "rhwc_br",
+        }),
+        _ => {}
+    }
+    Some(match (part, from) {
         (LeftArm, _) => "thwu_la",
         (RightArm, _) => "thwu_ra",
         (LeftLeg, _) => "thwu_ll",
@@ -101,15 +127,38 @@ pub fn hit_reaction(part: BodyPart, from: Facing) -> &'static str {
         (_, Facing::Left) => "thwu_bl",
         (_, Facing::Back) => "thwu_bb",
         (_, Facing::Right) => "thwu_br",
-    }
+    })
 }
 
-/// Name of the motion a character shot dead falls with, as the original picks one for a
-/// character going down on its feet. A hit on a limb falls with that limb's, as does one in ten of
-/// the others with the one for the part hit and the side; the rest go by the side the shot came
-/// from, each side with two motions to vary between by `roll`.
-pub fn death_motion(part: BodyPart, from: Facing, roll: u32) -> &'static str {
+/// Name of the motion a character shot dead falls with, as the original picks one (0x5c9940).
+/// Resting in a stance, it falls from it by the side the shot came from. Sitting or low, it
+/// falls by the side too, `roll` varying some. On its feet, a hit on a limb falls with that
+/// limb's, as does one in ten of the others with the one for the part hit and the side; the
+/// rest go by the side the shot came from, each side with two motions to vary between by `roll`.
+pub fn death_motion(part: BodyPart, from: Facing, roll: u32, how: Posture) -> &'static str {
     use BodyPart::*;
+    let near = matches!(from, Facing::Front | Facing::Left);
+    if how.resting {
+        match how.stance {
+            Some(Stance::Lean) => return if near { "rhd_ll1" } else { "rhd_ll2" },
+            Some(Stance::SitInChair) => return "rhd_vh3",
+            Some(Stance::Slouch) => return "rhd_sl1",
+            Some(Stance::Sit) => return if near { "rhd_cr1" } else { "rhd_cr2" },
+            _ if low(how.stance) => return if near { "rhd_cr1" } else { "rhd_cr2" },
+            _ => {}
+        }
+    }
+    if how.stance == Some(Stance::Sit) {
+        return if near { "thds_2" } else { "thds_1" };
+    }
+    if low(how.stance) {
+        return match from {
+            Facing::Front => if roll % 2 == 0 { "thdc_2" } else { "hw_fr_cr2" },
+            Facing::Left => "hw_lf_cr2",
+            Facing::Back => if roll % 2 == 0 { "thdc_1" } else { "hw_bk_cr2" },
+            Facing::Right => "hw_rt_cr2",
+        };
+    }
     if matches!(part, LeftArm | RightArm | LeftLeg | RightLeg) || roll % 10 == 0 {
         return fall_motion(part, from);
     }
@@ -142,11 +191,15 @@ fn fall_motion(part: BodyPart, from: Facing) -> &'static str {
 }
 
 /// Name of the motion a character killed by a blast falls with: thdu_e1 for one in front or on
-/// the left, and thdu_e2, thrown forward, for one behind or on the right
-pub fn blast_death_motion(from: Facing) -> &'static str {
-    match from {
-        Facing::Front | Facing::Left => "thdu_e1",
-        Facing::Back | Facing::Right => "thdu_e2",
+/// the left, and thdu_e2, thrown forward, for one behind or on the right. Low, it is the other
+/// way round with thdc_e1 and thdc_e2 (0x5c9940).
+pub fn blast_death_motion(from: Facing, how: Posture) -> &'static str {
+    let near = matches!(from, Facing::Front | Facing::Left);
+    match (low(how.stance), near) {
+        (true, true) => "thdc_e2",
+        (true, false) => "thdc_e1",
+        (false, true) => "thdu_e1",
+        (false, false) => "thdu_e2",
     }
 }
 
@@ -360,7 +413,7 @@ impl Health {
 
     /// Apply a hit at time `now` (seconds) that does what `effect` says (see `bullet_damage`).
     /// `roll` picks between variants.
-    pub fn apply_hit(&mut self, hit: &Hit, effect: Option<crate::gfcm::Effect>, now: f32, roll: u32) -> HitResult {
+    pub fn apply_hit(&mut self, hit: &Hit, effect: Option<crate::gfcm::Effect>, now: f32, roll: u32, how: Posture) -> HitResult {
         if self.is_dead() {
             return HitResult::Ignored;
         }
@@ -368,10 +421,12 @@ impl Health {
         // The last of a run of wounds leaves a little over for rounding
         if self.hp <= 0.01 {
             self.hp = 0.0;
-            self.state = NpcState::Dead { motion: death_motion(hit.part, hit.facing, roll), start: now };
+            self.state = NpcState::Dead { motion: death_motion(hit.part, hit.facing, roll, how), start: now };
             HitResult::Killed
         } else {
-            self.state = NpcState::Reacting { motion: hit_reaction(hit.part, hit.facing), start: now };
+            if let Some(motion) = hit_reaction(hit.part, hit.facing, how) {
+                self.state = NpcState::Reacting { motion, start: now };
+            }
             HitResult::Injured
         }
     }
@@ -379,17 +434,19 @@ impl Health {
 
 impl Health {
     /// Hurt by a blast for `damage` health, thrown `from` the side the blast came
-    pub fn apply_blast(&mut self, damage: f32, from: Facing, now: f32) -> HitResult {
+    pub fn apply_blast(&mut self, damage: f32, from: Facing, now: f32, how: Posture) -> HitResult {
         if self.is_dead() {
             return HitResult::Ignored;
         }
         self.hp -= damage;
         if self.hp <= 0.0 {
             self.hp = 0.0;
-            self.state = NpcState::Dead { motion: blast_death_motion(from), start: now };
+            self.state = NpcState::Dead { motion: blast_death_motion(from, how), start: now };
             HitResult::Killed
         } else {
-            self.state = NpcState::Reacting { motion: hit_reaction(BodyPart::Torso, from), start: now };
+            if let Some(motion) = hit_reaction(BodyPart::Torso, from, how) {
+                self.state = NpcState::Reacting { motion, start: now };
+            }
             HitResult::Injured
         }
     }
@@ -411,12 +468,12 @@ mod tests {
     #[test]
     fn a_blast_that_does_enough_kills() {
         let mut h = Health::new();
-        assert_eq!(h.apply_blast(40.0, Facing::Front, 1.0), HitResult::Injured);
+        assert_eq!(h.apply_blast(40.0, Facing::Front, 1.0, Posture::default()), HitResult::Injured);
         assert!(matches!(h.state, NpcState::Reacting { motion: "thwu_bf", .. }));
-        assert_eq!(h.apply_blast(100.0, Facing::Back, 2.0), HitResult::Killed);
+        assert_eq!(h.apply_blast(100.0, Facing::Back, 2.0, Posture::default()), HitResult::Killed);
         assert_eq!(h.state, NpcState::Dead { motion: "thdu_e2", start: 2.0 });
         assert!(h.is_dead());
-        assert_eq!(h.apply_blast(100.0, Facing::Back, 3.0), HitResult::Ignored);
+        assert_eq!(h.apply_blast(100.0, Facing::Back, 3.0, Posture::default()), HitResult::Ignored);
     }
 
     #[test]
@@ -490,16 +547,16 @@ mod tests {
             BodyPart::RightArm, BodyPart::LeftLeg, BodyPart::RightLeg];
         for part in parts {
             for from in [Facing::Front, Facing::Back, Facing::Left, Facing::Right] {
-                let m = hit_reaction(part, from);
+                let m = hit_reaction(part, from, Posture::default()).unwrap();
                 assert!(have(m), "missing reaction motion {m}");
             }
             for roll in 0..100 {
-                let m = death_motion(part, from_roll(roll), roll);
+                let m = death_motion(part, from_roll(roll), roll, Posture::default());
                 assert!(have(m), "missing death motion {m}");
             }
         }
         for from in [Facing::Front, Facing::Back, Facing::Left, Facing::Right] {
-            let m = blast_death_motion(from);
+            let m = blast_death_motion(from, Posture::default());
             assert!(have(m), "missing death motion {m}");
         }
     }
@@ -515,8 +572,8 @@ mod tests {
         }
         let parts = [BodyPart::Head, BodyPart::Torso, BodyPart::Abdomen, BodyPart::LeftArm,
             BodyPart::RightArm, BodyPart::LeftLeg, BodyPart::RightLeg];
-        let deaths = parts.iter().flat_map(|&part| (0..400).map(move |roll| death_motion(part, from_roll(roll), roll / 4)))
-            .chain([Facing::Front, Facing::Back, Facing::Left, Facing::Right].map(blast_death_motion));
+        let deaths = parts.iter().flat_map(|&part| (0..400).map(move |roll| death_motion(part, from_roll(roll), roll / 4, Posture::default())))
+            .chain([Facing::Front, Facing::Back, Facing::Left, Facing::Right].map(|f| blast_death_motion(f, Posture::default())));
         for name in deaths {
             assert!(crate::sim::characters::REACTION_MOTIONS.contains(&name), "{name} is not loaded");
             // From standing, the hips end up at a fraction of their height
@@ -527,13 +584,57 @@ mod tests {
     }
 
     #[test]
+    fn a_character_flinches_and_falls_from_its_stance() {
+        let sides = [Facing::Front, Facing::Back, Facing::Left, Facing::Right];
+        let how = |stance, resting| Posture { stance: Some(stance), resting };
+        // Kneeling, by the side; sitting, its own; in a chair, not at all
+        assert_eq!(sides.map(|f| hit_reaction(BodyPart::LeftArm, f, how(Stance::Kneel, false))), [Some("rhwc_bf"), Some("rhwc_bb"), Some("rhwc_bl"), Some("rhwc_br")]);
+        assert_eq!(hit_reaction(BodyPart::Head, Facing::Back, how(Stance::Sit, true)), Some("thws_1"));
+        assert_eq!(hit_reaction(BodyPart::Torso, Facing::Front, how(Stance::SitInChair, true)), None);
+        assert_eq!(hit_reaction(BodyPart::LeftArm, Facing::Front, how(Stance::Lean, true)), Some("thwu_la"));
+        // Resting, it falls out of its stance
+        assert_eq!(death_motion(BodyPart::Torso, Facing::Front, 0, how(Stance::Lean, true)), "rhd_ll1");
+        assert_eq!(death_motion(BodyPart::Torso, Facing::Back, 0, how(Stance::Squat, true)), "rhd_cr2");
+        assert_eq!(death_motion(BodyPart::Torso, Facing::Right, 0, how(Stance::Slouch, true)), "rhd_sl1");
+        // Roused, low, by the side; on its feet as before
+        assert_eq!(sides.map(|f| death_motion(BodyPart::Torso, f, 1, how(Stance::Kneel, false))), ["hw_fr_cr2", "hw_bk_cr2", "hw_lf_cr2", "hw_rt_cr2"]);
+        assert_eq!(death_motion(BodyPart::Torso, Facing::Front, 0, how(Stance::Kneel, false)), "thdc_2");
+        assert_eq!(death_motion(BodyPart::Torso, Facing::Front, 3, how(Stance::Lean, false)), death_motion(BodyPart::Torso, Facing::Front, 3, Posture::default()));
+        assert_eq!(blast_death_motion(Facing::Front, how(Stance::Cower, false)), "thdc_e2");
+        // Every one of them is loaded, and a fall ends lower than it began
+        if !Path::new("data/motion").exists() {
+            return;
+        }
+        let stances = Stance::ALL.map(Some).into_iter().chain([None]);
+        let mut names: Vec<&str> = Vec::new();
+        for stance in stances {
+            for resting in [false, true] {
+                let how = Posture { stance, resting };
+                for (k, from) in sides.into_iter().enumerate() {
+                    names.extend(hit_reaction(BodyPart::Torso, from, how));
+                    names.push(death_motion(BodyPart::Torso, from, k as u32 * 7, how));
+                    names.push(death_motion(BodyPart::Torso, from, k as u32 * 7 + 1, how));
+                    names.push(blast_death_motion(from, how));
+                }
+            }
+        }
+        for name in names {
+            assert!(crate::sim::characters::REACTION_MOTIONS.contains(&name), "{name} is not loaded");
+            let m = crate::sim::characters::load_motion(name).unwrap();
+            if name.starts_with("rhd_cr") || name.starts_with("rhd_ll") || name.ends_with("_cr2") || name.starts_with("thdc") {
+                assert!(m.keys.last().unwrap().root[1] < m.keys[0].root[1], "{name} does not fall");
+            }
+        }
+    }
+
+    #[test]
     fn deaths_go_by_where_and_from_where_the_shot_came() {
         // A limb falls with its own every time
         for roll in 0..20 {
-            assert_eq!(death_motion(BodyPart::LeftLeg, Facing::Back, roll), "thiu_ll");
+            assert_eq!(death_motion(BodyPart::LeftLeg, Facing::Back, roll, Posture::default()), "thiu_ll");
         }
         // Others fall for the part and side one time in ten, and otherwise by side alone
-        let picks = |part, from| (0..1000).map(|roll| death_motion(part, from, roll)).collect::<Vec<_>>();
+        let picks = |part, from| (0..1000).map(|roll| death_motion(part, from, roll, Posture::default())).collect::<Vec<_>>();
         let front = picks(BodyPart::Torso, Facing::Front);
         assert_eq!(front.iter().filter(|m| **m == "thiu_cf").count(), 100);
         assert_eq!(front.iter().filter(|m| **m == "hw_fr_up2_g").count(), 540);
@@ -541,7 +642,7 @@ mod tests {
         let head = picks(BodyPart::Head, Facing::Back);
         assert_eq!(head.iter().filter(|m| **m == "thiu_hb").count(), 100);
         assert!(head.contains(&"hw_bk_up2") && head.contains(&"hw_bk_up2_g") && head.contains(&"thdu_3"));
-        assert_eq!(death_motion(BodyPart::Abdomen, Facing::Front, 0), "thiu_ab");
+        assert_eq!(death_motion(BodyPart::Abdomen, Facing::Front, 0, Posture::default()), "thiu_ab");
     }
 
     #[test]
@@ -553,7 +654,7 @@ mod tests {
             BodyPart::RightArm, BodyPart::LeftLeg, BodyPart::RightLeg];
         for part in parts {
             for from in [Facing::Front, Facing::Back, Facing::Left, Facing::Right] {
-                let name = hit_reaction(part, from);
+                let name = hit_reaction(part, from, Posture::default()).unwrap();
                 assert!(crate::sim::characters::REACTION_MOTIONS.contains(&name), "{name} is not loaded");
                 // The hips stay near standing height, where a fall to the ground halves it
                 let m = crate::sim::characters::load_motion(name).unwrap();
@@ -567,7 +668,7 @@ mod tests {
     #[test]
     fn a_head_shot_kills_outright() {
         let mut h = Health::new();
-        assert_eq!(h.apply_hit(&hit(BodyPart::Head), None, 1.0, 0), HitResult::Killed);
+        assert_eq!(h.apply_hit(&hit(BodyPart::Head), None, 1.0, 0, Posture::default()), HitResult::Killed);
         assert!(h.is_dead());
         assert_eq!(h.state, NpcState::Dead { motion: "thiu_hf", start: 1.0 });
     }
@@ -575,10 +676,10 @@ mod tests {
     #[test]
     fn body_shots_injure_then_kill() {
         let mut h = Health::new();
-        assert_eq!(h.apply_hit(&hit(BodyPart::Torso), None, 1.0, 0), HitResult::Injured);
+        assert_eq!(h.apply_hit(&hit(BodyPart::Torso), None, 1.0, 0, Posture::default()), HitResult::Injured);
         assert!(matches!(h.state, NpcState::Reacting { motion: "thwu_bf", .. }));
-        assert_eq!(h.apply_hit(&hit(BodyPart::Torso), None, 2.0, 0), HitResult::Injured);
-        assert_eq!(h.apply_hit(&hit(BodyPart::Torso), None, 3.0, 1), HitResult::Killed);
+        assert_eq!(h.apply_hit(&hit(BodyPart::Torso), None, 2.0, 0, Posture::default()), HitResult::Injured);
+        assert_eq!(h.apply_hit(&hit(BodyPart::Torso), None, 3.0, 1, Posture::default()), HitResult::Killed);
         assert_eq!(h.hp, 0.0);
         assert!(matches!(h.state, NpcState::Dead { motion: "hw_fr_up2_g", .. }));
     }
@@ -586,9 +687,9 @@ mod tests {
     #[test]
     fn the_dead_stay_dead() {
         let mut h = Health::new();
-        h.apply_hit(&hit(BodyPart::Head), None, 1.0, 0);
+        h.apply_hit(&hit(BodyPart::Head), None, 1.0, 0, Posture::default());
         let before = h.state;
-        assert_eq!(h.apply_hit(&hit(BodyPart::Torso), None, 5.0, 2), HitResult::Ignored);
+        assert_eq!(h.apply_hit(&hit(BodyPart::Torso), None, 5.0, 2, Posture::default()), HitResult::Ignored);
         assert_eq!(h.state, before);
     }
 

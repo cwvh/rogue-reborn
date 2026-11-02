@@ -233,6 +233,24 @@ Ours (gfcm.rs): health is still the 100 shown, and a wound takes its share (a th
 terrorist with a Stamina of 50, a fifth for a player, whose Stamina is taken as 85); being
 incapacitated is dying.
 
+How a character flinches and falls goes by its stance (the wound picker 0x5ca760, the death
+picker 0x5c9940; the stance at char+0x3fc is the index in the list above, Kneel 0 to Slouch 7):
+
+| Stance | Wound | Death, resting in it | Death, roused |
+| --- | --- | --- | --- |
+| Stand, Lean | by the limb or side (`thwu_*`) | Lean: `rhd_ll1` from in front or the left, else `rhd_ll2` | by the limb or side, as standing |
+| Kneel, Cower, Squat | by the side (`rhwc_bf`, `bl`, `bb`, `br`) | `rhd_cr1` from in front or the left, else `rhd_cr2` | in front `thdc_2` or `hw_fr_cr2`, behind `thdc_1` or `hw_bk_cr2`, the sides `hw_lf_cr2`, `hw_rt_cr2`; a blast `thdc_e2` from in front or the left, else `thdc_e1` |
+| Sit | `thws_1` | as kneeling | `thds_2` from in front or the left, else `thds_1` |
+| SitInChair | none | `rhd_vh3` | as standing |
+| Slouch | none | `rhd_sl1` | as standing |
+
+Which characters count as resting is the character's method +0x50, not read; ours rest while
+they neither aim nor walk. Running crouched, the original falls with `thdh_1` or `thdh_2`; ours do
+not run crouched. Hostages have deaths of their own (`hhd_kn*`, `hhd_cw*`), not taken yet.
+
+A dead character drops its weapon. Ours lets go of it 0.3 seconds into the fall (a guess), and it
+lies on its side on the floor where the hand was then, pointing as it did.
+
 ## Hearing
 
 The original's sounds have kinds (the table at 0x7fcf94): Environment, Alarm, BulletHit, Combat,
@@ -394,7 +412,7 @@ Small enough to try out on the maps we play, and grow from:
    33 to 90 any other way), its members side by side, each in the model their kit names with their
    actor's textures, the kit's weapon (the primary, or else the secondary) in the right hand,
    waiting in their stance with its rests and fidgets. Still to do: smoking, drinking and
-   talking, dropping the weapon on dying, and hit reactions that start from their stance.
+   talking.
 2. Seeing, as above: field of view and range from their alertness and the mission's Max LOS
    Distance, the player's visibility (crouched, moving) and line of sight. Done (sim::terrorist),
    but for glimpses (a player they are already after they keep seeing out to the glimpse range)
