@@ -53,6 +53,8 @@ pub struct Npc {
     pub gait: Gait,
     /// What it knows and holds, as a terrorist: only the game's own copy keeps it
     pub mind: Option<super::terrorist::Mind>,
+    /// Its name in the mission, which plans name it by
+    pub name: String,
 }
 
 impl Default for Npc {
@@ -60,6 +62,7 @@ impl Default for Npc {
         Npc {
             health: Health::new(), pos: [0.0; 3], floor: 0.0, yaw: 0.0, scale: [1.0; 3], stagger: 0.0,
             body: None, stance: None, weapon: None, aiming: false, last_shot: f32::NEG_INFINITY, aim_since: 0.0, walking: false, gait: Gait::Walk, mind: None,
+            name: String::new(),
         }
     }
 }
@@ -362,19 +365,22 @@ fn dress(member: &crate::mission::Member) -> (crate::kit::Kit, Option<Actor>) {
     (kit, actor)
 }
 
-/// Stand each of a mission's terrorists where their team starts: at one of its places, picked
+/// Stand each of a mission's terrorists and hostages where their team starts: at one of its places, picked
 /// with `seed`, facing its heading (256ths of a turn, 0 along +z, as examples/mission-headings.rs
 /// finds), the members side by side where there is room. Each wears the model their kit names
 /// with their actor's textures, which become `characters`' bodies, holds the kit's weapon, and
 /// waits in their stance.
-/// They see as far as the mission says, and patrol its zones.
+/// Armed terrorists see as far as the mission says, and patrol its zones. Hostages carry
+/// nothing, so they only wait.
 pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, setting: &crate::mission::Setting, world: &CollisionWorld, characters: &mut Characters) -> Vec<Npc> {
     let sight = setting.sight;
-    let mut rng = seed | 1;
+    // Hostages pick their places apart, so terrorists start where they did before hostages
+    let (mut rng, mut hostage_rng) = (seed | 1, seed.rotate_left(17) | 1);
     let mut npcs = Vec::new();
-    for (team_index, team) in teams.iter().enumerate().filter(|(_, t)| t.terrorists) {
+    for (team_index, team) in teams.iter().enumerate() {
         let orders = std::rc::Rc::new(super::terrorist::Orders { plan: team.plan.clone(), reactions: team.reactions.clone(), zones: setting.zones.clone() });
-        let pick = (crate::util::next_rng(&mut rng) >> 33) as usize % team.starts.len();
+        let rng = if team.terrorists { &mut rng } else { &mut hostage_rng };
+        let pick = (crate::util::next_rng(rng) >> 33) as usize % team.starts.len();
         let (at, heading) = team.starts[pick];
         let yaw = heading * 360.0 / 256.0;
         let (sin, cos) = yaw.to_radians().sin_cos();
@@ -401,6 +407,7 @@ pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, setting: &cra
                         mind = mind.with_sidearm(s, gun, magazine, *n);
                     }
                 }
+                mind.member = k;
                 Some(mind.with_orders(team_index, orders.clone()))
             });
             let scale = actor.as_ref().map_or([1.0; 3], |a| a.scale);
@@ -415,6 +422,7 @@ pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, setting: &cra
                 stance: Some(member.stance),
                 weapon,
                 mind,
+                name: member.name.clone(),
                 ..Npc::default()
             };
             let feet_to_origin = -characters.body(&npc).0.bounds().0[1];
@@ -472,7 +480,7 @@ mod tests {
             let level_map = crate::map::read(Path::new(&map_path)).unwrap();
             let world = CollisionWorld::from_map(&level_map, Params::default());
             let npcs = place_terrorists(&teams, 7, &mission::Setting::default(), &world, &mut characters);
-            let members: Vec<_> = teams.iter().filter(|t| t.terrorists).flat_map(|t| &t.members).collect();
+            let members: Vec<_> = teams.iter().flat_map(|t| &t.members).collect();
             assert_eq!(npcs.len(), members.len());
             for (n, m) in npcs.iter().zip(&members) {
                 assert_eq!(n.stance, Some(m.stance));

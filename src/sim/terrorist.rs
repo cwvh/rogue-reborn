@@ -118,6 +118,43 @@ pub enum Place {
     At(V3),
     /// A room of its zones
     Room(u32),
+    /// Where the character it hunts is
+    Hunt,
+}
+
+/// How far apart a team taking cover stands (0x60a5a0)
+const COVER_SPACING: f32 = 150.0;
+/// Seconds a hunter that got where its prey is waits before it looks for the way again
+const HUNT_PAUSE: f32 = 1.0;
+
+/// Where the `k`th of a team takes cover at `at`, watching `watch` (0x60a5a0): the first at
+/// `at`, and the others in a wedge behind it, 150 units back and aside for each two, on
+/// alternate sides
+pub fn cover_spot(watch: V3, at: V3, k: usize) -> V3 {
+    let (dx, dz) = (watch[0] - at[0], watch[2] - at[2]);
+    let len = (dx * dx + dz * dz).sqrt().max(1e-3);
+    let (dx, dz) = (dx / len, dz / len);
+    let m = (k as f32 * 0.5).ceil() * COVER_SPACING;
+    let side = if k % 2 == 0 { 1.0 } else { -1.0 };
+    [at[0] - m * dx + side * m * dz, at[1], at[2] - m * dz - side * m * dx]
+}
+
+/// Which way, in degrees, the `k`th of a team of `n` faces taking cover at `at`, watching
+/// `watch` (0x60a5a0): toward it, fanned out by a share of a half turn
+pub fn cover_yaw(watch: V3, at: V3, k: usize, n: usize) -> f32 {
+    let toward = (watch[0] - at[0]).atan2(watch[2] - at[2]).to_degrees();
+    let a = 180.0 / (n + 1) as f32;
+    let turn = if n % 2 == 0 {
+        let a = if k < 3 { a * 0.5 } else { a };
+        if k % 2 == 0 { -a } else { a }
+    } else {
+        match k {
+            0 => 0.0,
+            2 => -a,
+            _ => a,
+        }
+    };
+    toward + turn
 }
 /// How near a point on its way it must come before it heads for the next
 const ARRIVE: f32 = 30.0;
@@ -225,6 +262,12 @@ pub struct Mind {
     pub sidearm: Option<(usize, Gun, u32, u32)>,
     /// With nothing left to fire, what it does
     pub spent: Option<Spent>,
+    /// Which of its team it is, whether it is where its plan has it take cover, whether it
+    /// may fire on hostages, and the character it is firing on
+    pub member: usize,
+    pub covering: bool,
+    pub engage_hostages: bool,
+    pub prey: Option<usize>,
     /// Since when someone has stood in its way
     pub blocked_since: Option<f32>,
 }
@@ -248,7 +291,7 @@ impl Mind {
             awareness: 0, aware_at: 0.0, start: alertness,
             step: 0, loop_at: None, errand: None, speed: None, zones: Vec::new(), pause_until: 0.0, gun,
             ammo: magazine, magazines: magazines.saturating_sub(1), magazine, reload_until: None, next_shot: 0.0,
-            sidearm: None, spent: None, blocked_since: None,
+            sidearm: None, spent: None, blocked_since: None, member: 0, covering: false, engage_hostages: false, prey: None,
         }
     }
 
@@ -299,7 +342,7 @@ impl Mind {
             }
         }
         // A new plan, from its first step
-        (self.step, self.loop_at, self.speed) = (0, None, None);
+        (self.step, self.loop_at, self.speed, self.covering, self.prey) = (0, None, None, false, None);
         if self.errand.take().is_some() {
             self.path.clear();
         }
@@ -388,6 +431,10 @@ impl Mind {
                 },
                 Step::Speed(v) => self.speed = Some(*v),
                 Step::Guard => return None,
+                // Once there, it stays
+                Step::Cover { watch, at } => return (!self.covering).then(|| Place::At(cover_spot(*watch, *at, self.member))),
+                Step::Hunt(_) => return Some(Place::Hunt),
+                Step::EngageHostages(on) => self.engage_hostages = *on,
             }
             self.step += 1;
         }
@@ -669,6 +716,34 @@ impl super::Sim {
             if mind.spent.is_some() {
                 mind.target = None;
             }
+            // Who its plan has it hunt, where they are, and whether it sees them to fire on,
+            // which it does before anything else (0x603000)
+            let hunt_step = mind.step;
+            let hunted = match mind.plan().route.get(mind.step) {
+                Some(Step::Hunt(name)) => self.npcs.iter().position(|o| o.name == *name && !o.health.is_dead())
+                    .map(|v| (v, [self.npcs[v].pos[0], self.npcs[v].floor, self.npcs[v].pos[2]])),
+                _ => None,
+            };
+            let prey = hunted.filter(|_| mind.engage_hostages && mind.spent.is_none()).and_then(|(v, feet)| {
+                let body = [feet[0], feet[1] + 0.65 * self.world.params().body_height(kneels(self.npcs[v].stance)), feet[2]];
+                let seen = mind.could_see(eye, npc.yaw, body, 1.0) && self.line_clear(eye, &rooms, body, &self.rooms_at(feet, None));
+                seen.then(|| (v, body, super::dist3(eye, body)))
+            });
+            if let Some((v, _, _)) = prey {
+                mind.path.clear();
+                if mind.prey != Some(v) {
+                    mind.aim = Aim::default();
+                    mind.aim_dir = None;
+                    mind.swing = 0.0;
+                }
+            }
+            mind.prey = prey.map(|p| p.0);
+            // How many of its team are left, to spread out in cover
+            let team_size = if mind.covering {
+                self.npcs.iter().filter(|o| !o.health.is_dead() && o.mind.as_ref().is_some_and(|m| m.team == mind.team)).count()
+            } else {
+                0
+            };
             match seen {
                 Some((slot, _, _)) => {
                     // It stops where it is to fight. Seeing them makes it and its team aware
@@ -723,7 +798,7 @@ impl super::Sim {
             }
             // Its weapon up for someone it sees, or toward what it heard
             let listening = mind.heard.filter(|&(_, t)| now - t < HEARD_SECONDS && mind.spent.is_none());
-            let aiming = mind.target.is_some() || listening.is_some();
+            let aiming = mind.target.is_some() || listening.is_some() || prey.is_some();
             if aiming && !npc.aiming {
                 npc.aim_since = now;
             }
@@ -748,19 +823,28 @@ impl super::Sim {
             // With nothing else to do, it takes its plan's way, a step at a time
             if mind.target.is_none() && listening.is_none() && mind.path.is_empty() && mind.spent.is_none() && now >= mind.pause_until && searches > 0 {
                 if mind.errand.take() == Some(mind.step) {
-                    // Patrolling zones, it stays a while in each room, and goes on to another
-                    if mind.plan().route.get(mind.step) == Some(&Step::PatrolZones) {
-                        mind.pause_until = now + ZONE_PAUSE;
-                    } else {
-                        mind.step += 1;
+                    match mind.plan().route.get(mind.step) {
+                        // Patrolling zones, it stays a while in each room, and goes on to another
+                        Some(Step::PatrolZones) => mind.pause_until = now + ZONE_PAUSE,
+                        // At cover it stays; hunting, it looks again in a while
+                        Some(Step::Cover { .. }) => mind.covering = true,
+                        Some(Step::Hunt(_)) => mind.pause_until = now + HUNT_PAUSE,
+                        _ => mind.step += 1,
                     }
                 }
                 let pick = super::next_rng(&mut self.rng);
                 let place = if now >= mind.pause_until { mind.next_place(pick) } else { None };
+                // Who it hunts, as found for this step: else it looks next tick
+                let hunted = hunted.filter(|_| mind.step == hunt_step);
                 let to = place.and_then(|p| match p {
                     Place::At(at) => Some(at),
                     Place::Room(room) => self.visibility.center(room),
+                    Place::Hunt => hunted.map(|(_, at)| at),
                 });
+                // Who it hunts is dead: on to the next step (0x603000)
+                if place == Some(Place::Hunt) && mind.step == hunt_step && hunted.is_none() {
+                    mind.step += 1;
+                }
                 if let Some(to) = to {
                     searches -= 1;
                     let feet = [npc.pos[0], npc.floor, npc.pos[2]];
@@ -771,8 +855,10 @@ impl super::Sim {
                             mind.errand = Some(mind.step);
                             mind.gait = mind.plan_gait().0;
                         }
-                        // No way there: on to the next step, or another room in a while
-                        None if matches!(place, Some(Place::Room(_))) => mind.pause_until = now + ASK_AGAIN,
+                        // No way there: on to the next step, or another room in a while. With no
+                        // way to its cover it takes cover where it is.
+                        None if matches!(place, Some(Place::Room(_) | Place::Hunt)) => mind.pause_until = now + ASK_AGAIN,
+                        None if matches!(mind.plan().route.get(mind.step), Some(Step::Cover { .. })) => mind.covering = true,
                         None => mind.step += 1,
                     }
                 }
@@ -845,12 +931,15 @@ impl super::Sim {
                     let want = (at[0] - eye[0]).atan2(at[2] - eye[2]).to_degrees();
                     npc.yaw = turn_toward(npc.yaw, want, TURN_RATE * dt);
                 }
+            } else if let (None, Some(Step::Cover { watch, at })) = (seen, mind.plan().route.get(mind.step).filter(|_| mind.covering)) {
+                // In cover, it faces what it watches
+                npc.yaw = turn_toward(npc.yaw, cover_yaw(*watch, *at, mind.member, team_size), TURN_RATE * dt);
             }
             npc.walking = seen.is_none() && !mind.path.is_empty() && !at_door;
             npc.gait = mind.gait;
             // Turn toward the target, swing the aim onto them, and fire when the spread lets it
             let mut fire = None;
-            if let Some((_, to, dist)) = seen {
+            if let Some((to, dist)) = prey.map(|p| (p.1, p.2)).or(seen.map(|s| (s.1, s.2))) {
                 let want = (to[0] - eye[0]).atan2(to[2] - eye[2]).to_degrees();
                 npc.yaw = turn_toward(npc.yaw, want, if mind.quick { ALERT_TURN_RATE } else { TURN_RATE } * dt);
                 let facing = [npc.yaw.to_radians().sin(), 0.0, npc.yaw.to_radians().cos()];
@@ -886,8 +975,12 @@ impl super::Sim {
                 if let Some(name) = sound {
                     ev.push(super::Event::Sound { name, at: Some(npc_pos), gain: 1.0 });
                 }
-                ev.push(super::Event::Log(format!("t={now:.2} character {i} fires at player {} from ({:.0}, {:.0}, {:.0}) along ({:.2}, {:.2}, {:.2})",
-                    mind.target.map_or("?".to_string(), |t| t.to_string()), eye[0], eye[1], eye[2], dir[0], dir[1], dir[2])));
+                let at = match (mind.prey, mind.target) {
+                    (Some(v), _) => format!("character {v}"),
+                    (None, t) => format!("player {}", t.map_or("?".to_string(), |t| t.to_string())),
+                };
+                ev.push(super::Event::Log(format!("t={now:.2} character {i} fires at {at} from ({:.0}, {:.0}, {:.0}) along ({:.2}, {:.2}, {:.2})",
+                    eye[0], eye[1], eye[2], dir[0], dir[1], dir[2])));
                 self.npcs[i].mind = Some(mind);
                 self.bullet(eye, dir, super::Shooter::Character(i), ev);
             } else {
@@ -1369,6 +1462,77 @@ mod tests {
     }
 
     #[test]
+    fn a_team_takes_cover_in_a_wedge_behind_its_first() {
+        // Watching along +z: the others stand back along -z and aside, in pairs
+        let (watch, at) = ([0.0, 0.0, 1000.0], [0.0, 0.0, 0.0]);
+        let spots: Vec<V3> = (0..5).map(|k| cover_spot(watch, at, k)).collect();
+        assert_eq!(spots, [[0.0, 0.0, 0.0], [-150.0, 0.0, -150.0], [150.0, 0.0, -150.0], [-300.0, 0.0, -300.0], [300.0, 0.0, -300.0]]);
+        // Facing what they watch, fanned out
+        assert_eq!(cover_yaw(watch, at, 0, 1), 0.0);
+        assert_eq!([0, 1, 2].map(|k| cover_yaw(watch, at, k, 3)), [0.0, 45.0, -45.0]);
+        assert_eq!([0, 1, 2, 3].map(|k| cover_yaw(watch, at, k, 4)), [-18.0, 18.0, -18.0, 36.0]);
+        // In the game, they go there and stay, facing it
+        let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
+        let plan = Plan { route: vec![Step::Cover { watch: [-400.0, 0.0, -300.0], at: [-200.0, 0.0, 200.0] }, Step::Move([300.0, 0.0, 300.0])], ..Plan::default() };
+        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Rc::new(Orders { plan, ..Orders::default() }));
+        sim.npcs[0].mind = Some(mind);
+        away(&mut sim, 4.0);
+        let n = &sim.npcs[0];
+        assert!(crate::sim::dist3([n.pos[0], 0.0, n.pos[2]], [-200.0, 0.0, 200.0]) <= 31.0 && !n.walking, "{:?}", n.pos);
+        let toward = (-200.0f32).atan2(-500.0).to_degrees();
+        assert!((n.yaw - toward).rem_euclid(360.0).min((toward - n.yaw).rem_euclid(360.0)) < 1.0, "{} not {toward}", n.yaw);
+        assert!(n.mind.as_ref().unwrap().covering);
+    }
+
+    /// Ticks for `seconds` with the player out of the game, flying free, and the log
+    fn away(sim: &mut crate::sim::Sim, seconds: f32) -> Vec<String> {
+        let free = crate::sim::Input { observer: Some([0.0, 0.0, -350.0]), ..Default::default() };
+        let mut log = Vec::new();
+        for _ in 0..(seconds / crate::sim::TICK) as usize {
+            log.extend(sim.tick(&[free], crate::sim::TICK).into_iter().filter_map(|e| match e {
+                crate::sim::Event::Log(l) => Some(l),
+                _ => None,
+            }));
+        }
+        log
+    }
+
+    /// A hostage named Hostage1 across the room, and a terrorist that hunts them, firing on them
+    /// if `engage`. None without the characters' models.
+    fn hunt(engage: bool) -> Option<crate::sim::Sim> {
+        let mut chars = crate::sim::characters::Characters::load(std::path::Path::new("data/character/team_hrt/blue_M_a.CRP"), "up_none_cyc")?;
+        let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
+        let hostage = crate::sim::characters::Npc { pos: [300.0, 0.0, -300.0], stance: Some(Stance::Stand), name: "Hostage1".into(), ..Default::default() };
+        let feet_to_origin = -chars.body(&hostage).0.bounds().0[1];
+        sim.npcs.push(crate::sim::characters::Npc { pos: [300.0, feet_to_origin, -300.0], ..hostage });
+        sim.npcs[0].weapon = chars.add_weapon("tw_ak47.wpn");
+        sim.characters = Some(chars);
+        let route = vec![Step::EngageHostages(engage), Step::Hunt("Hostage1".into()), Step::Move([-300.0, 0.0, 300.0])];
+        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Rc::new(Orders { plan: Plan { route, ..Plan::default() }, ..Orders::default() }));
+        sim.npcs[0].mind = Some(mind);
+        Some(sim)
+    }
+
+    #[test]
+    fn a_terrorist_hunts_down_a_hostage_and_goes_on_once_they_are_dead() {
+        let Some(mut sim) = hunt(true) else { return };
+        let fired = away(&mut sim, 10.0).iter().any(|l| l.contains("fires at character 1"));
+        assert!(fired && sim.npcs[1].health.is_dead(), "hostage hp {}", sim.npcs[1].health.hp);
+        // Then on to its next step, which it walks
+        let (n, m) = (&sim.npcs[0], sim.npcs[0].mind.as_ref().unwrap());
+        assert!(m.step >= 2 && crate::sim::dist3([n.pos[0], 0.0, n.pos[2]], [-300.0, 0.0, 300.0]) <= 31.0, "step {} at {:?}", m.step, n.pos);
+    }
+
+    #[test]
+    fn a_terrorist_not_to_fire_on_hostages_goes_to_one_and_waits() {
+        let Some(mut sim) = hunt(false) else { return };
+        let log = away(&mut sim, 6.0);
+        assert!(!log.iter().any(|l| l.contains("fires")) && !sim.npcs[1].health.is_dead(), "{log:?}");
+        let (n, h) = (&sim.npcs[0], &sim.npcs[1]);
+        assert!(crate::sim::dist3([n.pos[0], 0.0, n.pos[2]], [h.pos[0], 0.0, h.pos[2]]) < 100.0, "{:?}", n.pos);
+    }
+
+    #[test]
     fn a_patrol_walks_its_loop_round_and_round_and_a_guard_stays_put() {
         let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
         let route = vec![Step::Loop, Step::Move([200.0, 0.0, 300.0]), Step::Move([-200.0, 0.0, 300.0]), Step::EndLoop];
@@ -1606,7 +1770,7 @@ mod tests {
         for (feet, room) in [([30580.2, 33167.0, 34953.0], 205), ([29784.1, 33169.0, 35005.5], 201), ([29810.4, 33169.0, 35125.2], 201)] {
             let theirs = sim.rooms_at(feet, None);
             assert!(theirs.contains(&room), "{theirs:?}");
-            for n in &sim.npcs {
+            for n in sim.npcs.iter().filter(|n| n.mind.is_some()) {
                 let (eye, rooms) = ([n.pos[0], n.floor + 160.0, n.pos[2]], sim.rooms_at([n.pos[0], n.floor, n.pos[2]], None));
                 for up in [0.65, 0.94] {
                     assert!(!sim.line_clear(eye, &rooms, [feet[0], feet[1] + up * 180.0, feet[2]], &theirs), "{feet:?} seen from {:?}", n.pos);

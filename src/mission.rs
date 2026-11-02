@@ -141,6 +141,12 @@ pub enum Step {
     ClearZones,
     /// Go from room to room of its zones, on and on (`PatrolZones`)
     PatrolZones,
+    /// Take cover at a place, watching another (`Cover`, the watched place first)
+    Cover { watch: V3, at: V3 },
+    /// Go to where a character is and kill them (`SearchAndDestroy`, by the character's name)
+    Hunt(String),
+    /// Whether it may fire on hostages (`EngageHostagesOn`, `EngageHostagesOff`)
+    EngageHostages(bool),
 }
 
 /// The way a plan's steps take a team: where it goes, round again or once, and where it stops.
@@ -169,6 +175,17 @@ fn route(steps: &[String]) -> Vec<Step> {
             Some("AddZone") => route.extend(words.next().and_then(|z| z.parse().ok()).map(Step::AddZone)),
             Some("ClearZones") => route.push(Step::ClearZones),
             Some("PatrolZones") => route.push(Step::PatrolZones),
+            Some("Cover") => {
+                if let (Some(watch), Some(at)) = (place(&mut words), place(&mut words)) {
+                    route.push(Step::Cover { watch, at });
+                }
+            }
+            Some("SearchAndDestroy") => {
+                let name = line.split_once(char::is_whitespace).map_or("", |(_, rest)| rest).trim().trim_matches('"');
+                route.push(Step::Hunt(name.to_string()));
+            }
+            Some("EngageHostagesOn") => route.push(Step::EngageHostages(true)),
+            Some("EngageHostagesOff") => route.push(Step::EngageHostages(false)),
             _ => {}
         }
     }
@@ -439,6 +456,32 @@ mod tests {
         BeginPlan\nROE Investigate\nPlanLoop\nMoveTo 1 2 3 0\nEndLoop\nEndPlan\n\
         BeginTriggerPlan\nName \"React\"\nPriority 2\nTrigger ImmediateThreat\nTrigger ThreatInZone 3\nEndTriggers\n\
         BeginPlan\nROE Advance\nROE Blitz\nEndPlan\nEndTriggerPlan\nEndTeamPlan\nEndTeams\n";
+
+    #[test]
+    fn reads_cover_and_search_and_destroy_steps() {
+        let lines = ["EngageHostagesOn", "SearchAndDestroy \"Female VIP #2\"", "Cover 28879.6 32767 31988.9  28582.9 32777 32425.7 -1", "EngageHostagesOff"];
+        assert_eq!(route(&lines.map(String::from)), [
+            Step::EngageHostages(true),
+            Step::Hunt("Female VIP #2".into()),
+            Step::Cover { watch: [28879.6, 32767.0, 31988.9], at: [28582.9, 32777.0, 32425.7] },
+            Step::EngageHostages(false),
+        ]);
+        // Every mission's names a character it has
+        for path in std::fs::read_dir("data/mission").into_iter().flatten().flatten().map(|e| e.path()) {
+            if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("mdf")) {
+                continue;
+            }
+            let Ok(teams) = parse(&std::fs::read_to_string(&path).unwrap()) else { continue };
+            let names: Vec<&str> = teams.iter().flat_map(|t| &t.members).map(|m| m.name.as_str()).collect();
+            for plan in teams.iter().flat_map(|t| std::iter::once(&t.plan).chain(t.reactions.iter().map(|r| &r.plan))) {
+                for step in &plan.route {
+                    if let Step::Hunt(name) = step {
+                        assert!(names.contains(&name.as_str()), "{}: no {name}", path.display());
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn reads_a_team_of_two_and_where_it_can_start() {

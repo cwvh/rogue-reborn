@@ -1145,9 +1145,10 @@ impl Sim {
         };
 
         let mut best: Option<(usize, combat::Hit)> = None;
-        if let (Some(chars), Shooter::Player(_)) = (&self.characters, by) {
+        if let Some(chars) = &self.characters {
             for (i, npc) in self.npcs.iter().enumerate() {
-                if npc.health.is_dead() {
+                // A terrorist's bullets hit hostages, not other terrorists
+                if npc.health.is_dead() || matches!(by, Shooter::Character(s) if s == i || npc.mind.is_some()) {
                     continue;
                 }
                 let h = chars.raycast(npc, now, eye, dir).filter(|h| reaches(&self.rooms_at([npc.pos[0], npc.floor, npc.pos[2]], None), h.distance));
@@ -1208,6 +1209,19 @@ impl Sim {
             self.hurt_player(victim, attacker, amount, point, Wound::Shot(part, from), cause, ev);
             ev.push(shot(point, true));
             return;
+        }
+        if let (Shooter::Character(shooter), Some((i, hit))) = (by, best.clone()) {
+            if wall.is_none_or(|w| hit.distance <= w) {
+                let effect = self.bullet_effect(ammo.as_deref(), hit.part, hit.distance);
+                next_rng(&mut self.rng);
+                let result = self.npcs[i].health.apply_hit(&hit, effect, now, (self.rng >> 33) as u32);
+                ev.push(Event::Log(format!("t={now:.2} character {shooter}'s shot hit character {i}: {:?} from the {:?}, {:?}, hp now {}", hit.part, hit.facing, result, self.npcs[i].health.hp)));
+                ev.push(Event::Sound { name: "C_BHTHT.WAV".to_string(), at: Some(hit.point), gain: 1.0 });
+                let name = voice(matches!(result, HitResult::Killed), (self.rng >> 40) as u32);
+                ev.push(Event::Sound { name, at: Some(self.npcs[i].pos), gain: 1.0 });
+                ev.push(shot(hit.point, true));
+                return;
+            }
         }
         let Shooter::Player(slot) = by else {
             self.strike_level(eye, dir, wall, Some(&crossed), ev);

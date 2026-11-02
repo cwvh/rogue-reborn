@@ -296,7 +296,26 @@ way from the top. `MoveTo`'s last number (0 or 1, 1 mostly where the way climbs)
 A mission's zones are sets of its rooms (the `.mis`'s `ZoneRooms`, a room and its zone a line).
 `AddZone` and `ClearZones` set the zones a team patrols, and `PatrolZones` sends it from room to
 room of them, to the middle of one picked at random, staying three seconds (a guess) in each, on
-and on. `Cover` and the rest are not taken yet.
+and on.
+
+`Cover` names two places: the one to watch, then the one to take cover at (0x60a5a0). The team
+goes to cover in a wedge. The first stands at the place. The others stand 150 units back and 150
+aside for each pair, on alternate sides (the second and third at 150, the fourth and fifth at
+300). Once there, each faces the watched place, fanned out by a share of a half turn, and stays.
+It fights whoever it sees, as it would anywhere.
+
+`SearchAndDestroy "name"` hunts a character by name, nearly always a hostage (0x603000). While
+the terrorist cannot see them, it walks to where they are, and looks again in a while once it
+gets there. Once it sees them, it fires on them, before anyone else, if `EngageHostagesOn` came
+before in its plan; otherwise it only stands by them. When they are dead, it goes on to the next
+step. The original also looks for the way again every 20 seconds, as its target may move; ours
+do not move yet.
+
+Hostages stand where their team starts, in their kit's model, with no weapon and no mind of
+their own yet. A terrorist's bullets hit them; they do not hit other terrorists. Hostages pick
+their starting places apart from terrorists, so terrorists start where they did before
+hostages were placed. The rest of the steps (`Snipe`, `EscortHostage`, `UseRadio`, `KillSelf`
+and others) are not taken yet.
 
 ## Walking
 
