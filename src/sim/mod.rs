@@ -146,7 +146,7 @@ pub const RESPAWN_SECONDS: f32 = 3.7;
 pub const FLINCH_SECONDS: f32 = 2.0;
 
 /// How many ticks of where players have been are kept, to aim at where they were
-const PAST_TICKS: usize = 40;
+const PAST_TICKS: usize = 64;
 
 /// A grenade throw: from the start of the swing to the end, and how far into it the grenade
 /// leaves the hand (0..1)

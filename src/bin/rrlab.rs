@@ -3,15 +3,16 @@
 //!
 //!   rrlab                  every table, 30 seconds of play for each row
 //!   rrlab --seconds 120    longer games, steadier figures
+//!   rrlab --tune           try settings against one another (see `Tuning`)
 
-use rogue_reborn::net::lab::{Tally, fight, internet, peek_judged};
+use rogue_reborn::net::lab::{Tally, Tuning, fight, fight_with, internet, peek_with};
 use rogue_reborn::net::link::Conditions;
 
 fn usage(problem: &str) -> ! {
     if !problem.is_empty() {
         eprintln!("rrlab: {problem}");
     }
-    eprintln!("usage: rrlab [--seconds N]");
+    eprintln!("usage: rrlab [--seconds N] [--tune]");
     std::process::exit(if problem.is_empty() { 0 } else { 2 });
 }
 
@@ -48,11 +49,60 @@ fn hits(t: &Tally) -> String {
         units(mean(&t.gaps)), units(percentile(&t.gaps, 0.95)))
 }
 
+/// Each setting tried, against the costs it trades: how soon others are seen, and how often
+/// they stand still for want of a snapshot
+fn tune(seconds: f32) {
+    let (lan, far, wifi) = (Conditions::lan(), internet(0.10), Conditions::wifi());
+    println!("Tuning: the snapshot rate, and how far behind the newest snapshot others are shown (in");
+    println!("snapshot intervals, and in ms). Advantage: the peeker's, both on the LAN and the peeker at");
+    println!("100 ms. Still: frames in which the holder's view of the peeker stood still for want of a");
+    println!("snapshot, the holder on the LAN, at 100 ms and on Wi-Fi. Agree: the holder on Wi-Fi.");
+    println!("Up: the host's upload for 16 players (KB a second). {seconds:.0} s a peek.");
+    println!();
+    println!("{:>5} {:>6} {:>6} {:>9} {:>9} {:>7} {:>7} {:>7} {:>6} {:>6}", "rate", "delay", "ms", "adv LAN", "adv 100", "still", "100", "Wi-Fi", "agree", "up KB");
+    for rate in [30.0f32, 60.0] {
+        for delay in [1.0, 1.25, 1.5, 2.0, 3.0] {
+            let t = Tuning { view_delay: delay, snapshot_rate: rate, ..Tuning::default() };
+            let a = peek_with(t, lan, lan, seconds);
+            let b = peek_with(t, lan, far, seconds);
+            let c = peek_with(t, far, lan, seconds);
+            let d = peek_with(t, wifi, lan, seconds);
+            let up = fight_with(t, 14, 2, far, seconds.min(20.0)).upload;
+            println!("{rate:>5.0} {delay:>6.2} {:>6.0} {:>9} {:>9} {:>7} {:>7} {:>7} {:>6} {:>6.0}",
+                delay * 1000.0 / rate as f64, ms(mean(&a.advantage)), ms(mean(&b.advantage)),
+                percent(a.holder.starved as usize, a.holder.frames as usize), percent(c.holder.starved as usize, c.holder.frames as usize),
+                percent(d.holder.starved as usize, d.holder.frames as usize), percent(d.holder.agree, d.holder.shots), up / 1000.0);
+        }
+    }
+
+    println!();
+    println!("How far back the server looks at most. A shooter on Wi-Fi or at 300 ms against a peeker on");
+    println!("the LAN: the shooter's agreement, and the peeker's hits behind cover and gap (mean, p95).");
+    println!("Fights: 8 on the LAN and 2 on Wi-Fi, the Wi-Fi players' agreement and the LAN players' gap.");
+    println!();
+    println!("{:>7} {:>11} {:>7} {:>5} {:>5} {:>11} {:>7} {:>5} {:>5} {:>11} {:>5} {:>5}",
+        "back ms", "Wi-Fi agree", "behind", "gap", "p95", "300 agree", "behind", "gap", "p95", "fight agree", "gap", "p95");
+    for back in [0.25f32, 0.5, 0.75, 1.0] {
+        let t = Tuning { max_rewind: back, ..Tuning::default() };
+        let w = peek_with(t, wifi, lan, seconds);
+        let x = peek_with(t, internet(0.30), lan, seconds);
+        let f = fight_with(t, 8, 2, wifi, seconds);
+        println!("{:>7.0} {:>11} {:>7} {:>5} {:>5} {:>11} {:>7} {:>5} {:>5} {:>11} {:>5} {:>5}", back * 1000.0,
+            percent(w.holder.agree, w.holder.shots), percent(w.peeker.behind, w.peeker.gaps.len()), units(mean(&w.peeker.gaps)), units(percentile(&w.peeker.gaps, 0.95)),
+            percent(x.holder.agree, x.holder.shots), percent(x.peeker.behind, x.peeker.gaps.len()), units(mean(&x.peeker.gaps)), units(percentile(&x.peeker.gaps, 0.95)),
+            percent(f.remote.agree, f.remote.shots), units(mean(&f.lan.gaps)), units(percentile(&f.lan.gaps, 0.95)));
+    }
+}
+
 fn main() {
     let mut seconds = 30.0f32;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "--tune" => {
+                tune(seconds);
+                return;
+            }
             "--seconds" => seconds = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage("--seconds expects a number")),
             "--help" | "-h" => usage(""),
             other => usage(&format!("unknown option {other}")),
@@ -125,7 +175,7 @@ fn main() {
         ("100 ms / LAN, judged now", internet(0.10), lan, false),
     ];
     for (label, holder, peeker, looking_back) in rows {
-        let p = peek_judged(holder, peeker, seconds, looking_back);
+        let p = peek_with(Tuning { lag_compensation: looking_back, ..Tuning::default() }, holder, peeker, seconds);
         let h = &p.holder;
         println!("{label:<26} {:>6} {:>10} {:>6} {:>6} {:>8} {:>7} {:>5} {:>5}",
             p.advantage.len(), ms(mean(&p.advantage)), h.shots, percent(h.agree, h.shots), percent(h.honored, h.seen_hits),

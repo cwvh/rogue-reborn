@@ -36,15 +36,16 @@ pub struct Frame {
 }
 
 /// How many snapshot intervals behind the newest snapshot other players are shown, so that
-/// there is nearly always a later snapshot to be moving toward
-const VIEW_DELAY: f64 = 2.0;
+/// there is nearly always a later snapshot to be moving toward. At 60 snapshots a second they
+/// stand still for want of one in 1% of frames at 100 ms, and never on the LAN.
+pub const VIEW_DELAY: f64 = 1.5;
 
 /// How many snapshots are kept to be the difference from. It is more than the server keeps, so
 /// that whichever it picks is here.
-const REMEMBERED: usize = 96;
+const REMEMBERED: usize = 192;
 
 /// The most snapshots kept to look back through
-const HISTORY: usize = 24;
+const HISTORY: usize = 48;
 
 /// How often (seconds) a client that is not in yet asks again
 const RETRY: f64 = 0.25;
@@ -93,6 +94,12 @@ pub struct Client {
     received: VecDeque<Snapshot>,
     /// Parts of snapshots too big for a datagram
     parts: Parts,
+    /// How many snapshot intervals behind the newest others are shown (`VIEW_DELAY`)
+    view_delay: f64,
+    /// Frames drawn, and those that wanted a moment past the newest snapshot, so that what moves
+    /// stood still
+    pub frames: u32,
+    pub starved: u32,
     /// What the server has sent, kept for a recording
     tape: Option<Vec<Vec<u8>>>,
     /// When (client time) the newest snapshot arrived
@@ -110,7 +117,7 @@ impl Client {
             server, token, build: build.to_string(), status: Status::Connecting, setup: None, slot: 0, seq: 1,
             recent: VecDeque::new(), pending: VecDeque::new(), last_snapshot: 0, event_seen: 0, heard: 0.0,
             asked: f64::NEG_INFINITY, correction: 0.0, snapshots: 0,
-            history: VecDeque::new(), received: VecDeque::new(), parts: Parts::default(), tape: None, arrived: 0.0, view_tick: None, view_at: 0.0,
+            history: VecDeque::new(), received: VecDeque::new(), parts: Parts::default(), view_delay: VIEW_DELAY, frames: 0, starved: 0, tape: None, arrived: 0.0, view_tick: None, view_at: 0.0,
             meter: Meter::default(),
         }
     }
@@ -128,6 +135,11 @@ impl Client {
     pub fn leave(&mut self, link: &mut impl Link) {
         link.send(self.server, &ToServer::Leave { token: self.token }.encode());
         self.status = Status::Lost;
+    }
+
+    /// Show others this many snapshot intervals behind the newest (`VIEW_DELAY` unless told)
+    pub fn set_view_delay(&mut self, intervals: f64) {
+        self.view_delay = intervals;
     }
 
     /// The number of the latest input sent
@@ -295,7 +307,7 @@ impl Client {
             n => (newest - self.history[n - 2].0).max(1) as f64,
         };
         // Where the server is now, as far as can be told, less the delay
-        let target = newest as f64 + (now - self.arrived) / TICK as f64 - interval * VIEW_DELAY;
+        let target = newest as f64 + (now - self.arrived) / TICK as f64 - interval * self.view_delay;
         let t = match self.view_tick {
             Some(t) if (target - t).abs() < 15.0 => {
                 // Run with the clock, and drift toward the target so a late packet does not jerk the view
@@ -305,6 +317,8 @@ impl Client {
             }
             _ => target,
         };
+        self.frames += 1;
+        self.starved += (t > newest as f64) as u32;
         let t = t.min(newest as f64);
         self.meter.frame(now, newest as f64 - t, newest as f64 + (now - self.arrived) / TICK as f64 - t);
         self.view_tick = Some(t);

@@ -140,6 +140,9 @@ pub struct Tally {
     /// Times the server moved this player from where they predicted, and the furthest (units)
     pub fixes: u32,
     pub worst_fix: f32,
+    /// Frames drawn, and those in which the others stood still for want of a snapshot
+    pub frames: u32,
+    pub starved: u32,
 }
 
 impl Tally {
@@ -160,6 +163,13 @@ impl Tally {
         self.death_delays.extend(&o.death_delays);
         self.fixes += o.fixes;
         self.worst_fix = self.worst_fix.max(o.worst_fix);
+        self.frames += o.frames;
+        self.starved += o.starved;
+    }
+
+    /// The share of frames in which the others stood still
+    pub fn stutter(&self) -> f32 {
+        self.starved as f32 / self.frames.max(1) as f32
     }
 }
 
@@ -185,6 +195,24 @@ impl Lab {
     }
 }
 
+/// What tuning tries different values of
+#[derive(Clone, Copy, Debug)]
+pub struct Tuning {
+    /// Snapshot intervals behind the newest that clients show others (`client::VIEW_DELAY`)
+    pub view_delay: f64,
+    /// Snapshots a second
+    pub snapshot_rate: f32,
+    /// Shots judged against where the shooter saw the others, at most this far back (seconds)
+    pub lag_compensation: bool,
+    pub max_rewind: f32,
+}
+
+impl Default for Tuning {
+    fn default() -> Tuning {
+        Tuning { view_delay: crate::net::client::VIEW_DELAY, snapshot_rate: (1.0 / TICK) / crate::net::server::SNAPSHOT_EVERY as f32, lag_compensation: true, max_rewind: crate::net::server::MAX_REWIND }
+    }
+}
+
 pub struct Game {
     pub net: FakeNet,
     pub server: Server,
@@ -193,6 +221,7 @@ pub struct Game {
     pub steps: u64,
     /// Measuring, when on
     pub lab: Option<Lab>,
+    pub tuning: Tuning,
 }
 
 impl Game {
@@ -209,7 +238,15 @@ impl Game {
         let server_link = net.endpoint();
         let sim = build_sim(&setup).unwrap();
         let server = Server::new(sim, setup, BUILD, spawns);
-        Game { net, server, server_link, peers: Vec::new(), steps: 0, lab: None }
+        Game { net, server, server_link, peers: Vec::new(), steps: 0, lab: None, tuning: Tuning::default() }
+    }
+
+    /// Play with these settings, for players who join from now on
+    pub fn tune(&mut self, t: Tuning) {
+        self.tuning = t;
+        self.server.set_snapshot_rate(t.snapshot_rate);
+        self.server.set_lag_compensation(t.lag_compensation);
+        self.server.set_max_rewind(t.max_rewind);
     }
 
     /// Measure from now on
@@ -220,7 +257,8 @@ impl Game {
 
     pub fn join_with(&mut self, build: &str, script: impl FnMut(u32) -> Input + 'static) -> usize {
         let link = self.net.endpoint();
-        let client = Client::new(self.server_link.addr(), 1000 + self.peers.len() as u32, build);
+        let mut client = Client::new(self.server_link.addr(), 1000 + self.peers.len() as u32, build);
+        client.set_view_delay(self.tuning.view_delay);
         self.peers.push(Peer {
             client, link, sim: None, script: Box::new(script), bot: None, sees: None, ticks: 0, on: true, events: Vec::new(),
             recorder: None, frames: Vec::new(), view: None, remote: false, clock: 1.0, frozen: None, ran: self.steps, shown: VecDeque::new(), told_shots: 0, told_deaths: 0, snapshots: 0,
@@ -454,7 +492,13 @@ fn lab_setup() -> Setup {
 
 /// `lan` bots on the LAN and `remote` over `far` fight for `seconds`
 pub fn fight(lan: usize, remote: usize, far: Conditions, seconds: f32) -> Fight {
+    fight_with(Tuning::default(), lan, remote, far, seconds)
+}
+
+/// `fight`, with these settings
+pub fn fight_with(tuning: Tuning, lan: usize, remote: usize, far: Conditions, seconds: f32) -> Fight {
     let mut game = Game::with_setup(Conditions::lan(), lab_setup());
+    game.tune(tuning);
     game.measure();
     let skills = [Skill::hard(), Skill::normal(), Skill::easy()];
     for i in 0..lan + remote {
@@ -467,7 +511,9 @@ pub fn fight(lan: usize, remote: usize, far: Conditions, seconds: f32) -> Fight 
     let mut lab = game.lab.take().unwrap();
     let (mut lan, mut far) = (Tally::default(), Tally::default());
     for p in &game.peers {
-        let t = lab.tally(p.client.slot()).clone();
+        let t = lab.tally(p.client.slot());
+        (t.frames, t.starved) = (p.client.frames, p.client.starved);
+        let t = t.clone();
         if p.remote { far.add(&t) } else { lan.add(&t) }
     }
     let meters = game.peers.iter().map(|p| (p.remote, p.client.meter.figures())).collect();
@@ -492,16 +538,16 @@ pub struct Peeking {
 /// One player holds still, watching the corner; another steps out past it and back, again and
 /// again, over these connections. The holder fires whenever their screen shows the other.
 pub fn peek(holder: Conditions, peeker: Conditions, seconds: f32) -> Peeking {
-    peek_judged(holder, peeker, seconds, true)
+    peek_with(Tuning::default(), holder, peeker, seconds)
 }
 
-/// `peek`, with shots judged against where the others were when the shooter saw them, or not
-pub fn peek_judged(holder: Conditions, peeker: Conditions, seconds: f32, lag_compensation: bool) -> Peeking {
+/// `peek`, with these settings
+pub fn peek_with(tuning: Tuning, holder: Conditions, peeker: Conditions, seconds: f32) -> Peeking {
     // The holder across the room, facing the corner; the peeker behind it
     let spawns = vec![[0.0, 0.0, 300.0], [-400.0, 0.0, -200.0]];
     let mut game = Game::with_spawns(Conditions::lan(), lab_setup(), spawns);
     game.server.sim.god = true;
-    game.server.set_lag_compensation(lag_compensation);
+    game.tune(tuning);
     game.measure();
     game.lab.as_mut().unwrap().corner = Some(CORNER);
     let h = game.join_seeing(|sim, me, view, _| {
@@ -549,6 +595,10 @@ pub fn peek_judged(holder: Conditions, peeker: Conditions, seconds: f32, lag_com
         }
     }
     let mut lab = game.lab.take().unwrap();
+    for q in &game.peers {
+        let t = lab.tally(q.client.slot());
+        (t.frames, t.starved) = (q.client.frames, q.client.starved);
+    }
     let holder = lab.tally(game.peers[h].client.slot()).clone();
     let peeker = lab.tally(game.peers[p].client.slot()).clone();
     Peeking { advantage, holder, peeker }

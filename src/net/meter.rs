@@ -94,7 +94,10 @@ impl Meter {
     /// A snapshot for server tick `tick` arrived, saying the server has used inputs up to `ack_seq`
     pub fn snapshot(&mut self, now: f64, tick: u32, ack_seq: u32) {
         if self.newest.is_some_and(|n| tick <= n) {
-            // Late, behind a newer one: it was counted as lost
+            // Late, behind a newer one: it came after all, though too late to show
+            if let Some(c) = self.columns.iter_mut().find(|c| c.tick == tick && c.lost) {
+                c.lost = false;
+            }
             return;
         }
         if let Some(n) = self.newest {

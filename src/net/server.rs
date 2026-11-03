@@ -13,12 +13,14 @@ use crate::sim::{Event, Input, Sim, TICK};
 
 type V3 = [f32; 3];
 
-/// Snapshots are sent every this many ticks unless the server is told otherwise: 30 a second
-pub const SNAPSHOT_EVERY: u32 = 2;
+/// Snapshots are sent every this many ticks unless the server is told otherwise: 60 a second.
+/// With `client::VIEW_DELAY` this shows others 25 ms in the past, about as Quake Live does,
+/// and halves the peeker's advantage on the LAN against 30 a second (see `rrlab --tune`).
+pub const SNAPSHOT_EVERY: u32 = 1;
 
-/// How many snapshots sent to each client are kept to be the difference from. A client whose
-/// latest news is older than this is sent a snapshot in full.
-const REMEMBERED: usize = 64;
+/// How many snapshots sent to each client are kept to be the difference from (about two
+/// seconds). A client whose latest news is older than this is sent a snapshot in full.
+const REMEMBERED: usize = 128;
 
 /// A client that has said nothing for this long (seconds) is gone
 const TIMEOUT: f64 = 5.0;
@@ -44,8 +46,10 @@ const SPARE: usize = 2;
 /// let go: a client that has stopped, stuck or put aside, does not run on and fire by itself
 const HOLD: u32 = 15;
 
-/// The furthest back (ticks) that a shot is judged against where the others were: half a second
-const MAX_REWIND: f32 = 30.0;
+/// The furthest back (seconds) that a shot is judged against where the others were, unless
+/// told otherwise. Less than half a second fails players far away; three quarters carries a
+/// shooter on Wi-Fi through most stalls, at no cost the lab can see to players on the LAN.
+pub const MAX_REWIND: f32 = 0.75;
 
 /// The most ticks run in one update, if the server has fallen behind
 const MAX_CATCH_UP: u32 = 10;
@@ -153,8 +157,10 @@ pub struct Server {
     events: VecDeque<(u32, u32, Event)>,
     next_event: u32,
     snapshot_every: u32,
-    /// Whether a shot is judged against where the others were when the shooter saw them
+    /// Whether a shot is judged against where the others were when the shooter saw them, and
+    /// how far back at most (ticks)
     lag_compensation: bool,
+    max_rewind: f32,
     /// How many snapshots have been sent, and how many bytes they came to
     pub snapshots_sent: u64,
     pub snapshot_bytes: u64,
@@ -168,7 +174,7 @@ impl Server {
         assert!(!spawns.is_empty(), "players need somewhere to start");
         let mut sim = sim;
         sim.spawns = spawns.clone();
-        Server { sim, setup, build: build.to_string(), spawns, spawned: 0, remotes: Vec::new(), tick: 0, next_tick_at: None, events: VecDeque::new(), next_event: 1, snapshot_every: SNAPSHOT_EVERY, lag_compensation: true, snapshots_sent: 0, snapshot_bytes: 0, snapshots_split: 0, recorder: None }
+        Server { sim, setup, build: build.to_string(), spawns, spawned: 0, remotes: Vec::new(), tick: 0, next_tick_at: None, events: VecDeque::new(), next_event: 1, snapshot_every: SNAPSHOT_EVERY, lag_compensation: true, max_rewind: MAX_REWIND / TICK, snapshots_sent: 0, snapshot_bytes: 0, snapshots_split: 0, recorder: None }
     }
 
     /// Send snapshots this many times a second (the nearest the 60 ticks a second allow)
@@ -191,6 +197,11 @@ impl Server {
     /// The match so far, if it is being recorded
     pub fn recording(&self) -> Option<ServerRecording> {
         self.recorder.as_ref().map(|r| r.recording(&self.sim))
+    }
+
+    /// Judge shots against where the others were at most this many seconds back
+    pub fn set_max_rewind(&mut self, seconds: f32) {
+        self.max_rewind = seconds / TICK;
     }
 
     pub fn players(&self) -> usize {
@@ -300,7 +311,7 @@ impl Server {
             let (input, view) = r.take();
             inputs[r.slot] = input;
             if self.lag_compensation && view > 0 {
-                rewind[r.slot] = (self.tick as f32 - view as f32 / 16.0).clamp(0.0, MAX_REWIND);
+                rewind[r.slot] = (self.tick as f32 - view as f32 / 16.0).clamp(0.0, self.max_rewind);
             }
         }
         self.sim.rewind = rewind.clone();

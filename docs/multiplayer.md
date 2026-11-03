@@ -19,10 +19,10 @@ There are no human playtests for now. Bots stand in for players until there are.
 ## What we have
 
 - The server runs the game and the clients predict their own player (`net::server`,
-  `net::client`). Snapshots go out 30 times a second, as the difference from one the client
-  has.
+  `net::client`). Snapshots go out 60 times a second, as the difference from one the client
+  has, and others are shown 25 ms in the past (see "Tuning").
 - Lag compensation: the server judges a shot against where the shooter saw the others, up to
-  half a second back.
+  three quarters of a second back.
 - A pretend network and clock (`net::link`): delay, jitter, loss and duplicates. Runs are
   deterministic.
 - 17 tests of the server and clients together (`net::tests`).
@@ -99,7 +99,7 @@ How it is done (`net::lab`, `rrlab`; the tests use the same harness):
 - With lag compensation off, agreement falls to about 30%, which shows the measure sees
   disagreement when there is some.
 
-First findings (60 seconds a row):
+First findings (60 seconds a row, before tuning, at 30 snapshots a second):
 
 - The server agrees with the shooter's screen on 99 to 100% of shots, at every ping tried.
 - Peeker's advantage is about 95 ms even on the LAN, about 160 ms against a peeker at 100 ms,
@@ -126,17 +126,66 @@ its comment gives the figure measured. When tuning makes a figure better, its li
 tightened. They hold:
 
 - agreement: 97% on the LAN, 95% at 100 ms;
-- the gap: 55 units on the LAN, 80 at 100 ms;
-- being told of one's shot and death: 60 and 40 ms on the LAN, 190 and 100 ms at 100 ms;
+- the gap: 35 units on the LAN, 65 at 100 ms;
+- being told of one's shot and death: 45 and 25 ms on the LAN, 180 and 85 ms at 100 ms;
 - fixes: half a fix a minute for each player, none over 50 units;
-- 16 players: 120 KB a second of the host's upload, 9 KB a second for any client;
-- peeker's advantage: 120 ms on the LAN, 190 and 235 ms for a peeker at 100 and 150 ms, 175 ms
+- 16 players: 230 KB a second of the host's upload, 19 KB a second for any client;
+- peeker's advantage: 65 ms on the LAN, 135 and 170 ms for a peeker at 100 and 150 ms, 120 ms
   for a holder at 100 ms;
-- hits behind cover: 30% for a peeker at 100 ms, 33% for a holder at 100 ms.
+- hits behind cover: 20% for a peeker at 100 ms, 21% for a holder at 100 ms.
 
 Other tests hold the rest: Wi-Fi (`players_on_wifi_keep_playing...`), drift, freezes, the size
-of snapshots and recordings. Showing others twice as far in the past (`VIEW_DELAY` 4) fails four
-of the five.
+of snapshots and recordings. Showing others twice as far in the past fails four of the five
+(tried before tuning).
+
+### Tuning
+
+`rrlab --tune` tries settings against one another, and the lab can play with any of them
+(`lab::Tuning`). How soon others are shown trades against how often they stand still for want
+of a snapshot (`Client::starved`). Measured over 90 s a row:
+
+| Snapshots a second, intervals behind | Behind | Peeker's advantage, LAN / 100 ms | Standing still, 100 ms / Wi-Fi |
+| --- | --- | --- | --- |
+| 30, 2 (before) | 67 ms | 97 / 161 ms | 0% / 5% |
+| 30, 1.5 | 50 ms | 81 / 145 ms | 0% / 6% |
+| 60, 2 | 33 ms | 65 / 129 ms | 0% / 5% |
+| 60, 1.5 (chosen) | 25 ms | 49 / 113 ms | 1% / 6% |
+
+On the LAN nothing stands still at any of these. Wi-Fi's bursts last longer than any short
+delay can cover. For comparison, from memory: Quake 3 sent 20 snapshots a second and showed
+others about one interval behind (50 ms), with no lag compensation; Quake Live sends 40, about
+25 ms behind; Counter-Strike shows others two ticks behind, about 31 ms at 64 ticks.
+
+The cost of 60 a second: each client downloads about twice as much, 15 KB a second for a
+player far away; the host's upload for 16 players is about 184 KB a second, most of it to the
+LAN; a player's recording is about 13 KB a second.
+
+How far back shots are judged:
+
+| Back | Wi-Fi shooter's agreement | 300 ms shooter's agreement | Wi-Fi players in a fight |
+| --- | --- | --- | --- |
+| 0.25 s | 98% | 35% | 94% |
+| 0.5 s (before) | 99% | 100% | 95% |
+| 0.75 s (chosen) | 99% | 100% | 98% |
+| 1 s | 99% | 100% | 98% |
+
+Below half a second fails players far away. Three quarters carries Wi-Fi through most stalls,
+and costs the players on the LAN nothing the lab can see. A shooter at 300 ms hits a peeker on
+the LAN behind the corner on about half of their hits at any limit that lets them play; that
+is the price of looking back. The server now keeps 64 ticks of where players were (it kept
+40).
+
+After tuning, against before: peeker's advantage 46 ms on the LAN (92), 106 at 100 ms (151);
+hits behind cover 14% for a peeker at 100 ms (20%); the gap 23 units on the LAN (40); told of
+one's shot in 33 ms on the LAN (43); Wi-Fi shooters agree 94% in a fight (91%).
+
+The lag meter now counts a snapshot that came late, behind a newer one, as come rather than
+lost. At 60 a second, jitter puts many out of order.
+
+Tried by hand on 2026-11-02, against a bot: in the box room on one computer, and on
+citystreet_large with 50 ms each way added to the player's connection. Both felt fine: others
+moved smoothly and hits landed where the crosshair was. The bot's walk skates, which is for the
+animation work, not the network.
 
 More realistic conditions for them and the lab:
 
@@ -164,7 +213,7 @@ How it is done, and what it found:
 - **Held triggers**: a shot fired from a held input, while the client's own were lost, was
   judged against where the others are now. Now it is judged as the client would have shown
   them by then. Players on Wi-Fi went from 88% to 91% agreement.
-- What is left for Wi-Fi: a stall longer than the half second the server looks back, after
+- What is left for Wi-Fi: a stall longer than the server looks back (then half a second), after
   which the shooter fires at a picture too old to honor; and the shooter's own place
   mispredicted after a burst. Wi-Fi in the peek holds 99%.
 
@@ -185,8 +234,8 @@ How it is done (`net::record`):
   ticks, each player's input every tick, and how far back each shot was judged. It is written
   out every 30 seconds and when the server stops. Four players come to about 1 KB a second.
 - `rr --connect HOST:PORT --record seen.rrc` keeps every datagram the server sent, with when it
-  came, every input, and the moment of every frame. M marks a moment. It comes to about 6 KB a
-  second.
+  came, every input, and the moment of every frame. M marks a moment. It comes to about 13 KB
+  a second at 60 snapshots a second.
 - Both keep a checksum of the game every second. `rrsrv --check FILE` plays either back and
   says whether it comes out the same, or the tick where it first does not.
 - A player's recording plays back through the client code, so a replay shows the frames they
@@ -209,6 +258,8 @@ Not done yet: a way to watch a recording, from any player's eyes.
 3. The lab. Done, with bots fighting everyone for themselves until they know their side.
 4. Burst loss and latency spikes. Done, with freezes and drifting clocks.
 5. Tests that hold the lab's numbers. Done (`net::fairness`).
+6. Tuning with the lab. Done: 60 snapshots a second, others shown 1.5 intervals behind, shots
+   judged up to 0.75 s back.
 
 ## The original's match flow
 

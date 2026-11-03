@@ -2,7 +2,8 @@
 //! when it was set, with room to spare, so that a change that makes play less fair or less
 //! smooth fails here. When tuning makes a figure better, tighten its limit.
 //!
-//! Measured on 2026-11-01. Pings are round trips.
+//! Measured on 2026-11-02, at 60 snapshots a second with others shown 1.5 intervals behind,
+//! and shots judged up to 0.75 s back. Pings are round trips.
 
 use crate::net::lab::{Fight, Tally, fight, internet, peek};
 use crate::net::link::Conditions;
@@ -13,38 +14,38 @@ const AGREE_LAN: f32 = 0.97;
 const AGREE_FAR: f32 = 0.95;
 
 /// The mean gap (units) between where a victim was on their own screen and where they were hit:
-/// on the LAN, and at 100 ms (measured 40 and 58)
-const GAP_LAN: f32 = 55.0;
-const GAP_FAR: f32 = 80.0;
+/// on the LAN, and at 100 ms (measured 23 and 47)
+const GAP_LAN: f32 = 35.0;
+const GAP_FAR: f32 = 65.0;
 
 /// Seconds to be told of one's own shot, and of one's own death: on the LAN, and at 100 ms
-/// (measured 43 and 26 ms; 158 and 77 ms)
-const SHOT_TOLD_LAN: f32 = 0.060;
-const DEATH_TOLD_LAN: f32 = 0.040;
-const SHOT_TOLD_FAR: f32 = 0.190;
-const DEATH_TOLD_FAR: f32 = 0.100;
+/// (measured 33 and 17 ms; 150 and 67 ms)
+const SHOT_TOLD_LAN: f32 = 0.045;
+const DEATH_TOLD_LAN: f32 = 0.025;
+const SHOT_TOLD_FAR: f32 = 0.180;
+const DEATH_TOLD_FAR: f32 = 0.085;
 
 /// The server moving a player from where they predicted, a minute, and the furthest (units)
-/// (measured none on the LAN, one of 6 units with players at 100 ms)
+/// (measured none in these fights, one of 6 units among 16 players)
 const FIXES_A_MINUTE: f32 = 0.5;
 const WORST_FIX: f32 = 50.0;
 
 /// Bytes a second for 16 players: the host's upload, and the most any client downloads
-/// (measured 92 KB and 7 KB)
-const UPLOAD_16: f32 = 120_000.0;
-const DOWNLOAD_16: f32 = 9_000.0;
+/// (measured 184 KB and 15 KB)
+const UPLOAD_16: f32 = 230_000.0;
+const DOWNLOAD_16: f32 = 19_000.0;
 
 /// Peeker's advantage (seconds): both on the LAN, the peeker at 100 and 150 ms, and the holder
-/// at 100 ms (measured 92, 151, 190 and 137 ms)
-const PEEK_LAN: f32 = 0.120;
-const PEEK_FAR_100: f32 = 0.190;
-const PEEK_FAR_150: f32 = 0.235;
-const PEEK_HOLDER_FAR: f32 = 0.175;
+/// at 100 ms (measured 46, 106, 140 and 92 ms)
+const PEEK_LAN: f32 = 0.065;
+const PEEK_FAR_100: f32 = 0.135;
+const PEEK_FAR_150: f32 = 0.170;
+const PEEK_HOLDER_FAR: f32 = 0.120;
 
 /// Of the holder's hits, those on a peeker back behind the corner on their own screen: the
-/// peeker at 100 ms, and the holder at 100 ms (measured 20% and 24%)
-const BEHIND_PEEKER_FAR: f32 = 0.30;
-const BEHIND_HOLDER_FAR: f32 = 0.33;
+/// peeker at 100 ms, and the holder at 100 ms (measured 14% and 15%)
+const BEHIND_PEEKER_FAR: f32 = 0.20;
+const BEHIND_HOLDER_FAR: f32 = 0.21;
 
 fn mean(v: &[f32]) -> f32 {
     assert!(!v.is_empty(), "nothing measured");

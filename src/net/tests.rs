@@ -307,9 +307,9 @@ fn a_player_records_what_they_saw_and_it_plays_back_the_same() {
     p.recorder.as_mut().unwrap().mark(now - 2.0);
     let rec = p.recorder.as_ref().unwrap().recording(p.sim.as_ref().unwrap());
     let back = ClientRecording::from_bytes(&rec.to_bytes()).unwrap();
-    // Small enough for a tester to send: a few megabytes for ten minutes
+    // Small enough for a tester to send: about eight megabytes for ten minutes
     let size = rec.to_bytes().len() as f64 / rec.seconds();
-    assert!(size < 8000.0, "{size:.0} bytes a second");
+    assert!(size < 16000.0, "{size:.0} bytes a second");
     assert_eq!(back, rec);
     assert_eq!(back.marks.len(), 1);
     let mut frames = Vec::new();
@@ -501,10 +501,11 @@ fn others_see_a_dead_player_fall_and_then_appear_where_they_come_back() {
 
 #[test]
 fn the_lab_sees_the_server_agree_with_the_shooter_only_when_it_looks_back() {
-    use crate::net::lab::{internet, peek_judged};
+    use crate::net::lab::{Tuning, internet, peek_with};
+    // The shooter far away, the one they shoot at on the LAN
     let far = internet(0.15);
-    let judged = peek_judged(Conditions::lan(), far, 15.0, true);
-    let now = peek_judged(Conditions::lan(), far, 15.0, false);
+    let judged = peek_with(Tuning::default(), far, Conditions::lan(), 15.0);
+    let now = peek_with(Tuning { lag_compensation: false, ..Tuning::default() }, far, Conditions::lan(), 15.0);
     assert!(judged.holder.shots > 50 && now.holder.shots > 50, "{judged:?}");
     // Judged where the shooter saw them, the hits on screen are hits
     assert!(judged.holder.agreement() > 0.95, "{judged:?}");
@@ -591,6 +592,6 @@ fn players_on_wifi_keep_playing_through_its_bursts_and_stalls() {
     assert!(f.remote.shots > 10, "{f:?}");
     // Shots from a held trigger are judged as the shooter would have seen them; what is left is
     // a stall longer than the server looks back, and the shooter's own place mispredicted
-    assert!(f.remote.agreement() > 0.85, "{:?}", f.remote.agreement());
+    assert!(f.remote.agreement() > 0.9, "{:?}", f.remote.agreement());
     assert!(f.lan.agreement() > 0.97, "{:?}", f.lan.agreement());
 }
