@@ -387,8 +387,7 @@ impl Game {
                 rec.ticked(now, input, &mut p.client, sim);
             }
             if let (Some(lab), Some(view), true) = (lab.as_mut(), &view, slot < sim.players.len()) {
-                let bodies = view.players.iter().filter(|s| s.0 != slot && s.3.is_none())
-                    .map(|&(i, feet, _, _)| (i, feet, sim.players.get(i).is_some_and(|q| q.player.crouched))).collect();
+                let bodies = view.players.iter().filter(|s| s.slot != slot && s.dead.is_none()).map(|s| (s.slot, s.feet, s.crouched)).collect();
                 p.shown.push_back(Shown { seq: p.client.last_seq(), sent: now, eye: sim.eye(slot), bodies });
                 // A snapshot came this tick, and moved them
                 let fix = p.client.correction;
@@ -573,7 +572,7 @@ pub fn peek_with(tuning: Tuning, holder: Conditions, peeker: Conditions, seconds
             return input;
         }
         let eye = sim.eye(me);
-        if let Some(&(_, feet, _, _)) = view.players.iter().find(|s| s.0 != me && s.3.is_none() && s.1[0] >= CORNER) {
+        if let Some(feet) = view.players.iter().find(|s| s.slot != me && s.dead.is_none() && s.feet[0] >= CORNER).map(|s| s.feet) {
             let d = [feet[0] - eye[0], feet[1] + 120.0 - eye[1], feet[2] - eye[2]];
             let flat = d[0].hypot(d[2]);
             input.set_look((-d[0]).atan2(d[2]).to_degrees(), d[1].atan2(flat).to_degrees());
@@ -599,7 +598,7 @@ pub fn peek_with(tuning: Tuning, holder: Conditions, peeker: Conditions, seconds
         let now = game.steps as f64 * TICK as f64;
         let ps = game.peers[p].client.slot();
         let own = game.me(p)[0] >= CORNER;
-        let shown = game.peers[h].view.as_ref().is_some_and(|v| v.players.iter().any(|s| s.0 == ps && s.1[0] >= CORNER));
+        let shown = game.peers[h].view.as_ref().is_some_and(|v| v.players.iter().any(|s| s.slot == ps && s.feet[0] >= CORNER));
         match (out, own) {
             (None, true) => (out, seen) = (Some(now), false),
             (Some(_), false) if !shown => out = None,

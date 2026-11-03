@@ -14,12 +14,13 @@ use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 use std::rc::Rc;
 use std::net::ToSocketAddrs;
 use rogue_reborn::{map, rsb, actor, combat, crp, demo, grenade, blastlight, concussion, recording, skeleton, sim, sound, weapon, ambience, glass};
-use rogue_reborn::net::client::{Client, Status};
+use rogue_reborn::net::client::{Client, Seen, Status};
 use rogue_reborn::net::animation::Doing;
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
 use rogue_reborn::recording::{Playback, Recorder, Recording};
 use rogue_reborn::net::record::ClientRecorder;
 use rogue_reborn::net::round::{Outcome, Phase, RoundState};
+use rogue_reborn::net::watch::{BEHIND, Pose, RISE, Watch, WatchContext, WatchMode, behind};
 use rogue_reborn::mission;
 use rogue_reborn::sim::characters::{Characters, Npc, Rig, place_npcs, place_terrorists};
 use rogue_reborn::sim::movement::{Movement, Reloading, crouched_speed, ground_speed, hip_turn, movement_from_keys};
@@ -717,6 +718,14 @@ fn main() {
     let mut alive_look: Option<(f32, f32)> = None;
     // The round the marks and bodies are from
     let mut round_seen = 0u16;
+    // Dead in a round: whom the player watches (see net::watch), the keys pressed for it, whom
+    // the camera is on and the room they were in last, and the eye height eased between the
+    // watched one's stances
+    let mut watch = Watch::default();
+    let (mut watch_next, mut watch_previous, mut watch_mode) = (false, false, false);
+    let (mut camera_on, mut camera_room): (Option<usize>, Option<usize>) = (None, None);
+    let mut watch_eye: Option<(Option<usize>, f32)> = None;
+    let team_game = joined.as_ref().is_some_and(|s| s.bases.iter().all(|b| !b.is_empty()));
     let mut trigger = false;
     // Right mouse button held: walk instead of the default run
     let mut walk_held = false;
@@ -806,6 +815,11 @@ fn main() {
                         (Key::N, Action::Press) => {
                             blink_enabled = !blink_enabled;
                         }
+                        // Dead in a round, F goes between their eyes and behind them once
+                        // watching, and leaves the player's own view as it was
+                        (Key::F, Action::Press) if watch.in_round() => {
+                            watch_mode |= watch.watching();
+                        }
                         (Key::F, Action::Press) => {
                             third_person = !third_person;
                         }
@@ -848,11 +862,14 @@ fn main() {
                 WindowEvent::FramebufferSize(width, height) => {
                     unsafe { glViewport(0, 0, width, height); }
                 }
+                // Watching, the buttons go to the next teammate and back, on a press
                 WindowEvent::MouseButton(glfw::MouseButton::Button1, action, _) => {
                     trigger = action != Action::Release;
+                    watch_next |= action == Action::Press && watch.watching();
                 }
                 WindowEvent::MouseButton(glfw::MouseButton::Button2, action, _) => {
                     walk_held = action != Action::Release;
+                    watch_previous |= action == Action::Press && watch.watching();
                 }
                 WindowEvent::Scroll(_x, y) => {
                     if !first_person {
@@ -1029,6 +1046,15 @@ fn main() {
             tick_budget = 0.0;
         }
         let game_time = sim.time;
+        // On a server, what moves is shown a little in the past, between its snapshots, so that
+        // it moves smoothly
+        let frame = net.as_mut().map(|(client, _)| {
+            let now = net_clock.elapsed().as_secs_f64();
+            if let Some(rec) = net_recorder.as_mut() {
+                rec.viewed(now);
+            }
+            client.view(now)
+        });
         if let Some((client, _)) = &net {
             if client.status != Status::Connected {
                 eprintln!("the connection to the server was lost: {:?}", client.status);
@@ -1088,6 +1114,47 @@ fn main() {
                 }
                 killed_by = None;
             }
+        }
+
+        // Dead in a round, the view is a teammate's (see net::watch)
+        let watch_pose = match (&net, &frame) {
+            (Some((client, _)), Some(f)) => {
+                let cx = WatchContext { sim: &sim, frame: f, me, round: client.round, team_game, connected: client.status == Status::Connected };
+                watch.update(&cx);
+                if std::mem::take(&mut watch_next) {
+                    watch.next(&cx);
+                }
+                if std::mem::take(&mut watch_previous) {
+                    watch.previous(&cx);
+                }
+                if std::mem::take(&mut watch_mode) {
+                    watch.toggle_mode();
+                }
+                watch.camera(&cx)
+            }
+            _ => None,
+        };
+        match watch_pose {
+            Some(pose) => {
+                // Through their eyes the height eases as they crouch and stand, as the player's
+                // own does, and starts afresh with each one watched
+                let target = watch.target().filter(|_| watch.mode == WatchMode::Eyes);
+                let y = match watch_eye {
+                    Some((t, y)) if t == target && target.is_some() => y + (pose.eye[1] - y) * (1.0 - (-step_dt * 15.0).exp()),
+                    _ => pose.eye[1],
+                };
+                watch_eye = Some((target, y));
+                camera.position = [pose.eye[0], y, -pose.eye[2]];
+                (camera.yaw, camera.pitch) = (pose.yaw, pose.pitch);
+            }
+            None => watch_eye = None,
+        }
+        let watched_body = watch.target().filter(|_| watch_pose.is_some() && watch.mode == WatchMode::Eyes);
+        // Dead, the view is drawn from the rooms of whoever the camera is on, the one watched (or
+        // last watched, while their view is held) or the player's own body, where they stand
+        let (on, camera_feet) = watch_pose.and(watch.standing()).unwrap_or((me, sim.players[me].player.pos));
+        if camera_on != Some(on) {
+            (camera_on, camera_room) = (Some(on), None);
         }
 
         // A blast leaves the view shaken and whited out, and the sound muffled, for a while
@@ -1191,7 +1258,8 @@ fn main() {
                         }
                     }
                 }
-                sim::Event::PlayerBlast { player, shake: s, veil: v } if player == me => {
+                // Not while watching: the view and the ears are elsewhere
+                sim::Event::PlayerBlast { player, shake: s, veil: v } if player == me && watch_pose.is_none() => {
                     shake = shake.max(s);
                     veil = veil.max(v);
                     // The blast knocks the head: where the player points jumps, and drops
@@ -1213,7 +1281,8 @@ fn main() {
                         }
                     }
                 }
-                // What happened to other players is not felt here
+                // What happened to other players, or near the body of one watching, is not felt
+                // here
                 sim::Event::PlayerBlast { .. } => {}
                 sim::Event::Kill { killer, victim, cause } => {
                     let who = |s: usize| format!("PLAYER {}", s + 1);
@@ -1342,7 +1411,7 @@ fn main() {
             glMatrixMode(0x1700); // GL_MODELVIEW
             glLoadIdentity();
             // A blast shakes the view: a quick tremble that dies away
-            if shake > 0.002 {
+            if shake > 0.002 && watch_pose.is_none() {
                 let t = game_time;
                 let s = shake.min(1.0);
                 glRotatef(5.0 * s * (t * 47.0).sin(), 0.0, 0.0, 1.0);
@@ -1350,15 +1419,13 @@ fn main() {
                 glRotatef(2.5 * s * (t * 39.0 + 3.0).sin(), 1.0, 0.0, 0.0);
             }
             // Third person: pull the view back behind and above the player's eyes
-            let view = if first_person && third_person {
-                // Orbit the view around the player to see them from the side
-                let f = Camera { position: [0.0; 3], yaw: camera.yaw + args.view_orbit, pitch: camera.pitch }.get_forward();
-                let dist = args.view_dist.unwrap_or(220.0);
-                Camera {
-                    position: [camera.position[0] - f[0] * dist, camera.position[1] - f[1] * dist + 40.0, camera.position[2] - f[2] * dist],
-                    yaw: camera.yaw + args.view_orbit,
-                    pitch: camera.pitch,
-                }
+            let view = if first_person && third_person && watch_pose.is_none() {
+                // Orbited round the player to see them from the side, if asked, and kept out
+                // of the walls as the camera behind a watched player is
+                let eye = [camera.position[0], camera.position[1], -camera.position[2]];
+                let from = Pose { eye, yaw: camera.yaw, pitch: camera.pitch };
+                let p = behind(&sim, from, args.view_dist.unwrap_or(BEHIND), RISE, args.view_orbit);
+                Camera { position: [p.eye[0], p.eye[1], -p.eye[2]], yaw: p.yaw, pitch: p.pitch }
             } else {
                 Camera { position: camera.position, yaw: camera.yaw, pitch: camera.pitch }
             };
@@ -1371,18 +1438,27 @@ fn main() {
             let mut plan: Vec<rogue_reborn::visibility::PlanNode> = Vec::new();
             // Each visible room once, with its screen rectangle (unless --portal-paths)
             let mut rect_plan: Vec<rogue_reborn::visibility::RectRoom> = Vec::new();
-            if sim.culling && !sim.players[me].render_rooms.is_empty() {
+            // Dead on a server, drawn from the rooms of whoever the camera is on: the player's own
+            // rooms are not followed while they are dead
+            let (cull_rooms, cull_body) = if net.is_some() && sim.players[me].respawn_at.is_some() {
+                let (rooms, room) = sim.standing_rooms(camera_feet, camera_room);
+                camera_room = room;
+                (rooms, [[camera_feet[0], camera_feet[1] + 10.0, camera_feet[2]], cam_eye])
+            } else {
+                (sim.players[me].render_rooms.clone(), sim.players[me].body)
+            };
+            if sim.culling && !cull_rooms.is_empty() {
                 let (mut modelview, mut projection) = ([0f32; 16], [0f32; 16]);
                 glGetFloatv(0x0BA6, modelview.as_mut_ptr()); // GL_MODELVIEW_MATRIX
                 glGetFloatv(0x0BA7, projection.as_mut_ptr()); // GL_PROJECTION_MATRIX
                 let clip = |v: [f32; 3]| mul_mat4(&projection, mul_mat4(&modelview, [v[0], v[1], v[2], 1.0]));
                 if args.portal_paths {
-                    plan = sim.players[me].render_rooms.iter().map(|&r| sim.visibility.plan(&level, r, &sim.players[me].body, cam_eye, &sim.blocked_portals, &clip)).collect();
+                    plan = cull_rooms.iter().map(|&r| sim.visibility.plan(&level, r, &cull_body, cam_eye, &sim.blocked_portals, &clip)).collect();
                 } else {
-                    rect_plan = sim.visibility.rect_plan(&level, &sim.players[me].render_rooms, &sim.players[me].body, cam_eye, &sim.blocked_portals, &clip);
+                    rect_plan = sim.visibility.rect_plan(&level, &cull_rooms, &cull_body, cam_eye, &sim.blocked_portals, &clip);
                     // The player's rooms and the doorways they stand in are still cut where
                     // they overlap
-                    plan = sim.players[me].render_rooms.iter().map(|&r| sim.visibility.touched_plan(&level, r, &sim.players[me].body, cam_eye, &sim.blocked_portals)).collect();
+                    plan = cull_rooms.iter().map(|&r| sim.visibility.touched_plan(&level, r, &cull_body, cam_eye, &sim.blocked_portals)).collect();
                 }
             }
             let mut visible_rooms: Vec<u32> = rect_plan.iter().map(|rr| rr.room).collect();
@@ -1618,15 +1694,7 @@ fn main() {
                 glColor3f(1.0, 1.0, 1.0);
             }
 
-            // On a server, what moves is shown a little in the past, between its snapshots, so that
-            // it moves smoothly
-            let view = net.as_mut().map(|(client, _)| {
-                let now = net_clock.elapsed().as_secs_f64();
-                if let Some(rec) = net_recorder.as_mut() {
-                    rec.viewed(now);
-                }
-                client.view(now)
-            });
+            let view = frame.clone();
 
             // A character shows only when a room it is in is drawn: the level overlaps itself,
             // and on rm05 a character on the plane's upper deck pokes out of the top of the hull.
@@ -1809,7 +1877,8 @@ fn main() {
                 let others = view.as_ref().map_or(&[][..], |v| &v.players[..]);
                 // Alive or dead as the view has them, at the moment it shows, not as the newest snapshot says
                 let view_time = view.as_ref().map_or(game_time, |v| v.time);
-                for &(slot, pos, look, dead) in others.iter().filter(|(i, ..)| *i != me) {
+                // Not the one watched, through whose eyes the view is
+                for &Seen { slot, feet: pos, look, dead, crouched, peek, .. } in others.iter().filter(|s| s.slot != me && Some(s.slot) != watched_body) {
                     let visible = shown(pos);
                     let p = &sim.players[slot];
                     let yaw = sim::dequantize(look.0);
@@ -1820,7 +1889,7 @@ fn main() {
                             reloading: p.reloading(game_time),
                             // The server sends others' trigger only while their gun has rounds
                             firing: p.gun_trigger,
-                            crouched: p.player.crouched,
+                            crouched,
                         };
                         let frames = |m: Movement| player_motions.get(m, doing.crouched).map_or(1, |m| m.frames.max(1)) as f32;
                         let (movement, frame) = remote_anim.update(slot, pos, yaw, step_dt, doing, frames, args.speed_scale.unwrap_or(1.0), args.anim_scale.unwrap_or(1.5));
@@ -1830,7 +1899,7 @@ fn main() {
                         // Hidden, the animation still follows them
                         let flinch = flinch_at(chars, p, view_time);
                         let hip_turn = remote_anim.hip_turn(slot, yaw);
-                        if !visible || draw_body(chars, p.side, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, doing.reloading, doing.firing, doing.crouched, hip_turn, flinch, p.peek, bodies.entry(slot).or_default()) {
+                        if !visible || draw_body(chars, p.side, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, doing.reloading, doing.firing, doing.crouched, hip_turn, flinch, peek, bodies.entry(slot).or_default()) {
                             continue;
                         }
                     } else {
@@ -2165,7 +2234,7 @@ fn main() {
                 glDisable(0x0DE1); // GL_TEXTURE_2D
                 glColor3f(1.0, 0.85, 0.0);
                 let others = view.as_ref().map_or(&[][..], |v| &v.players[..]);
-                let mut standing: Vec<(usize, [f32; 3])> = others.iter().filter(|p| p.0 != me && p.3.is_none()).map(|p| (p.0, p.1)).collect();
+                let mut standing: Vec<(usize, [f32; 3])> = others.iter().filter(|s| s.slot != me && s.dead.is_none()).map(|s| (s.slot, s.feet)).collect();
                 if sim.players[me].respawn_at.is_none() && (third_person || !first_person) {
                     standing.push((me, draw_feet));
                 }
@@ -2216,7 +2285,7 @@ fn main() {
         // The held weapon in front of the camera, over the scene. A grenade is small, so it is held
         // further out in proportion, drawn back by the wind-up, and gone once it has been thrown.
         let held = if sim.players[me].equipped_grenade { grenade_draw.as_ref().filter(|_| sim.players[me].throw.is_none_or(|t| !t.thrown)) } else { weapon_draw.as_ref() };
-        if let (true, true, false, Some(wd)) = (args.viewmodel, first_person, third_person, held) {
+        if let (true, true, false, Some(wd)) = (args.viewmodel && sim.players[me].respawn_at.is_none(), first_person, third_person, held) {
             let l = wd.length;
             let [ox, oy, oz] = if sim.players[me].equipped_grenade {
                 let held_for = sim.players[me].charge_from.map_or(0.0, |from| ((game_time - from) / grenade::CHARGE_SECONDS).clamp(0.0, 1.0));
@@ -2279,6 +2348,14 @@ fn main() {
                 status.insert(0, if p.respawn_at.is_some() { "DEAD".to_string() } else { format!("HEALTH: {:.0}", p.hp.ceil()) });
                 status.insert(1, format!("DEATHS: {}", p.deaths));
             }
+            // Watching, who it is and how they are, in place of the player's own
+            if watch.watching() {
+                status = vec![match watch.target() {
+                    Some(t) => format!("WATCHING PLAYER {}  HEALTH: {:.0}", t + 1, sim.players[t].hp.ceil()),
+                    None if watch_pose.is_some() => "WATCHING".to_string(),
+                    None => "NO ONE TO WATCH".to_string(),
+                }];
+            }
             let round = net.as_ref().map(|(c, _)| c.round).unwrap_or_default();
             if round.phase != Phase::Open {
                 status.insert(0, format!("ROUND {}  BLUE {}  GOLD {}", round.number.max(1), round.wins[0], round.wins[1]));
@@ -2296,7 +2373,10 @@ fn main() {
             // The crosshair opens as wide as the gun's spread, in a view 60 degrees high
             let p = &sim.players[me];
             let spread = if p.equipped_grenade { 0.0 } else { p.aim.angle.tan() / 30f32.to_radians().tan() * h as f32 / 2.0 };
-            draw_hud(w, h, &status, msg, marker, spread, veil, concussion.daze(), &lines, dead, meter);
+            // Watching, none of the player's own: no crosshair, red, whiteout or daze
+            let own = watch_pose.is_none();
+            let (veil, daze) = if own { (veil, concussion.daze()) } else { (0.0, 0.0) };
+            draw_hud(w, h, &status, msg, marker && own, spread, veil, daze, &lines, dead && own, own, meter);
         }
         let rooms_text = if sim.culling {
             format!("ROOM: {} DRAWN: {}", current_rooms.join(" "), drawn_rooms.join(" "))

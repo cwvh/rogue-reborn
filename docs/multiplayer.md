@@ -525,6 +525,41 @@ same. A new round puts back glass, doors and characters on rm19, and on a client
 Still to do from the plan: picking and changing a side in the lobby, kits, and the results
 waiting for players.
 
+### Watching (done)
+
+A player dead in a round watches a living player on their own side (`net::watch`), or anyone
+without sides, as in Survival. It is all on the client: the snapshots already hold everyone's
+place, look and stance, and a dead player's input does nothing on the server.
+
+- **When:** 2 seconds after dying (the fall and the turn to the killer first), in any phase but
+  open play. A late joiner sitting out watches at once. It stops when the player is alive
+  again, or the round, their slot or the connection changes.
+- **Whom:** the first living teammate by slot. Left and right mouse go to the next and back,
+  on a press, only once watching has started. In a team game a player with no side watches no
+  one ("NO ONE TO WATCH").
+- **How:** through their eyes, or from behind them: 220 back and 40 up along their look,
+  stopped 12 short of walls, glass and doors. F goes between the two, and leaves the player's
+  own third person as it was. The camera behind is fixed: no orbit or zoom. It can see a
+  little round a corner that the teammate cannot. That is accepted for now, and a flag can
+  limit watching to the eyes later.
+- **A watched teammate who dies** is held on for 1.5 seconds, so the death is seen, then the
+  next. One who leaves, or whose slot has someone new in it, is let go at once. With no one
+  left, the last view is held until the next round.
+- **Who is in a slot:** each join has a number (`PlayerState::joined`), sent in snapshots
+  when it changes. A snapshot names players only by slot, so without it one player leaving and
+  another joining between two snapshots would look like one player.
+- **What the screen shows** comes from the view frame, which now carries each player's crouch
+  and peek with their place, from the same snapshot. The bodies of others are drawn from it
+  too, so a crouch no longer shows before the player gets there.
+- **While watching** there is no crosshair, red tint, shake, whiteout or gun of the player's
+  own. The sound is heard from the camera. The HUD says whom and their health.
+- **Drawing** starts from the rooms under the feet of whoever the camera is on
+  (`Sim::standing_rooms`): the one watched, the one whose view is held, or the player's own
+  body. A living player's view starts the same way, from the floor they stand on, since
+  upstairs and downstairs overlap. The eye alone is not enough: on citystreet_large's upper
+  floor it is in no room. Before this the whole level was drawn while dead. The player's own third person uses the same camera behind, and so no longer
+  goes into walls either.
+
 ### Open
 
 - **Picking a kit.** In the lobby, and by a flag until then: a primary and a secondary, ammo for

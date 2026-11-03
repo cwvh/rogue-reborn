@@ -12,6 +12,7 @@ pub mod record;
 pub mod round;
 pub mod server;
 pub mod setup;
+pub mod watch;
 
 #[cfg(test)]
 mod fairness;

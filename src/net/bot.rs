@@ -6,7 +6,7 @@
 //!
 //! `rrbot --fight` plays one over a real network.
 
-use crate::net::client::Frame;
+use crate::net::client::{Frame, Seen};
 use crate::sim::{Input, Sim, TICK};
 
 type V3 = [f32; 3];
@@ -201,7 +201,7 @@ impl Bot {
         // already its target), and with nothing in between
         let mut best: Option<(f32, usize, V3)> = None;
         let side = sim.players.get(me).and_then(|p| p.side);
-        for &(slot, pos, ..) in &view.players {
+        for &Seen { slot, feet: pos, .. } in &view.players {
             let Some(other) = sim.players.get(slot) else { continue };
             if slot == me || !other.active || other.respawn_at.is_some() || other.hp <= 0.0 {
                 continue;

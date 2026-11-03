@@ -23,7 +23,7 @@ use crate::sim::{Cause, Event, Input, MAX_PLAYERS, Side, Sim, Struck, Throw};
 type V3 = [f32; 3];
 
 /// Bumped whenever the messages change, so that a client and server that disagree notice
-pub const PROTOCOL: u8 = 13;
+pub const PROTOCOL: u8 = 14;
 
 const MAGIC: u16 = 0x5252;
 
@@ -171,6 +171,8 @@ impl Parts {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayerSnap {
     pub slot: u8,
+    /// Which join this is (`PlayerState::joined`): someone new in the slot has another
+    pub joined: u32,
     pub side: Option<Side>,
     pub pos: V3,
     pub vel_y: f32,
@@ -252,6 +254,7 @@ impl Snapshot {
         // only while it fires
         let players = sim.players.iter().enumerate().filter(|(_, p)| p.active).map(|(i, p)| (i, p, i == receiver)).map(|(i, p, mine)| PlayerSnap {
             slot: i as u8,
+            joined: p.joined,
             pos: p.player.pos,
             vel_y: if mine { p.player.vel_y } else { 0.0 },
             on_ground: p.player.on_ground,
@@ -321,6 +324,7 @@ impl Snapshot {
                 p.charge_from = s.charge_from;
             }
             p.controlled = s.controlled;
+            p.joined = s.joined;
             p.side = s.side;
             p.reload_until = s.reload_until;
             p.flash_until = s.flash_until;
@@ -648,6 +652,7 @@ fn write_player(w: &mut Writer, p: &PlayerSnap) {
     w.f32(p.hp);
     write_opt_f32(w, p.respawn_at);
     write_peek(w, p.peek);
+    w.varint(p.joined);
     if detailed {
         w.f32(p.vel_y);
         w.u16(p.ammo as u16);
@@ -674,6 +679,7 @@ fn read_player(r: &mut Reader, slot: u8) -> Result<PlayerSnap> {
     let throw = read_throw(r)?;
     let (deaths, hp, respawn_at) = (r.u16()? as u32, r.f32()?, r.opt_f32()?);
     let peek = read_peek(r)?;
+    let joined = r.varint()?;
     let (mut vel_y, mut ammo, mut reserve, mut grenades_left, mut charge_from, mut message, mut target_hp) = (0.0, 0, 0, 0, None, None, None);
     if on(5) {
         (vel_y, ammo, reserve, grenades_left) = (r.f32()?, r.u16()? as u32, r.u16()? as u32, r.u8()? as u32);
@@ -681,7 +687,7 @@ fn read_player(r: &mut Reader, slot: u8) -> Result<PlayerSnap> {
     }
     let aim = if on(5) { Some(read_aim(r)?) } else { None };
     Ok(PlayerSnap {
-        slot, side: side_from(flags >> 6)?, pos, vel_y, on_ground: on(0), crouched: on(4), look, controlled: on(1), ammo, reserve, reload_until,
+        slot, joined, side: side_from(flags >> 6)?, pos, vel_y, on_ground: on(0), crouched: on(4), look, controlled: on(1), ammo, reserve, reload_until,
         flash_until, gun_trigger: on(2), kills, deaths, hp, respawn_at, hit, equipped_grenade: on(3), grenades_left, charge_from,
         throw, message, target_hp, peek, aim,
     })
@@ -722,6 +728,7 @@ fn write_player_delta(w: &mut Writer, p: &PlayerSnap, base: &PlayerSnap) {
         opt_bits(p.respawn_at) != opt_bits(base.respawn_at),
         p.peek.map(|k| (k.right, k.crouched, k.returning, bits(k.frame))) != base.peek.map(|k| (k.right, k.crouched, k.returning, bits(k.frame))),
         p.aim.map(|a| (a.pace, a.crouched, a.started, [a.angle, a.from, a.to, a.since, a.growth].map(bits))) != base.aim.map(|a| (a.pace, a.crouched, a.started, [a.angle, a.from, a.to, a.since, a.growth].map(bits))),
+        p.joined != base.joined,
     ];
     w.varint(changed.iter().enumerate().fold(0, |acc, (n, &c)| acc | (c as u32) << n));
     if changed[0] { w.v3(p.pos); }
@@ -744,11 +751,12 @@ fn write_player_delta(w: &mut Writer, p: &PlayerSnap, base: &PlayerSnap) {
     if changed[17] { write_opt_f32(w, p.respawn_at); }
     if changed[18] { write_peek(w, p.peek); }
     if changed[19] { write_opt_aim(w, p.aim); }
+    if changed[20] { w.varint(p.joined); }
 }
 
 /// The player `base` was, changed as the mask in the message says
 fn read_player_delta(r: &mut Reader, mask: u32, base: &PlayerSnap) -> Result<PlayerSnap> {
-    ensure!(mask < 1 << 20, "no such parts of a player as {mask:#x}");
+    ensure!(mask < 1 << 21, "no such parts of a player as {mask:#x}");
     let on = |n: u32| mask >> n & 1 != 0;
     let mut p = base.clone();
     if on(0) { p.pos = r.v3()?; }
@@ -776,6 +784,7 @@ fn read_player_delta(r: &mut Reader, mask: u32, base: &PlayerSnap) -> Result<Pla
     if on(17) { p.respawn_at = r.opt_f32()?; }
     if on(18) { p.peek = read_peek(r)?; }
     if on(19) { p.aim = read_opt_aim(r)?; }
+    if on(20) { p.joined = r.varint()?; }
     Ok(p)
 }
 
@@ -1252,7 +1261,7 @@ mod tests {
 
     fn player(slot: u8) -> PlayerSnap {
         PlayerSnap {
-            slot, side: Some(Side::Gold), pos: [1.0, 2.0, 3.0], vel_y: -4.0, on_ground: true, crouched: true, look: (123, 65000), controlled: true,
+            slot, joined: 300 + slot as u32, side: Some(Side::Gold), pos: [1.0, 2.0, 3.0], vel_y: -4.0, on_ground: true, crouched: true, look: (123, 65000), controlled: true,
             ammo: 12, reserve: 400, reload_until: Some(3.5), flash_until: 1.25, gun_trigger: true, kills: 3, deaths: 1, hp: 62.5,
             respawn_at: Some(20.0),
             hit: Some(("thiu_la", 14.25)),
@@ -1466,6 +1475,8 @@ mod tests {
         next.players[0].deaths = 2;
         next.players[0].hit = None;
         next.players[1].hit = Some(("thwu_ll", 14.9));
+        // Someone new in the slot
+        next.players[0].joined = 9001;
         next.npcs[1].state = NpcState::Dead { motion: "hw_bk_up2", start: 15.0 };
         next.npcs[1].hp = 0.0;
         next.thrown.push(ThrownSnap { owner: 0, pos: [1.0; 3], spin: 0.0 });

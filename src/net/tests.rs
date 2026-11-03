@@ -482,7 +482,7 @@ fn others_see_a_dead_player_fall_and_then_appear_where_they_come_back() {
         let now = game.steps as f64 * TICK as f64;
         let slot = game.peers[target].client.slot();
         let view = game.peers[bot].client.view(now);
-        let Some(&(_, pos, _, dead)) = view.players.iter().find(|p| p.0 == slot) else { continue };
+        let Some(&crate::net::client::Seen { feet: pos, dead, .. }) = view.players.iter().find(|p| p.slot == slot) else { continue };
         match (last, dead.is_some()) {
             (Some((_, false)), true) => died_at = Some(pos),
             (Some((_, true)), false) => {

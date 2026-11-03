@@ -14,13 +14,24 @@ use crate::net::link::{Addr, Link};
 use crate::net::meter::Meter;
 use crate::net::proto::{INPUTS_PER_PACKET, Parts, Setup, Snapshot, ToClient, ToServer};
 use crate::net::round::RoundState;
+use crate::sim::peek::Peek;
 use crate::sim::{Event, Input, Side, Sim, TICK};
 
 type V3 = [f32; 3];
 
-/// Where one other player was in a snapshot: their slot, position and look, and if they were dead,
-/// when (server time) they come back
-pub type Seen = (usize, V3, (u16, u16), Option<f32>);
+/// A player as a snapshot had them, or as they are shown between two
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Seen {
+    pub slot: usize,
+    pub feet: V3,
+    pub look: (u16, u16),
+    /// If they are dead, when (server time) they come back
+    pub dead: Option<f32>,
+    pub crouched: bool,
+    pub peek: Option<Peek>,
+    /// Which join this is (`PlayerState::joined`)
+    pub joined: u32,
+}
 
 /// A grenade in the air: who threw it, where it is and how far it has turned
 pub type Flying = (u8, V3, f32);
@@ -311,7 +322,9 @@ impl Client {
         self.arrived = now;
         self.history.push_back((snap.tick, Frame {
             time: snap.time,
-            players: snap.players.iter().map(|p| (p.slot as usize, p.pos, p.look, p.respawn_at)).collect(),
+            players: snap.players.iter().map(|p| Seen {
+                slot: p.slot as usize, feet: p.pos, look: p.look, dead: p.respawn_at, crouched: p.crouched, peek: p.peek, joined: p.joined,
+            }).collect(),
             npcs: snap.npcs.iter().map(|n| (n.pos, n.yaw)).collect(),
             grenades: snap.thrown.iter().map(|t| (t.owner, t.pos, t.spin)).collect(),
         }));
@@ -396,14 +409,29 @@ fn blend(history: &VecDeque<(u32, Frame)>, t: f64) -> Frame {
     let (a, b) = (&a.1, &b.1);
     let lerp = |from: V3, to: V3| [0, 1, 2].map(|i| from[i] + (to[i] - from[i]) * f);
 
-    let players = b.players.iter().map(|&(slot, pos, look, dead)| match a.players.iter().find(|s| s.0 == slot) {
+    let players = b.players.iter().map(|&later| match a.players.iter().find(|s| s.slot == later.slot) {
         // Just arrived in the game: there is nothing earlier to move from
-        None => (slot, pos, look, dead),
-        // Came back, or was put somewhere else: as they were until the moment they are not
-        Some(&earlier @ (_, from, ..)) if earlier.3.is_some() != dead.is_some() || distance(from, pos) > TELEPORT => {
-            if f < 1.0 { earlier } else { (slot, pos, look, dead) }
+        None => later,
+        // Came back, put somewhere else, or someone new: as they were until the moment they are not
+        Some(&earlier) if earlier.dead.is_some() != later.dead.is_some() || earlier.joined != later.joined || distance(earlier.feet, later.feet) > TELEPORT => {
+            if f < 1.0 { earlier } else { later }
         }
-        Some(&(_, from, from_look, _)) => (slot, lerp(from, pos), (turn_between(from_look.0, look.0, f), turn_between(from_look.1, look.1, f)), dead),
+        // Moving on. A crouch or a peek is as it was until the later snapshot, but a lean under
+        // way in both goes smoothly.
+        Some(&earlier) => {
+            let stance = if f < 1.0 { earlier } else { later };
+            let peek = match (earlier.peek, later.peek) {
+                (Some(x), Some(y)) if (x.right, x.crouched, x.returning) == (y.right, y.crouched, y.returning) => Some(Peek { frame: x.frame + (y.frame - x.frame) * f, ..y }),
+                _ => stance.peek,
+            };
+            Seen {
+                feet: lerp(earlier.feet, later.feet),
+                look: (turn_between(earlier.look.0, later.look.0, f), turn_between(earlier.look.1, later.look.1, f)),
+                crouched: stance.crouched,
+                peek,
+                ..later
+            }
+        }
     }).collect();
 
     let npcs = if a.npcs.len() == b.npcs.len() {
@@ -448,37 +476,65 @@ mod tests {
     fn history(points: &[(u32, f32, u16)]) -> VecDeque<(u32, Frame)> {
         points.iter().map(|&(t, x, yaw)| (t, Frame {
             time: t as f32 * TICK,
-            players: vec![(1, [x, 0.0, 0.0], (yaw, 0), None)],
+            players: vec![seen(1, [x, 0.0, 0.0], yaw, None)],
             npcs: vec![([x, 0.0, 0.0], yaw as f32)],
             grenades: vec![(2, [x, 1.0, 0.0], x * 10.0)],
         })).collect()
     }
 
+    fn seen(slot: usize, feet: V3, yaw: u16, dead: Option<f32>) -> Seen {
+        Seen { slot, feet, look: (yaw, 0), dead, crouched: false, peek: None, joined: 1 }
+    }
+
     #[test]
     fn blends_between_snapshots_and_holds_at_the_ends() {
         let h = history(&[(10, 0.0, 0), (12, 2.0, 100), (14, 6.0, 200)]);
-        assert_eq!(blend(&h, 11.0).players[0].1[0], 1.0);
-        assert_eq!(blend(&h, 13.0).players[0].1[0], 4.0);
-        assert_eq!(blend(&h, 11.0).players[0].2.0, 50);
-        assert_eq!(blend(&h, 5.0).players[0].1[0], 0.0);
-        assert_eq!(blend(&h, 99.0).players[0].1[0], 6.0);
+        assert_eq!(blend(&h, 11.0).players[0].feet[0], 1.0);
+        assert_eq!(blend(&h, 13.0).players[0].feet[0], 4.0);
+        assert_eq!(blend(&h, 11.0).players[0].look.0, 50);
+        assert_eq!(blend(&h, 5.0).players[0].feet[0], 0.0);
+        assert_eq!(blend(&h, 99.0).players[0].feet[0], 6.0);
     }
 
     #[test]
     fn a_player_who_comes_back_is_not_slid_across_the_map() {
         let mut h = history(&[(10, 0.0, 0), (12, 0.0, 0), (14, 2000.0, 0), (16, 2010.0, 0)]);
-        h[0].1.players[0].3 = Some(1.0);
-        h[1].1.players[0].3 = Some(1.0);
+        h[0].1.players[0].dead = Some(1.0);
+        h[1].1.players[0].dead = Some(1.0);
         // Dead and lying still, then still dead right up to the snapshot they are back in
-        assert_eq!(blend(&h, 11.0).players[0], (1, [0.0; 3], (0, 0), Some(1.0)));
-        assert_eq!(blend(&h, 13.9).players[0], (1, [0.0; 3], (0, 0), Some(1.0)));
-        assert_eq!(blend(&h, 14.0).players[0], (1, [2000.0, 0.0, 0.0], (0, 0), None));
+        assert_eq!(blend(&h, 11.0).players[0], seen(1, [0.0; 3], 0, Some(1.0)));
+        assert_eq!(blend(&h, 13.9).players[0], seen(1, [0.0; 3], 0, Some(1.0)));
+        assert_eq!(blend(&h, 14.0).players[0], seen(1, [2000.0, 0.0, 0.0], 0, None));
         // And alive, they move smoothly again
-        assert_eq!(blend(&h, 15.0).players[0].1[0], 2005.0);
-        // Put far away while alive is no slide either
+        assert_eq!(blend(&h, 15.0).players[0].feet[0], 2005.0);
+        // Put far away while alive is no slide either, nor someone new joining in the slot
         let h = history(&[(10, 0.0, 0), (12, 1000.0, 0)]);
-        assert_eq!(blend(&h, 11.0).players[0].1[0], 0.0);
+        assert_eq!(blend(&h, 11.0).players[0].feet[0], 0.0);
         assert_eq!(blend(&h, 11.0).time, 11.0 * TICK);
+        let mut h = history(&[(10, 0.0, 0), (12, 2.0, 0)]);
+        h[1].1.players[0].joined = 2;
+        assert_eq!(blend(&h, 11.0).players[0], seen(1, [0.0; 3], 0, None));
+        assert_eq!(blend(&h, 12.0).players[0].joined, 2);
+    }
+
+    #[test]
+    fn a_crouch_or_a_peek_shows_with_the_snapshot_that_has_it() {
+        let lean = |frame| Some(Peek { right: true, crouched: false, frame, returning: false });
+        let mut h = history(&[(10, 0.0, 0), (12, 2.0, 0), (14, 4.0, 0)]);
+        h[1].1.players[0].crouched = true;
+        h[1].1.players[0].peek = lean(4.0);
+        h[2].1.players[0].crouched = true;
+        h[2].1.players[0].peek = lean(8.0);
+        // Standing, unleaned, until the frame reaches the snapshot that crouched and leaned
+        let between = blend(&h, 11.5).players[0];
+        assert_eq!((between.feet[0], between.crouched, between.peek), (1.5, false, None));
+        let at = blend(&h, 12.0).players[0];
+        assert_eq!((at.crouched, at.peek), (true, lean(4.0)));
+        // A lean under way in both goes smoothly
+        assert_eq!(blend(&h, 13.0).players[0].peek, lean(6.0));
+        // One leaning back, or the other way, is not blended into
+        h[2].1.players[0].peek = Some(Peek { returning: true, ..lean(8.0).unwrap() });
+        assert_eq!(blend(&h, 13.0).players[0].peek, lean(4.0));
     }
 
     #[test]

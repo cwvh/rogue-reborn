@@ -77,6 +77,13 @@ fn through_part(eye: V3, dir: V3, part: &HitPart) -> Option<f32> {
     (t > 0.0 && (at[1]..=part.top).contains(&y)).then_some(t)
 }
 
+/// How far a peek moves the eye of a player facing `yaw` (an `Input`'s), in map space
+fn lean(peek: Option<peek::Peek>, yaw: u16) -> V3 {
+    let Some([side, up]) = peek.map(|k| k.eye()) else { return [0.0; 3] };
+    let r = right(Input { yaw, ..Input::default() }.look().0);
+    [r[0] * side, up, -r[2] * side]
+}
+
 /// A unit direction turned `off` radians away from `dir`, toward the side `round` radians round it
 fn deflect(dir: V3, off: f32, round: f32) -> V3 {
     let up = if dir[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] };
@@ -385,6 +392,8 @@ pub struct Thrown {
 pub struct PlayerState {
     /// Whether anyone is playing this slot
     pub active: bool,
+    /// Which join this is, counted over the game: a slot taken by someone new has another
+    pub joined: u32,
     /// Their side in a team game
     pub side: Option<Side>,
     pub player: Player,
@@ -473,6 +482,8 @@ pub struct Sim {
     pub frozen: bool,
     /// How the doors and characters were at the start, for a new round to put back
     start: Option<(Vec<DoorState>, Vec<Npc>)>,
+    /// Players who have joined so far
+    joins: u32,
     /// Players take no harm, but flinch as they would (--god)
     pub god: bool,
     /// Where players come back after they die
@@ -545,6 +556,7 @@ impl Sim {
             respawn: true,
             frozen: false,
             start: None,
+            joins: 0,
             god: false,
             rewind: Vec::new(),
             past: VecDeque::new(),
@@ -571,6 +583,7 @@ impl Sim {
         let (ammo, reserve, grenades) = self.loadout;
         PlayerState {
             active: true,
+            joined: 0,
             side: None,
             player: Player::new(feet),
             look: (0, 0),
@@ -607,7 +620,8 @@ impl Sim {
 
     /// Put a new player on their feet at `feet`. Returns their slot, or none when the game is full.
     pub fn add_player(&mut self, feet: V3) -> Option<usize> {
-        let fresh = self.new_player(feet);
+        self.joins += 1;
+        let fresh = PlayerState { joined: self.joins, ..self.new_player(feet) };
         if let Some(i) = self.players.iter().position(|p| !p.active) {
             self.players[i] = fresh;
             return Some(i);
@@ -704,7 +718,7 @@ impl Sim {
                 continue;
             }
             let p = &self.players[i];
-            let (side, look, kills, deaths) = (p.side, p.look, p.kills, p.deaths);
+            let (side, look, kills, deaths, joined) = (p.side, p.look, p.kills, p.deaths, p.joined);
             let (k, places) = match side {
                 Some(s) if !self.bases[s.index()].is_empty() => (s.index(), &self.bases[s.index()]),
                 _ => (2, &self.spawns),
@@ -713,7 +727,7 @@ impl Sim {
             taken[k] += 1;
             self.players[i] = self.new_player(at);
             let p = &mut self.players[i];
-            (p.side, p.look, p.kills, p.deaths) = (side, look, kills, deaths);
+            (p.side, p.look, p.kills, p.deaths, p.joined) = (side, look, kills, deaths, joined);
         }
         self.apply_union_rooms();
     }
@@ -737,17 +751,66 @@ impl Sim {
 
     /// Where a player's eyes are
     pub fn eye(&self, slot: usize) -> V3 {
-        let p = &self.players[slot].player;
-        let peek = self.peek_offset(slot);
-        [p.pos[0] + peek[0], p.pos[1] + self.world.params().eye(p.crouched) + peek[1], p.pos[2] + peek[2]]
+        let p = &self.players[slot];
+        self.eye_at(p.player.pos, p.player.crouched, p.peek, p.look.0)
+    }
+
+    /// Where the eyes are of a player standing at `feet`, crouched or not, peeking as `peek`
+    /// says, facing `yaw` (an `Input`'s): for a player as a client's view shows them
+    pub fn eye_at(&self, feet: V3, crouched: bool, peek: Option<peek::Peek>, yaw: u16) -> V3 {
+        let lean = lean(peek, yaw);
+        [feet[0] + lean[0], feet[1] + self.world.params().eye(crouched) + lean[1], feet[2] + lean[2]]
     }
 
     /// How far a peek moves the player's eye, in map space
     pub fn peek_offset(&self, slot: usize) -> V3 {
         let p = &self.players[slot];
-        let Some([side, up]) = p.peek.map(|k| k.eye()) else { return [0.0; 3] };
-        let r = right(Input { yaw: p.look.0, ..Input::default() }.look().0);
-        [r[0] * side, up, -r[2] * side]
+        lean(p.peek, p.look.0)
+    }
+
+    /// How far from `a` toward `b` nothing stops a bullet: the faces of the rooms around `a`
+    /// and of those the line passes through, and unbroken glass. For a camera, which must not
+    /// end up in or behind a wall, whatever rooms are solid around the players.
+    pub fn line_reach(&self, a: V3, b: V3) -> f32 {
+        let length = dist3(a, b);
+        if length < 1e-3 {
+            return length;
+        }
+        let dir = [(b[0] - a[0]) / length, (b[1] - a[1]) / length, (b[2] - a[2]) / length];
+        let (mut rooms, room) = self.view_rooms(a, None);
+        rooms.extend(self.visibility.player_rooms(&self.level, a, room));
+        rooms.extend(self.rooms_crossing(a, b));
+        let wall = self.world.bullet_hit_in(a, dir, length, &rooms).map_or(length, |h| h.dist);
+        let glass = self.panes.iter().enumerate()
+            .filter(|(i, _)| self.broken_at[*i].is_none())
+            .filter_map(|(_, p)| p.raycast(a, dir))
+            .fold(length, f32::min);
+        wall.min(glass)
+    }
+
+    /// The rooms drawing starts from for a view at `at`, as for a view flying free (see
+    /// `track_rooms`), and the room it is in, from `hint` (the one it was in last). Nothing
+    /// is changed: for a camera that is no player's, such as a dead player watching another.
+    pub fn view_rooms(&self, at: V3, hint: Option<usize>) -> (Vec<u32>, Option<usize>) {
+        let room = self.level.rooms.locate(at, hint).or(hint);
+        let rooms = match room.and_then(|i| self.visibility.number_of(i)) {
+            Some(n) => vec![n],
+            None => self.visibility.player_rooms(&self.level, at, room),
+        };
+        (rooms, room)
+    }
+
+    /// The rooms a view from someone standing at `feet` is drawn from, as their own is: those
+    /// whose floor they stand on, else the room around their feet (`hint` the last one)
+    pub fn standing_rooms(&self, feet: V3, hint: Option<usize>) -> (Vec<u32>, Option<usize>) {
+        let probe = [feet[0], feet[1] + 10.0, feet[2]];
+        let room = self.level.rooms.locate(probe, hint).or(hint);
+        let floor: Vec<u32> = self.world.floor_rooms(feet).into_iter().filter(|&n| self.visibility.is_room(n)).collect();
+        if !floor.is_empty() {
+            return (floor, room);
+        }
+        let rooms = room.and_then(|i| self.visibility.number_of(i)).map(|n| vec![n]).unwrap_or_else(|| self.visibility.player_rooms(&self.level, probe, room));
+        (rooms, room)
     }
 
     /// Set every door this far open (0 shut, 1 open)
@@ -795,6 +858,7 @@ impl Sim {
             h.f32(p.flash_until);
             h.u32(p.kills);
             h.u32(p.side.map_or(0, |s| 1 + s.index() as u32));
+            h.u32(p.joined);
             h.f32(p.hp);
             h.opt_f32(p.respawn_at);
             h.u32(p.deaths);
@@ -1858,10 +1922,10 @@ impl Sim {
             if best.is_none_or(|b| d > b.1) { Some((s, d)) } else { best }
         }).map_or(here, |b| b.0);
         let (kills, deaths) = (self.players[slot].kills, self.players[slot].deaths);
-        let (look, side) = (self.players[slot].look, self.players[slot].side);
+        let (look, side, joined) = (self.players[slot].look, self.players[slot].side, self.players[slot].joined);
         self.players[slot] = self.new_player(spawn);
         let p = &mut self.players[slot];
-        (p.kills, p.deaths, p.look, p.side) = (kills, deaths, look, side);
+        (p.kills, p.deaths, p.look, p.side, p.joined) = (kills, deaths, look, side, joined);
     }
 
     /// Work out which rooms a player is in and which are solid to them. The view is the
@@ -2536,6 +2600,42 @@ mod tests {
                 assert!(events.iter().any(|e| matches!(e, Event::Shot { hit_character: true, .. })), "missed at {yaw} degrees, {d} units");
                 assert!(sim.players[b].hp < PLAYER_HP);
             }
+        }
+    }
+
+    #[test]
+    fn a_camera_is_drawn_from_the_rooms_a_view_flying_there_would_be() {
+        let setup = crate::net::proto::Setup { map: "data/map/m00/citystreet_large.map".to_string(), ..crate::net::lab::demo_setup() };
+        let Ok(mut sim) = crate::net::setup::build_sim(&setup) else { return };
+        let slot = sim.add_player([33533.0, 32887.0, 34907.4]).unwrap();
+        // Flying from the killhouse out over the level, room to room
+        for k in 0..40 {
+            let at = [33533.0 - k as f32 * 60.0, 33052.0 - k as f32 * 10.0, 34907.4 - k as f32 * 120.0];
+            let hint = sim.players[slot].current_room;
+            sim.predict(slot, &Input { observer: Some(at), ..Input::default() }, TICK);
+            let (rooms, room) = sim.view_rooms(at, hint);
+            assert_eq!((rooms, room), (sim.players[slot].render_rooms.clone(), sim.players[slot].current_room), "at {at:?}");
+        }
+    }
+
+    #[test]
+    fn a_player_watched_upstairs_is_drawn_from_their_floor_wherever_the_camera_was() {
+        // citystreet_large's upper floor is a thin room: the eye is in no room, and the
+        // camera's last room (the basement, say) must not be drawn in its place
+        let path = std::path::Path::new("data/map/m00/citystreet_large.map");
+        let setup = crate::net::proto::Setup { map: path.display().to_string(), ..crate::net::lab::demo_setup() };
+        let Ok(mut sim) = crate::net::setup::build_sim(&setup) else { return };
+        let bases = crate::levels::find_bases(path);
+        for q in bases[0].blue.starts() {
+            let feet = [q[0], sim.world.ground_at(q[0], q[2], q[1] + 100.0).unwrap(), q[2]];
+            let slot = sim.add_player(feet).unwrap();
+            run(&mut sim, &Input::default(), 0.5);
+            let (feet, standing) = (sim.players[slot].player.pos, sim.players[slot].render_rooms.clone());
+            assert_eq!(sim.view_rooms(sim.eye(slot), None).0, Vec::<u32>::new());
+            for hint in std::iter::once(None).chain((0..sim.level.rooms.rooms.len()).map(Some)) {
+                assert_eq!(sim.standing_rooms(feet, hint).0, standing, "at {feet:?} after room {hint:?}");
+            }
+            sim.remove_player(slot);
         }
     }
 }

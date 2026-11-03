@@ -7,6 +7,7 @@ use crate::net::proto::Setup;
 use crate::net::record::Change;
 use crate::net::round::{Outcome, Phase};
 use crate::net::server::{LOAD_TIMEOUT, RELEASE_AFTER, Seat};
+use crate::net::watch::{Pose, Watch, WatchContext};
 use crate::sim::{Cause, Event, Input, PLAYER_HP, Side, Sim, TICK};
 
 type Sees = Box<dyn FnMut(&Sim, usize, &Frame, u32) -> Input>;
@@ -373,6 +374,68 @@ fn a_match_in_rounds_plays_back_the_same() {
     let rounds = rec.ticks.iter().flat_map(|t| &t.changes).filter(|c| matches!(c, Change::Round { .. })).count();
     assert_eq!(rounds, 2);
     rec.replay().unwrap();
+}
+
+/// A peer's watch, moved on by what their screen shows now; and where its camera is
+fn watching(game: &Game, peer: usize, watch: &mut Watch) -> Option<Pose> {
+    let p = &game.peers[peer];
+    let (Some(sim), Some(view)) = (p.sim.as_ref(), p.view.as_ref()) else { return None };
+    let cx = WatchContext { sim, frame: view, me: p.client.slot(), round: p.client.round, team_game: true, connected: p.client.status == Status::Connected };
+    watch.update(&cx);
+    watch.camera(&cx)
+}
+
+#[test]
+fn a_dead_player_watches_a_living_teammate_and_never_the_other_side() {
+    // Blue's first in line of Gold's first, Blue's second well aside
+    let setup = Setup { bases: [vec![[-100.0, 0.0, -100.0], [100.0, 0.0, -300.0]], vec![[-100.0, 0.0, 100.0], [300.0, 0.0, 300.0]]], ..team_setup() };
+    let mut game = in_rounds(setup);
+    let shot = join(&mut game, Side::Blue, idle(Side::Blue));
+    let gold = join(&mut game, Side::Gold, shooter(Side::Gold, |sim| !sim.frozen));
+    let mate = join(&mut game, Side::Blue, idle(Side::Blue));
+    let other = join(&mut game, Side::Gold, idle(Side::Gold));
+    let (m, golds) = (slot(&game, mate), [slot(&game, gold), slot(&game, other)]);
+    game.server.start_countdown();
+    assert!(run_until(&mut game, Phase::Live, 10.0));
+    let mut watch = Watch::default();
+    let mut watched = Vec::new();
+    for _ in 0..(5.0 / TICK) as usize {
+        game.step();
+        watching(&game, shot, &mut watch);
+        watched.extend(watch.target());
+    }
+    assert!(game.server.sim.players[slot(&game, shot)].respawn_at.is_some(), "Blue's first was not shot");
+    assert!(!watched.is_empty(), "no one was watched");
+    assert!(watched.iter().all(|&s| s == m), "watched {watched:?}, not only {m}, never Gold's {golds:?}");
+}
+
+#[test]
+fn a_late_joiner_while_loading_watches_at_once_held_until_let_go() {
+    let mut game = in_rounds(team_setup());
+    // Blue's first walks on all along, once free
+    join(&mut game, Side::Blue, Box::new(|_, _, _, _| Input { forward: true, run: true, ..Input::default() }));
+    let gold = join(&mut game, Side::Gold, idle(Side::Gold));
+    // Gold takes a second to load, so that the late joiner comes during loading
+    game.peers[gold].client.loading = true;
+    game.server.start_countdown();
+    assert!(run_until(&mut game, Phase::Loading, 10.0));
+    let late = game.join_seeing(|_: &Sim, _, _, _| Input::default());
+    game.peers[late].client.ask_side(Some(Side::Blue));
+    game.run(0.5);
+    assert_eq!(game.server.round().phase, Phase::Loading);
+    assert!(game.server.sim.players[slot(&game, late)].respawn_at.is_some(), "the late joiner is in the round");
+    game.peers[gold].client.loading = false;
+    let mut watch = Watch::default();
+    let mut poses = Vec::new();
+    while game.server.round().phase != Phase::Live {
+        game.step();
+        poses.extend(watching(&game, late, &mut watch));
+    }
+    assert!(!poses.is_empty(), "not watching while held");
+    assert!(poses.iter().all(|p| *p == poses[0]), "the held view moved");
+    game.run(1.0);
+    let moved = watching(&game, late, &mut watch).unwrap();
+    assert!((moved.eye[2] - poses[0].eye[2]).abs() > 50.0, "the view did not follow once let go");
 }
 
 
