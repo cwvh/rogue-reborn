@@ -1310,7 +1310,19 @@ impl Sim {
         // around the players are solid, so this alone says what stops a character's bullet,
         // and whether a player's reaches someone far off.
         let start_rooms = match by {
-            Shooter::Player(s) => self.rooms_at(self.players[s].player.pos, self.players[s].current_room),
+            // And the rooms around them and that they see from: standing where rooms overlap,
+            // past the plane of the portal between them, a bullet crosses no portal into the
+            // room they see into (citystreet_large's killhouse)
+            Shooter::Player(s) => {
+                let p = &self.players[s];
+                let mut rooms = self.rooms_at(p.player.pos, p.current_room);
+                for &r in p.player_rooms.iter().chain(&p.render_rooms) {
+                    if !rooms.contains(&r) {
+                        rooms.push(r);
+                    }
+                }
+                rooms
+            }
             Shooter::Character(i) => self.rooms_at([self.npcs[i].pos[0], self.npcs[i].floor, self.npcs[i].pos[2]], None),
         };
         let crossed = self.flight(eye, dir, &start_rooms);
@@ -2489,5 +2501,41 @@ mod tests {
         assert!(events.contains(&Event::Kill { killer: None, victim: 0, cause: Cause::Grenade }));
         // So close that the thrower is caught too: that is a death, but not a kill
         assert_eq!((sim.players[0].kills, sim.players[0].deaths), (1, 1));
+    }
+
+    #[test]
+    fn a_bullet_reaches_a_player_in_the_open_from_where_rooms_overlap() {
+        // Standing in citystreet_large's killhouse where rooms 1 and 3 overlap, past the plane of
+        // the portal between them, firing into room 3 where the other player stands
+        let setup = crate::net::proto::Setup {
+            map: "data/map/m00/citystreet_large.map".to_string(), model: "data/character/team_hrt/blue_M_a.CRP".to_string(), idle: "up_none_cyc".to_string(),
+            magazine: 30, ammo: 30, reserve: 900, grenades: 3, speed_scale: 1.0, seed: 99, culling: true, pvp: true,
+            friendly_fire: true, respawn: true, bases: [Vec::new(), Vec::new()], uniforms: crate::net::proto::UNIFORMS.map(String::from), doors_open: None, mission: None, npcs: Vec::new(),
+        };
+        let Ok(base) = crate::net::setup::build_sim(&setup) else { return };
+        drop(base);
+        let from = [33533.0, 32887.0, 34907.4];
+        for yaw in [313.3f32, 330.0, 341.0, 355.0, 10.6, 19.6] {
+            for d in [300.0f32, 450.0] {
+                let mut sim = crate::net::setup::build_sim(&setup).unwrap();
+                sim.gunfire = None;
+                let (dx, dz) = (-yaw.to_radians().sin(), yaw.to_radians().cos());
+                let to = [from[0] + dx * d, from[1], from[2] + dz * d];
+                let (a, b) = (sim.add_player(from).unwrap(), sim.add_player(to).unwrap());
+                // Standing still a moment closes the spread
+                run(&mut sim, &Input::default(), 0.5);
+                let eye = sim.eye(a);
+                let chest = [to[0], to[1] + 0.7 * sim.world.params().body_height(false), to[2]];
+                let v = [chest[0] - eye[0], chest[1] - eye[1], chest[2] - eye[2]];
+                let flat = v[0].hypot(v[2]);
+                let wall = sim.world.bullet_hit(eye, unit3(v), 20000.0).map_or(f32::INFINITY, |h| h.dist);
+                assert!(wall > d + 50.0, "a wall in the way at {yaw} degrees, {d} units");
+                let mut aim = Input { fire: true, ..Input::default() };
+                aim.set_look((-v[0]).atan2(v[2]).to_degrees(), v[1].atan2(flat).to_degrees());
+                let events = sim.tick(&[aim, Input::default()], TICK);
+                assert!(events.iter().any(|e| matches!(e, Event::Shot { hit_character: true, .. })), "missed at {yaw} degrees, {d} units");
+                assert!(sim.players[b].hp < PLAYER_HP);
+            }
+        }
     }
 }
