@@ -17,12 +17,13 @@ use crate::net::link::MAX_PACKET;
 use crate::sim::characters::REACTION_MOTIONS;
 use crate::sim::aim::{Aim, Pace};
 use crate::sim::peek::Peek;
-use crate::sim::{Cause, Event, Input, MAX_PLAYERS, Side, Sim, Struck, TICK, Throw};
+use crate::net::round::{Outcome, Phase, RoundState};
+use crate::sim::{Cause, Event, Input, MAX_PLAYERS, Side, Sim, Struck, Throw};
 
 type V3 = [f32; 3];
 
 /// Bumped whenever the messages change, so that a client and server that disagree notice
-pub const PROTOCOL: u8 = 12;
+pub const PROTOCOL: u8 = 13;
 
 const MAGIC: u16 = 0x5252;
 
@@ -59,6 +60,8 @@ pub struct Setup {
     /// Whether players can hurt each other, and their own side
     pub pvp: bool,
     pub friendly_fire: bool,
+    /// Whether the dead come back, or wait for the next round
+    pub respawn: bool,
     /// In a team game, where each side's players start: Blue's and Gold's (`Sim::bases`), and
     /// the uniform each wears (a model of the players' body)
     pub bases: [Vec<V3>; 2],
@@ -80,8 +83,9 @@ pub enum ToServer {
     /// What the player did. `inputs` are those numbered `first_seq` and on, newest last.
     /// `ack_snapshot` is the tick of the latest snapshot seen. `view` is the server tick, in
     /// sixteenths, that the newest input's player was looking at the others as of, or 0 if
-    /// that is not known: a shot is judged against where the others were then.
-    Input { token: u32, ack_snapshot: u32, first_seq: u32, view: u32, inputs: Vec<Input> },
+    /// that is not known: a shot is judged against where the others were then. `round` is the
+    /// number of the round the client's game is in, which tells the server it has it.
+    Input { token: u32, ack_snapshot: u32, first_seq: u32, view: u32, round: u16, inputs: Vec<Input> },
     /// Leave
     Leave { token: u32 },
 }
@@ -183,9 +187,9 @@ pub struct PlayerSnap {
     pub deaths: u32,
     pub hp: f32,
     pub respawn_at: Option<f32>,
-    /// What the latest hit set the body playing (see `PlayerState::hit`), and the low byte of
-    /// the tick it began on. Neither a flinch nor a fall is kept for 256 ticks.
-    pub hit: Option<(&'static str, u8)>,
+    /// What the latest hit set the body playing (see `PlayerState::hit`), and when it began.
+    /// A fall lasts until the next round, so the whole time is sent; it changes only with a hit.
+    pub hit: Option<(&'static str, f32)>,
     pub equipped_grenade: bool,
     pub grenades_left: u32,
     pub charge_from: Option<f32>,
@@ -235,6 +239,8 @@ pub struct Snapshot {
     pub doors: Vec<(f32, bool)>,
     /// The panes that have broken, and when
     pub broken: Vec<(u16, f32)>,
+    /// Where the rounds are
+    pub round: RoundState,
     /// Events, numbered in the order they happened
     pub events: Vec<(u32, Event)>,
 }
@@ -262,7 +268,7 @@ impl Snapshot {
             deaths: p.deaths,
             hp: p.hp,
             respawn_at: p.respawn_at,
-            hit: p.hit.map(|h| (h.motion, tick.wrapping_sub(((sim.time - h.start) / TICK).round() as u32) as u8)),
+            hit: p.hit.map(|h| (h.motion, h.start)),
             equipped_grenade: p.equipped_grenade,
             grenades_left: if mine { p.grenades_left } else { 0 },
             charge_from: if mine { p.charge_from } else { None },
@@ -282,6 +288,7 @@ impl Snapshot {
             thrown: sim.thrown.iter().map(|t| ThrownSnap { owner: t.owner as u8, pos: t.grenade.pos, spin: t.grenade.spin }).collect(),
             doors: sim.door_states.iter().map(|s| (s.open, s.opening)).collect(),
             broken: sim.broken_at.iter().enumerate().filter_map(|(i, t)| t.map(|t| (i as u16, t))).collect(),
+            round: RoundState::default(),
             events: Vec::new(),
         }
     }
@@ -291,6 +298,7 @@ impl Snapshot {
     pub fn apply(&self, sim: &mut Sim, me: usize) {
         sim.time = self.time;
         sim.culling = self.culling;
+        sim.frozen = self.round.phase.frozen();
 
         for p in sim.players.iter_mut() {
             p.active = false;
@@ -299,11 +307,13 @@ impl Snapshot {
             let slot = s.slot as usize;
             sim.activate_slot(slot, s.pos);
             let p = &mut sim.players[slot];
+            // The player's own look too: their inputs not yet used turn them on from it, and
+            // held, it is where they stay
+            p.look = s.look;
             if slot != me {
                 p.player.pos = s.pos;
                 p.player.on_ground = s.on_ground;
                 p.player.crouched = s.crouched;
-                p.look = s.look;
             } else {
                 p.ammo = s.ammo;
                 p.reserve = s.reserve;
@@ -319,7 +329,7 @@ impl Snapshot {
             p.deaths = s.deaths;
             p.hp = s.hp;
             p.respawn_at = s.respawn_at;
-            p.hit = s.hit.map(|(motion, at)| Struck { motion, start: self.time - (self.tick as u8).wrapping_sub(at) as f32 * TICK });
+            p.hit = s.hit.map(|(motion, start)| Struck { motion, start });
             p.equipped_grenade = s.equipped_grenade;
             p.throw = s.throw;
             if slot != me {
@@ -368,6 +378,14 @@ impl Snapshot {
             }
         }
 
+        // A new round puts the panes back
+        for i in 0..sim.broken_at.len() {
+            if sim.broken_at[i].is_some() && !self.broken.iter().any(|b| b.0 as usize == i) {
+                sim.broken_at[i] = None;
+                let name = sim.panes[i].name.clone();
+                sim.world.switch_on(&name);
+            }
+        }
         for &(i, at) in &self.broken {
             let i = i as usize;
             if i < sim.broken_at.len() && sim.broken_at[i].is_none() {
@@ -598,17 +616,17 @@ fn read_message(r: &mut Reader) -> Result<Option<(String, f32)>> {
     Ok(if r.bool()? { Some((r.string()?, r.f32()?)) } else { None })
 }
 
-fn write_hit(w: &mut Writer, hit: Option<(&'static str, u8)>) {
+fn write_hit(w: &mut Writer, hit: Option<(&'static str, f32)>) {
     match hit {
         None => w.u8(u8::MAX),
-        Some((motion, at)) => { w.u8(motion_byte(motion)); w.u8(at); }
+        Some((motion, start)) => { w.u8(motion_byte(motion)); w.f32(start); }
     }
 }
 
-fn read_hit(r: &mut Reader) -> Result<Option<(&'static str, u8)>> {
+fn read_hit(r: &mut Reader) -> Result<Option<(&'static str, f32)>> {
     Ok(match r.u8()? {
         u8::MAX => None,
-        b => Some((motion_from(b)?, r.u8()?)),
+        b => Some((motion_from(b)?, r.f32()?)),
     })
 }
 
@@ -879,13 +897,61 @@ fn write_state(w: &mut Writer, s: &Snapshot, base: Option<&Snapshot>) {
         w.f32(open);
         w.bool(opening);
     });
-    // Panes only ever break, so only the ones the base does not know of are sent
+    // Panes only ever break within a round, and a base is always of the same round, so only
+    // the ones the base does not know of are sent
     let new: Vec<&(u16, f32)> = s.broken.iter().filter(|b| base.is_none_or(|base| !base.broken.contains(b))).collect();
     w.u16(new.len() as u16);
     for &&(i, at) in &new {
         w.u16(i);
         w.f32(at);
     }
+    write_round(w, &s.round);
+}
+
+fn outcome_code(o: Option<Outcome>) -> (u8, u8) {
+    match o {
+        None => (0, 0),
+        Some(Outcome::Won(s)) => (1 + s.index() as u8, 0),
+        Some(Outcome::Draw) => (3, 0),
+        Some(Outcome::CalledOff) => (4, 0),
+        Some(Outcome::Survived(p)) => (5, p),
+    }
+}
+
+fn outcome_from(code: u8, slot: u8) -> Result<Option<Outcome>> {
+    Ok(match code {
+        0 => None,
+        1 => Some(Outcome::Won(Side::Blue)),
+        2 => Some(Outcome::Won(Side::Gold)),
+        3 => Some(Outcome::Draw),
+        4 => Some(Outcome::CalledOff),
+        5 => Some(Outcome::Survived(slot)),
+        c => bail!("no such outcome as {c}"),
+    })
+}
+
+fn write_round(w: &mut Writer, r: &RoundState) {
+    w.u8(r.phase.code());
+    if r.phase == Phase::Open {
+        return;
+    }
+    w.u16(r.number);
+    w.opt_f32(r.ends);
+    w.u16(r.wins[0]);
+    w.u16(r.wins[1]);
+    let (code, slot) = outcome_code(r.last);
+    w.u8(code);
+    w.u8(slot);
+}
+
+fn read_round(r: &mut Reader) -> Result<RoundState> {
+    let Some(phase) = Phase::from_code(r.u8()?) else { bail!("no such phase") };
+    if phase == Phase::Open {
+        return Ok(RoundState::default());
+    }
+    let (number, ends, wins) = (r.u16()?, r.opt_f32()?, [r.u16()?, r.u16()?]);
+    let last = outcome_from(r.u8()?, r.u8()?)?;
+    Ok(RoundState { phase, number, ends, wins, last })
 }
 
 fn read_state(r: &mut Reader, base: Option<&Snapshot>) -> Result<Snapshot> {
@@ -918,7 +984,8 @@ fn read_state(r: &mut Reader, base: Option<&Snapshot>) -> Result<Snapshot> {
         }
     }
     broken.sort_by_key(|b| b.0);
-    Ok(Snapshot { tick, time, ack_seq, culling, players, npcs, thrown, doors, broken, events: Vec::new() })
+    let round = read_round(r)?;
+    Ok(Snapshot { tick, time, ack_seq, culling, players, npcs, thrown, doors, broken, round, events: Vec::new() })
 }
 
 pub(crate) fn write_setup(w: &mut Writer, s: &Setup) {
@@ -934,6 +1001,7 @@ pub(crate) fn write_setup(w: &mut Writer, s: &Setup) {
     w.bool(s.culling);
     w.bool(s.pvp);
     w.bool(s.friendly_fire);
+    w.bool(s.respawn);
     for base in &s.bases {
         w.u8(base.len() as u8);
         for &p in base {
@@ -962,7 +1030,7 @@ pub(crate) fn read_setup(r: &mut Reader) -> Result<Setup> {
     let speed_scale = r.f32()?;
     let seed = r.u64()?;
     let culling = r.bool()?;
-    let (pvp, friendly_fire) = (r.bool()?, r.bool()?);
+    let (pvp, friendly_fire, respawn) = (r.bool()?, r.bool()?, r.bool()?);
     let mut base = || (0..r.u8()?).map(|_| r.v3()).collect::<Result<Vec<_>>>();
     let bases = [base()?, base()?];
     let uniforms = [r.string()?, r.string()?];
@@ -975,7 +1043,7 @@ pub(crate) fn read_setup(r: &mut Reader) -> Result<Setup> {
         let actor = r.u16()?;
         npcs.push(NpcSetup { pos, floor, yaw, scale, stagger, actor: (actor != u16::MAX).then_some(actor) });
     }
-    Ok(Setup { map, model, idle, magazine, ammo, reserve, grenades, speed_scale, seed, culling, pvp, friendly_fire, bases, uniforms, doors_open, mission, npcs })
+    Ok(Setup { map, model, idle, magazine, ammo, reserve, grenades, speed_scale, seed, culling, pvp, friendly_fire, respawn, bases, uniforms, doors_open, mission, npcs })
 }
 
 /// What each side wears unless the server says otherwise: "Blue Medium" and "Desert 1 Medium",
@@ -1019,12 +1087,13 @@ impl ToServer {
                 w.string(build);
                 w.u8(side_code(*side));
             }
-            ToServer::Input { token, ack_snapshot, first_seq, view, inputs } => {
+            ToServer::Input { token, ack_snapshot, first_seq, view, round, inputs } => {
                 header(&mut w, 1);
                 w.u32(*token);
                 w.u32(*ack_snapshot);
                 w.u32(*first_seq);
                 w.u32(*view);
+                w.u16(*round);
                 w.u8(inputs.len() as u8);
                 let mut before = Before::default();
                 for i in inputs {
@@ -1045,7 +1114,7 @@ impl ToServer {
         let msg = match kind {
             0 => ToServer::Connect { token: r.u32()?, build: r.string()?, side: side_from(r.u8()?)? },
             1 => {
-                let (token, ack_snapshot, first_seq, view) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
+                let (token, ack_snapshot, first_seq, view, round) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?, r.u16()?);
                 let n = r.u8()? as usize;
                 ensure!(n <= 32, "too many inputs");
                 let mut before = Before::default();
@@ -1053,7 +1122,7 @@ impl ToServer {
                 for _ in 0..n {
                     inputs.push(r.input(&mut before)?);
                 }
-                ToServer::Input { token, ack_snapshot, first_seq, view, inputs }
+                ToServer::Input { token, ack_snapshot, first_seq, view, round, inputs }
             }
             2 => ToServer::Leave { token: r.u32()? },
             k => bail!("no such message as {k}"),
@@ -1172,7 +1241,7 @@ mod tests {
         Setup {
             map: "data/map/rm11/rm11.map".to_string(), model: "data/character/team_hrt/blue_M_a.CRP".to_string(),
             idle: "up_none_cyc".to_string(), magazine: 30, ammo: 30, reserve: 900, grenades: 3, speed_scale: 1.0,
-            seed: 0x5eed, culling: true, pvp: true, friendly_fire: false,
+            seed: 0x5eed, culling: true, pvp: true, friendly_fire: false, respawn: false,
             bases: [vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], vec![[7.0, 8.0, 9.0]]], uniforms: UNIFORMS.map(String::from), doors_open: Some(0.0), mission: Some("data/mission/RM11Med.mdf".to_string()),
             npcs: (0..8).map(|i| NpcSetup {
                 pos: [i as f32 * 110.0, 0.0, 12.0], floor: 0.0, yaw: 90.0 + i as f32, scale: [1.0, 1.0, 1.0],
@@ -1186,7 +1255,7 @@ mod tests {
             slot, side: Some(Side::Gold), pos: [1.0, 2.0, 3.0], vel_y: -4.0, on_ground: true, crouched: true, look: (123, 65000), controlled: true,
             ammo: 12, reserve: 400, reload_until: Some(3.5), flash_until: 1.25, gun_trigger: true, kills: 3, deaths: 1, hp: 62.5,
             respawn_at: Some(20.0),
-            hit: Some(("thiu_la", 250)),
+            hit: Some(("thiu_la", 14.25)),
             equipped_grenade: true, grenades_left: 2, charge_from: None,
             throw: Some(Throw { start: 1.0, charge: 0.5, thrown: false }),
             message: Some(("KILLED".to_string(), 9.0)), target_hp: Some(33.0),
@@ -1207,6 +1276,7 @@ mod tests {
             thrown: vec![ThrownSnap { owner: 1, pos: [5.0; 3], spin: 40.0 }],
             doors: vec![(0.0, false), (0.5, true), (1.0, true)],
             broken: vec![(3, 10.5), (200, 11.0)],
+            round: RoundState { phase: Phase::Results, number: 7, ends: Some(20.0), wins: [3, 2], last: Some(Outcome::Won(Side::Gold)) },
             events: vec![
                 (10, Event::Sound { name: "C_GRFRAG.WAV".to_string(), at: Some([1.0, 2.0, 3.0]), gain: 1.0 }),
                 (11, Event::Shot { player: 2, start: [0.0; 3], end: [9.0, 8.0, 7.0], hit_character: true }),
@@ -1226,7 +1296,7 @@ mod tests {
     fn every_message_survives_the_trip() {
         let messages = [
             ToServer::Connect { token: 42, build: "abc1234".to_string(), side: Some(Side::Gold) },
-            ToServer::Input { token: 42, ack_snapshot: 897, first_seq: 5000, view: 14400, inputs: (0..5).map(|i| {
+            ToServer::Input { token: 42, ack_snapshot: 897, first_seq: 5000, view: 14400, round: 3, inputs: (0..5).map(|i| {
                 let mut x = Input { forward: i % 2 == 0, fire: i > 2, run: true, ..Input::default() };
                 x.set_look(i as f32 * 10.0, -5.0);
                 x
@@ -1395,7 +1465,7 @@ mod tests {
         next.players[1].respawn_at = None;
         next.players[0].deaths = 2;
         next.players[0].hit = None;
-        next.players[1].hit = Some(("thwu_ll", 3));
+        next.players[1].hit = Some(("thwu_ll", 14.9));
         next.npcs[1].state = NpcState::Dead { motion: "hw_bk_up2", start: 15.0 };
         next.npcs[1].hp = 0.0;
         next.thrown.push(ThrownSnap { owner: 0, pos: [1.0; 3], spin: 0.0 });

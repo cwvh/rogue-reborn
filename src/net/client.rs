@@ -13,6 +13,7 @@ use crate::net::animation::TELEPORT;
 use crate::net::link::{Addr, Link};
 use crate::net::meter::Meter;
 use crate::net::proto::{INPUTS_PER_PACKET, Parts, Setup, Snapshot, ToClient, ToServer};
+use crate::net::round::RoundState;
 use crate::sim::{Event, Input, Side, Sim, TICK};
 
 type V3 = [f32; 3];
@@ -111,6 +112,13 @@ pub struct Client {
     view_at: f64,
     /// How the connection is doing, for the lag meter
     pub meter: Meter,
+    /// Where the rounds are, as of the newest snapshot
+    pub round: RoundState,
+    /// While the round's game is still being built, the server is told of the round before,
+    /// so that it waits
+    pub loading: bool,
+    /// The round the server is told the client has
+    have: u16,
 }
 
 impl Client {
@@ -121,6 +129,9 @@ impl Client {
             asked: f64::NEG_INFINITY, correction: 0.0, snapshots: 0,
             history: VecDeque::new(), received: VecDeque::new(), parts: Parts::default(), wish: None, view_delay: VIEW_DELAY, frames: 0, starved: 0, tape: None, arrived: 0.0, view_tick: None, view_at: 0.0,
             meter: Meter::default(),
+            round: RoundState::default(),
+            loading: false,
+            have: 0,
         }
     }
 
@@ -255,6 +266,10 @@ impl Client {
         if let Some(snap) = self.listen(now, link) {
             self.last_snapshot = snap.tick;
             self.snapshots += 1;
+            self.round = snap.round;
+            if !self.loading {
+                self.have = snap.round.number;
+            }
             self.remember(now, &snap);
             self.reconcile(sim, &snap);
             self.meter.fixed(self.correction);
@@ -283,6 +298,7 @@ impl Client {
             ack_snapshot: self.last_snapshot,
             first_seq: self.recent.front().map_or(seq, |(s, _)| *s),
             view: (self.view_tick.unwrap_or(self.last_snapshot as f64 - 4.0).max(1.0) * 16.0) as u32,
+            round: self.have,
             inputs: self.recent.iter().map(|(_, i)| *i).collect(),
         };
         let bytes = msg.encode();

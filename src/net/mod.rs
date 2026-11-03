@@ -9,10 +9,13 @@ pub mod link;
 pub mod meter;
 pub mod proto;
 pub mod record;
+pub mod round;
 pub mod server;
 pub mod setup;
 
 #[cfg(test)]
 mod fairness;
+#[cfg(test)]
+mod round_tests;
 #[cfg(test)]
 mod tests;

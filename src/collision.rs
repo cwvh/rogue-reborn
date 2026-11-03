@@ -725,6 +725,17 @@ impl CollisionWorld {
         }
     }
 
+    /// Make what `switch_off` took away solid again
+    pub fn switch_on(&mut self, name: &str) {
+        for (n, range) in &self.groups {
+            if n == name {
+                for t in &mut self.tris[range.clone()] {
+                    t.off = false;
+                }
+            }
+        }
+    }
+
     fn col(&self, x: f32) -> usize {
         (((x - self.min_x) / self.cell).floor().max(0.0) as usize).min(self.cols - 1)
     }

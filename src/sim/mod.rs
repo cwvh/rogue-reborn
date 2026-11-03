@@ -467,6 +467,12 @@ pub struct Sim {
     pub friendly_fire: bool,
     /// Where each side's players start in a team game, Blue's and Gold's (`levels::Base::starts`)
     pub bases: [Vec<V3>; 2],
+    /// Whether the dead come back after `RESPAWN_SECONDS`. In rounds they wait for the next.
+    pub respawn: bool,
+    /// No one moves, looks around, fires or changes weapons: before a round, and after it
+    pub frozen: bool,
+    /// How the doors and characters were at the start, for a new round to put back
+    start: Option<(Vec<DoorState>, Vec<Npc>)>,
     /// Players take no harm, but flinch as they would (--god)
     pub god: bool,
     /// Where players come back after they die
@@ -536,6 +542,9 @@ impl Sim {
             pvp: false,
             friendly_fire: true,
             bases: [Vec::new(), Vec::new()],
+            respawn: true,
+            frozen: false,
+            start: None,
             god: false,
             rewind: Vec::new(),
             past: VecDeque::new(),
@@ -629,6 +638,9 @@ impl Sim {
         if !self.players.get(slot).is_some_and(|p| p.active) {
             return;
         }
+        if self.frozen {
+            return;
+        }
         let yaw = input.look().0;
         self.players[slot].look = (input.yaw, input.pitch);
         if self.players[slot].respawn_at.is_some() {
@@ -654,6 +666,67 @@ impl Sim {
         let places = &self.bases[side.index()];
         let taken = self.players.iter().filter(|p| p.active && p.side == Some(side)).count();
         (!places.is_empty()).then(|| places[taken % places.len()])
+    }
+
+    /// Keep how the doors and characters are now, for `new_round` to put back
+    pub fn mark_start(&mut self) {
+        self.start = Some((self.door_states.clone(), self.npcs.clone()));
+    }
+
+    /// A new round from `seed`: the doors, panes and characters as they were at the start (see
+    /// `mark_start`), no grenades, and every player fresh in their base's places in turn, or at
+    /// the spawn points without a side. Scores and sides stay.
+    pub fn new_round(&mut self, seed: u64) {
+        self.rng = seed | 1;
+        if let Some((doors, npcs)) = self.start.clone() {
+            for (i, d) in doors.into_iter().enumerate() {
+                self.door_states[i] = d;
+                self.world.set_door_open(i, d.open);
+                if let Some(portal) = self.doors[i].portal {
+                    self.blocked_portals[portal] = d.closed();
+                }
+            }
+            self.npcs = npcs;
+        }
+        for i in 0..self.panes.len() {
+            if self.broken_at[i].take().is_some() {
+                let name = self.panes[i].name.clone();
+                self.world.switch_on(&name);
+            }
+        }
+        self.thrown.clear();
+        self.noises.clear();
+        self.past.clear();
+        self.animators = Default::default();
+        let mut taken = [0usize; 3];
+        for i in 0..self.players.len() {
+            if !self.players[i].active {
+                continue;
+            }
+            let p = &self.players[i];
+            let (side, look, kills, deaths) = (p.side, p.look, p.kills, p.deaths);
+            let (k, places) = match side {
+                Some(s) if !self.bases[s.index()].is_empty() => (s.index(), &self.bases[s.index()]),
+                _ => (2, &self.spawns),
+            };
+            let at = if places.is_empty() { p.player.pos } else { places[taken[k] % places.len()] };
+            taken[k] += 1;
+            self.players[i] = self.new_player(at);
+            let p = &mut self.players[i];
+            (p.side, p.look, p.kills, p.deaths) = (side, look, kills, deaths);
+        }
+        self.apply_union_rooms();
+    }
+
+    /// A player out of the round from now, as the dead are: one who joined once it had begun
+    pub fn sit_out(&mut self, slot: usize) {
+        let now = self.time;
+        let p = &mut self.players[slot];
+        p.respawn_at = Some(now);
+        p.hit = None;
+        p.equipped_grenade = false;
+        p.gun_trigger = false;
+        self.announce(slot, "WAITING FOR THE NEXT ROUND", 5.0);
     }
 
     /// Whether `by` can hurt `victim`: themselves always, and their own side only with friendly fire
@@ -698,7 +771,7 @@ impl Sim {
         let mut h = Fnv::new();
         h.f32(self.time);
         h.u64(self.rng);
-        h.u32(self.culling as u32);
+        h.u32(self.culling as u32 + 2 * self.frozen as u32);
         for p in self.players.iter().filter(|p| p.active) {
             h.v3(p.player.pos);
             h.f32(p.player.vel_y);
@@ -826,11 +899,11 @@ impl Sim {
         let mut ev: Vec<Event> = Vec::new();
         let none = Input::default();
         let slots: Vec<usize> = (0..self.players.len()).filter(|&i| self.players[i].active).collect();
-        // A dead player does nothing but look where they were looking
+        // A dead or frozen player does nothing but look where they were looking
         let mut given: Vec<Input> = (0..self.players.len()).map(|i| inputs.get(i).copied().unwrap_or(none)).collect();
         for &i in &slots {
             let p = &self.players[i];
-            if p.respawn_at.is_some() {
+            if p.respawn_at.is_some() || self.frozen {
                 given[i] = Input { yaw: p.look.0, pitch: p.look.1, ..none };
             }
         }
@@ -877,7 +950,7 @@ impl Sim {
         self.time += dt;
 
         for &i in &slots {
-            if self.players[i].respawn_at.is_some_and(|t| self.time >= t) {
+            if self.respawn && self.players[i].respawn_at.is_some_and(|t| self.time >= t) {
                 self.respawn(i);
             }
             let p = &mut self.players[i];

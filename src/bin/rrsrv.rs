@@ -5,6 +5,8 @@
 //!
 //! Clients join with `rr --connect HOST:PORT`.
 //!
+//!   rrsrv --level citystreet_large --teams --rounds
+//!                                          Team Survival: one life a round, from the bases
 //!   rrsrv --level rm11 --record match.rrs  record the match, to play back later
 //!   rrsrv --check match.rrs                play back a match, or a player's recording, and
 //!                                          say whether it comes out the same
@@ -17,7 +19,7 @@ use rogue_reborn::levels::{BasePair, find_bases, find_level, find_mission_spawns
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
 use rogue_reborn::net::proto::{NpcSetup, Setup, UNIFORMS};
 use rogue_reborn::net::record::{Change, ClientRecording, ServerRecording};
-use rogue_reborn::net::server::Server;
+use rogue_reborn::net::server::{ROUND_TIME, Server};
 use rogue_reborn::net::setup::build_sim;
 use rogue_reborn::mission;
 use rogue_reborn::sim::characters::{Characters, place_npcs};
@@ -54,6 +56,10 @@ struct Args {
     base_pair: Option<usize>,
     /// Players cannot hurt their own side
     no_friendly_fire: bool,
+    /// Play in rounds, one life each, starting whenever two sides (or players) are there; each
+    /// this long (seconds), or with no limit
+    rounds: bool,
+    round_time: Option<f32>,
     /// Record the match to this file
     record: Option<PathBuf>,
     /// Play back a recording instead of serving
@@ -65,6 +71,7 @@ fn parse_args() -> Args {
         port: 27960, demo: false, map: None, level: None, npcs: demo::MAX_NPCS, max_players: 4, seed: 0x5eed,
         model: PathBuf::from("data/character/team_hrt/blue_M_a.CRP"), no_models: false, grenades: 3, duration: None, quiet: false, no_pvp: false, no_lag_compensation: false,
         snapshot_rate: 60.0, sim_latency: 0.0, sim_jitter: 0.0, sim_loss: 0.0, record: None, check: None, teams: false, base_pair: None, no_friendly_fire: false,
+        rounds: false, round_time: Some(ROUND_TIME),
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -92,6 +99,8 @@ fn parse_args() -> Args {
             "--teams" => a.teams = true,
             "--base-pair" => a.base_pair = Some(value("--base-pair").parse().unwrap_or_else(|_| usage("--base-pair expects a number from 1"))),
             "--no-friendly-fire" => a.no_friendly_fire = true,
+            "--rounds" => a.rounds = true,
+            "--round-time" => a.round_time = Some(value("--round-time").parse::<f32>().unwrap_or_else(|_| usage("--round-time expects seconds"))).filter(|&s| s > 0.0),
             "--check" => a.check = Some(PathBuf::from(value("--check"))),
             "--help" | "-h" => usage(""),
             other => usage(&format!("unknown option {other}")),
@@ -107,7 +116,7 @@ fn usage(problem: &str) -> ! {
     eprintln!("usage: rrsrv [--demo | --level NAME | --map PATH] [--port N] [--max-players N] [--npcs N] [--seed N]");
     eprintln!("             [--model FILE] [--no-models] [--grenades N] [--duration SECONDS] [--quiet] [--snapshot-rate HZ] [--no-pvp] [--no-lag-compensation]");
     eprintln!("             [--sim-latency MS] [--sim-jitter MS] [--sim-loss PERCENT]   (to make the connection worse)");
-    eprintln!("             [--teams [--base-pair N] [--no-friendly-fire]] [--record FILE]");
+    eprintln!("             [--teams [--base-pair N] [--no-friendly-fire]] [--rounds [--round-time SECONDS, 0 for none]] [--record FILE]");
     eprintln!("       rrsrv --check FILE");
     std::process::exit(if problem.is_empty() { 0 } else { 2 });
 }
@@ -266,6 +275,7 @@ fn main() {
         culling: true,
         pvp: !args.no_pvp,
         friendly_fire: !args.no_friendly_fire,
+        respawn: !args.rounds,
         bases,
         uniforms: UNIFORMS.map(String::from),
         doors_open: None,
@@ -287,6 +297,11 @@ fn main() {
     let mut server = Server::new(sim, setup, build, player_spawns);
     server.set_snapshot_rate(args.snapshot_rate);
     server.set_lag_compensation(!args.no_lag_compensation);
+    if args.rounds {
+        server.play_rounds();
+        server.set_time_limit(args.round_time);
+        server.set_auto_start(true);
+    }
     if args.record.is_some() {
         server.record();
     }

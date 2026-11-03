@@ -417,9 +417,8 @@ the lobby again.
   look around or change weapons. A player not ready within 30 seconds is dropped. Once the rest
   are ready, a 2-second wait, then everyone is let go and the round's clock starts.
 - **A round** gives each player one life. No one comes back until the round is over.
-- **A new round** is a new setup with a new seed, which every client builds its game from. We
-  already build the game this way on joining, so doors, terrorists and bodies reset alike
-  everywhere.
+- **A new round** starts the game over with a new seed: doors, glass, characters and grenades
+  as they were, and every player fresh in their base. See "Rounds (done)" for how.
 - **The end of a round.** A round ends when no more than one side has anyone alive, or the time
   runs out. A grenade still in the air or on the ground is waited for first: a dead player's
   last throw counts. If no one is left alive, nobody wins ("Everybody Lost"), as when the time
@@ -430,8 +429,8 @@ the lobby again.
   The server keeps what happened: that the round was called off, why, and each side's players,
   those still there and those dropped. Then a win by abandonment can be judged later if need be.
 - **The results**, then back to the lobby, where players can change side and kit.
-- **The snapshot** carries the phase, the time left, the scores and each player's side. Round
-  start and round end are events.
+- **The snapshot** carries the phase, when it ends, the round's number, the scores, how the last
+  round ended and each player's side.
 - **Friendly fire** is a server option, on by default. Competitive play kept it on, and it was
   rarely turned off.
 - **A dead player** watches their own side's players, through their eyes or from behind them
@@ -466,27 +465,65 @@ the lobby again.
 - **A team game has no terrorists.**
 - **Bots** fight only the other side.
 
-Team Survival first. Survival comes almost free once rounds work. Terrorist Hunt follows,
-since the AI already runs the `_MULT` missions' terrorists.
+### Rounds (done)
 
-Tests, in-process like the rest:
+`rrsrv --teams --rounds` plays Team Survival, and `rrsrv --rounds` alone plays Survival: the
+last one standing wins. `--round-time SECONDS` sets the limit, 180 by default, or 0 for none.
+The server runs the phases (`net::round`, `Server::play_rounds`): lobby, countdown (5 s),
+loading (up to 30 s), hold (2 s), live, results (8 s), and the lobby again.
 
-- A round ends when one side is dead.
-- The time limit ends a round in a draw.
-- The last of each side killed by one grenade is a draw.
-- A grenade thrown by the last of a side, who is then shot, still kills the last of the other
-  side: a draw, not a win.
-- The host cannot change the session during the countdown, only stop it. Players cannot change
-  side, but can change kit.
-- No one moves or looks around, and the clock does not start, until everyone has loaded and 2
-  more seconds have passed.
-- A player who takes too long to load is dropped, and the round goes on without them.
-- A side whose only player is dropped while loading calls the round off, and the record names
-  the players on each side, present and dropped.
-- A late joiner waits for the next round.
-- A player who drops counts as dead.
-- Everyone sees the same winner.
-- A new round gives every client the same game.
+- **The lobby is the level for now.** Until the lobby screen exists, players wait in the level,
+  free to move. `--rounds` starts the countdown once there are two sides (or two players) to
+  play, and stops it if one empties. The server can also start and stop it (`start_countdown`,
+  `stop_countdown`), as the host will.
+- **Held** (`Sim::frozen`) while a round loads and for the 2 s after: no one moves, looks
+  around, fires or changes weapons. The server ignores their input, and their own screen holds
+  them too. Before then, in the lobby and the countdown, and once a round is decided, players
+  move as they like, as in the original as remembered. Holding everyone the moment a round was
+  won felt wrong while the dead were still falling. A death after the round is decided does
+  not change the result.
+- **A new round is reset in place** (`Sim::new_round`), not built again from a new setup. The
+  server puts back the doors, panes and characters as they were at the start, clears the
+  grenades, and puts every player fresh in their base's places in turn. Sides and scores stay.
+  Clients follow from the snapshots. A snapshot is only ever the difference from one of the
+  same round, so what only changes one way within a round, like broken glass, comes back. This
+  is cheaper than loading the level again, and nothing on the client has to be rebuilt. A
+  change of map will need a real reload; the loading phase is there for it.
+- **Loading** is a client saying, with each input, which round its game is in. The server
+  waits until every player in the round has the new one. A client that is still building it
+  says the round before (`Client::loading`). One not ready in 30 s is dropped.
+- **The end** (`round::judge`): when no more than one side has anyone alive, once no grenade
+  is left. The time running out is a draw. A round in which a side has no one once players are
+  let go is called off; the server keeps who was on each side, and who was dropped
+  (`Server::records`).
+- **Rounds are state, not events.** The phase, when it ends, the round's number, the scores and
+  how the last round ended are in every snapshot: 14 bytes, or 1 without rounds. A lost
+  datagram cannot lose the start of a round, and a player who joins late knows where things
+  are at once.
+- **A late joiner** waits out the round, as the dead do (`Sim::sit_out`). One who joins in the
+  lobby or countdown plays the next round.
+- **The session is locked** from the countdown on: the time limit and friendly fire can only
+  change in the lobby. Sides cannot change once joined yet, and there are no kits yet.
+- **The results** show for 8 s, then the lobby. The original waited for each player to press
+  continue; that comes with the lobby screen.
+- **On screen** (`rr`): a line for the phase ("ROUND 2 STARTS IN 3", "GET READY", "GOLD
+  WINS"), the round and scores, and the time left. Bodies stay down until the next round, which
+  clears the marks on the walls.
+- **Recordings** keep each reset, hold and late joiner, so a match in rounds plays back the
+  same.
+
+For Terrorist Hunt, a new round should place the terrorists again from the round's seed;
+`new_round` puts back those of the start.
+
+Tests, in-process like the rest (`net::round_tests`): a side wins, the time runs out, one
+grenade kills the last of both sides, a dead player's grenade still counts, the session is
+locked, everyone is held until loaded and 2 s more, a slow loader is dropped, a side with no
+one calls the round off, a late joiner waits, a player who leaves counts as dead, a new round
+is the same on every client, Survival without sides, and a match in rounds plays back the
+same. A new round puts back glass, doors and characters on rm19, and on a client.
+
+Still to do from the plan: picking and changing a side in the lobby, kits, and the results
+waiting for players.
 
 ### Open
 

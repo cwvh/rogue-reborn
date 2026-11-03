@@ -45,6 +45,7 @@ pub fn demo_setup() -> Setup {
         culling: true,
         pvp: false,
         friendly_fire: true,
+        respawn: true,
         bases: [Vec::new(), Vec::new()],
         uniforms: crate::net::proto::UNIFORMS.map(String::from),
         doors_open: None,

@@ -19,6 +19,7 @@ use rogue_reborn::net::animation::Doing;
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
 use rogue_reborn::recording::{Playback, Recorder, Recording};
 use rogue_reborn::net::record::ClientRecorder;
+use rogue_reborn::net::round::{Outcome, Phase, RoundState};
 use rogue_reborn::mission;
 use rogue_reborn::sim::characters::{Characters, Npc, Rig, place_npcs, place_terrorists};
 use rogue_reborn::sim::movement::{Movement, Reloading, crouched_speed, ground_speed, hip_turn, movement_from_keys};
@@ -82,6 +83,23 @@ fn dress<'a>(side: Option<sim::Side>, sides: &'a [Option<Uniform>], model: &'a c
     match side.and_then(|s| sides.get(s.index())).and_then(Option::as_ref) {
         Some(u) => (&u.model, &u.arrays, &u.textures, Some(&u.skin)),
         None => (model, arrays, textures, skin),
+    }
+}
+
+/// The line on screen for where the rounds are, or none while one is played
+fn round_banner(r: &RoundState, now: f32) -> String {
+    let left = r.ends.map_or(0.0, |e| (e - now).max(0.0));
+    match (r.phase, r.last) {
+        (Phase::Open | Phase::Live, _) => String::new(),
+        (Phase::Lobby, _) => "WAITING FOR THE ROUND TO START".to_string(),
+        (Phase::Countdown, _) => format!("ROUND {} STARTS IN {}", r.number + 1, left.ceil() as u32),
+        (Phase::Loading, _) => "WAITING FOR EVERYONE TO LOAD".to_string(),
+        (Phase::Hold, _) => "GET READY".to_string(),
+        (Phase::Results, Some(Outcome::Won(s))) => format!("{} WINS", format!("{s:?}").to_uppercase()),
+        (Phase::Results, Some(Outcome::Survived(p))) => format!("PLAYER {} WINS", p + 1),
+        (Phase::Results, Some(Outcome::Draw)) => "EVERYBODY LOST".to_string(),
+        (Phase::Results, Some(Outcome::CalledOff)) => "ROUND CALLED OFF".to_string(),
+        (Phase::Results, None) => String::new(),
     }
 }
 
@@ -697,6 +715,8 @@ fn main() {
     let mut feed: Vec<(f32, String, [f32; 3])> = Vec::new();
     let mut killed_by: Option<Option<usize>> = None;
     let mut alive_look: Option<(f32, f32)> = None;
+    // The round the marks and bodies are from
+    let mut round_seen = 0u16;
     let mut trigger = false;
     // Right mouse button held: walk instead of the default run
     let mut walk_held = false;
@@ -922,6 +942,12 @@ fn main() {
             camera.position[2] += mv[1] * step_dt * 60.0;
         }
 
+        // Held before and after a round, the view stays where the game has it
+        if net.is_some() && sim.frozen && first_person && sim.players[me].respawn_at.is_none() {
+            let (yaw, pitch) = sim.players[me].look;
+            (camera.yaw, camera.pitch) = sim::Input { yaw, pitch, ..sim::Input::default() }.look();
+        }
+
         // The game runs in fixed ticks, however fast the frames come
         let mut input = sim::Input {
             forward: keys.contains(&Key::W),
@@ -1025,6 +1051,15 @@ fn main() {
         };
 
         feed.retain(|(until, ..)| *until > game_time);
+        // A new round leaves nothing of the last
+        if let Some((client, _)) = &net {
+            if client.round.number != round_seen {
+                round_seen = client.round.number;
+                decals.clear();
+                corpses.clear();
+                feed.clear();
+            }
+        }
 
         // Dead on a server: the view sinks to the floor and turns to whoever did it, and is given
         // back the way it was when the player comes back
@@ -1864,9 +1899,11 @@ fn main() {
                 let view_time = view.as_ref().map_or(game_time, |v| v.time);
                 // The others as the view shows them
                 let now_for = |slot: usize| if slot == me { game_time } else { view_time };
+                // A body stays while its player is dead, and for a while after they come back
                 corpses.retain(|&slot, (start, body)| {
                     let combat::NpcState::Dead { motion, .. } = body.health.state else { return false };
-                    now_for(slot) - *start < sim::RESPAWN_SECONDS.max(chars.frames(motion) / 30.0)
+                    sim.players.get(slot).is_some_and(|p| p.active && p.respawn_at.is_some())
+                        || now_for(slot) - *start < sim::RESPAWN_SECONDS.max(chars.frames(motion) / 30.0)
                 });
                 glDisable(0x0DE1); // GL_TEXTURE_2D
                 for (&slot, (start, body)) in &corpses {
@@ -2242,7 +2279,16 @@ fn main() {
                 status.insert(0, if p.respawn_at.is_some() { "DEAD".to_string() } else { format!("HEALTH: {:.0}", p.hp.ceil()) });
                 status.insert(1, format!("DEATHS: {}", p.deaths));
             }
-            let msg = if game_time < sim.players[me].message.1 { sim.players[me].message.0.as_str() } else { "" };
+            let round = net.as_ref().map(|(c, _)| c.round).unwrap_or_default();
+            if round.phase != Phase::Open {
+                status.insert(0, format!("ROUND {}  BLUE {}  GOLD {}", round.number.max(1), round.wins[0], round.wins[1]));
+                if let (Phase::Live, Some(ends)) = (round.phase, round.ends) {
+                    let left = (ends - game_time).max(0.0).ceil() as u32;
+                    status.insert(1, format!("TIME: {}:{:02}", left / 60, left % 60));
+                }
+            }
+            let banner = round_banner(&round, game_time);
+            let msg = if game_time < sim.players[me].message.1 { sim.players[me].message.0.as_str() } else { banner.as_str() };
             let marker = tracer.is_some_and(|t| t.2 && game_time < t.3);
             let lines: Vec<(String, [f32; 3])> = feed.iter().map(|(_, text, color)| (text.clone(), *color)).collect();
             let dead = net.is_some() && sim.players[me].respawn_at.is_some();

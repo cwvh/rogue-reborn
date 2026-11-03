@@ -26,14 +26,20 @@ use crate::sim::{Input, Side, Sim, TICK};
 
 type V3 = [f32; 3];
 
-const SERVER_MAGIC: &[u8; 8] = b"RRSERV\0\x02";
-const CLIENT_MAGIC: &[u8; 8] = b"RRCLNT\0\x01";
+const SERVER_MAGIC: &[u8; 8] = b"RRSERV\0\x03";
+const CLIENT_MAGIC: &[u8; 8] = b"RRCLNT\0\x02";
 
 /// A change in who plays, between two ticks
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Change {
     Joined { slot: u8, spawn: V3, side: Option<Side> },
     Left { slot: u8 },
+    /// A new round began from this seed (`Sim::new_round`)
+    Round { seed: u64 },
+    /// Players were held, or let go
+    Frozen(bool),
+    /// A player joined too late for the round (`Sim::sit_out`)
+    SatOut { slot: u8 },
 }
 
 /// One tick of the server's game
@@ -77,6 +83,9 @@ impl ServerRecording {
                     sim.players[slot as usize].side = side;
                 }
                 Change::Left { slot } => sim.remove_player(slot as usize),
+                Change::Round { seed } => sim.new_round(seed),
+                Change::Frozen(on) => sim.frozen = on,
+                Change::SatOut { slot } => sim.sit_out(slot as usize),
             }
         }
         sim.rewind = t.rewind.clone();
@@ -125,6 +134,18 @@ impl ServerRecording {
                         w.u8(1);
                         w.u8(slot);
                     }
+                    Change::Round { seed } => {
+                        w.u8(2);
+                        w.u64(seed);
+                    }
+                    Change::Frozen(on) => {
+                        w.u8(3);
+                        w.bool(on);
+                    }
+                    Change::SatOut { slot } => {
+                        w.u8(4);
+                        w.u8(slot);
+                    }
                 }
             }
             let n = t.inputs.len();
@@ -164,6 +185,9 @@ impl ServerRecording {
                 changes.push(match r.u8()? {
                     0 => Change::Joined { slot: r.u8()?, spawn: r.v3()?, side: side_from(r.u8()?)? },
                     1 => Change::Left { slot: r.u8()? },
+                    2 => Change::Round { seed: r.u64()? },
+                    3 => Change::Frozen(r.bool()?),
+                    4 => Change::SatOut { slot: r.u8()? },
                     k => bail!("no such change as {k}"),
                 });
             }
@@ -215,6 +239,10 @@ impl ServerRecorder {
 
     pub fn left(&mut self, slot: usize) {
         self.changes.push(Change::Left { slot: slot as u8 });
+    }
+
+    pub fn changed(&mut self, change: Change) {
+        self.changes.push(change);
     }
 
     /// Note a tick that has just run
