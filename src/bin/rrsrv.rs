@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use rogue_reborn::collision::{CollisionWorld, Params};
-use rogue_reborn::levels::{find_level, find_mission_spawns};
+use rogue_reborn::levels::{BasePair, find_bases, find_level, find_mission_spawns, pick_index};
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
-use rogue_reborn::net::proto::{NpcSetup, Setup};
+use rogue_reborn::net::proto::{NpcSetup, Setup, UNIFORMS};
 use rogue_reborn::net::record::{Change, ClientRecording, ServerRecording};
 use rogue_reborn::net::server::Server;
 use rogue_reborn::net::setup::build_sim;
@@ -48,6 +48,12 @@ struct Args {
     sim_latency: f64,
     sim_jitter: f64,
     sim_loss: f32,
+    /// Players are on two sides, starting from a pair of bases: this one of the level's, or one
+    /// picked by the seed
+    teams: bool,
+    base_pair: Option<usize>,
+    /// Players cannot hurt their own side
+    no_friendly_fire: bool,
     /// Record the match to this file
     record: Option<PathBuf>,
     /// Play back a recording instead of serving
@@ -58,7 +64,7 @@ fn parse_args() -> Args {
     let mut a = Args {
         port: 27960, demo: false, map: None, level: None, npcs: demo::MAX_NPCS, max_players: 4, seed: 0x5eed,
         model: PathBuf::from("data/character/team_hrt/blue_M_a.CRP"), no_models: false, grenades: 3, duration: None, quiet: false, no_pvp: false, no_lag_compensation: false,
-        snapshot_rate: 60.0, sim_latency: 0.0, sim_jitter: 0.0, sim_loss: 0.0, record: None, check: None,
+        snapshot_rate: 60.0, sim_latency: 0.0, sim_jitter: 0.0, sim_loss: 0.0, record: None, check: None, teams: false, base_pair: None, no_friendly_fire: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -83,6 +89,9 @@ fn parse_args() -> Args {
             "--sim-jitter" => a.sim_jitter = value("--sim-jitter").parse::<f64>().unwrap_or_else(|_| usage("--sim-jitter expects milliseconds")) / 1000.0,
             "--sim-loss" => a.sim_loss = value("--sim-loss").parse::<f32>().unwrap_or_else(|_| usage("--sim-loss expects a percentage")) / 100.0,
             "--record" => a.record = Some(PathBuf::from(value("--record"))),
+            "--teams" => a.teams = true,
+            "--base-pair" => a.base_pair = Some(value("--base-pair").parse().unwrap_or_else(|_| usage("--base-pair expects a number from 1"))),
+            "--no-friendly-fire" => a.no_friendly_fire = true,
             "--check" => a.check = Some(PathBuf::from(value("--check"))),
             "--help" | "-h" => usage(""),
             other => usage(&format!("unknown option {other}")),
@@ -98,7 +107,7 @@ fn usage(problem: &str) -> ! {
     eprintln!("usage: rrsrv [--demo | --level NAME | --map PATH] [--port N] [--max-players N] [--npcs N] [--seed N]");
     eprintln!("             [--model FILE] [--no-models] [--grenades N] [--duration SECONDS] [--quiet] [--snapshot-rate HZ] [--no-pvp] [--no-lag-compensation]");
     eprintln!("             [--sim-latency MS] [--sim-jitter MS] [--sim-loss PERCENT]   (to make the connection worse)");
-    eprintln!("             [--record FILE]");
+    eprintln!("             [--teams [--base-pair N] [--no-friendly-fire]] [--record FILE]");
     eprintln!("       rrsrv --check FILE");
     std::process::exit(if problem.is_empty() { 0 } else { 2 });
 }
@@ -187,14 +196,38 @@ fn main() {
         }),
     };
     let world = CollisionWorld::from_map(&level, Params::default());
+    let feet = |q: &[f32; 3]| [q[0], world.ground_at(q[0], q[2], q[1] + 100.0).unwrap_or(q[1]), q[2]];
     let (player_spawns, npc_spawns): (Vec<[f32; 3]>, Vec<[f32; 3]>) = match &level_path {
         None => (demo::player_spawns(args.max_players), demo::spawns(args.npcs).into_iter().skip(1).collect()),
         Some(p) => {
             let all = find_mission_spawns(p);
             let (mine, rest) = all.split_at(args.max_players.min(all.len()));
-            let feet = |q: &[f32; 3]| [q[0], world.ground_at(q[0], q[2], q[1] + 100.0).unwrap_or(q[1]), q[2]];
             (mine.iter().map(feet).collect(), rest.to_vec())
         }
+    };
+    // In a team game, the pair of bases the sides start from
+    let bases = if !args.teams {
+        [Vec::new(), Vec::new()]
+    } else {
+        let (name, pair) = match &level_path {
+            None => ("the box room's".to_string(), demo::bases()),
+            Some(p) => {
+                let pairs = find_bases(p);
+                if pairs.is_empty() {
+                    eprintln!("rrsrv: the level has no bases for a team game");
+                    std::process::exit(2);
+                }
+                let i = match args.base_pair {
+                    Some(n) if (1..=pairs.len()).contains(&n) => n - 1,
+                    Some(n) => usage(&format!("the level has {} pairs of bases, not {n}", pairs.len())),
+                    None => pick_index(pairs.len(), Some(args.seed)),
+                };
+                let BasePair { name, blue, gold } = pairs[i].clone();
+                (name, [blue, gold])
+            }
+        };
+        println!("teams start from {name} bases: Blue at {}, Gold at {}", pair[0].name, pair[1].name);
+        pair.map(|b| b.starts().iter().map(feet).collect())
     };
     if player_spawns.is_empty() {
         eprintln!("rrsrv: the level has nowhere for players to start");
@@ -206,9 +239,11 @@ fn main() {
     let weapon_def = weapon::read(Path::new("data/kit/pw_mp5k.wpn")).ok();
     let characters = if args.no_models { None } else { Characters::load(&args.model, idle) };
     let actors = actor::read_all(Path::new("data/actor"));
-    // The mission's terrorists, which the server and every client place from its file alike
-    let mission_file = level_path.as_deref().and_then(|p| mission::find(p, mission::Difficulty::Medium)).filter(|_| characters.is_some());
+    // The mission's terrorists, which the server and every client place from its file alike.
+    // A team game has none.
+    let mission_file = level_path.as_deref().and_then(|p| mission::find(p, mission::Difficulty::Medium)).filter(|_| characters.is_some() && !args.teams);
     let (npcs, faces) = match (&characters, &mission_file) {
+        _ if args.teams => (Vec::new(), Vec::new()),
         (Some(_), Some(_)) => (Vec::new(), Vec::new()),
         (Some(c), None) => place_npcs(&npc_spawns, &[], &world, &c.model, &actors, &|_, p| {
             // In the box room they face the players; elsewhere they are dealt a facing
@@ -230,6 +265,9 @@ fn main() {
         seed: args.seed,
         culling: true,
         pvp: !args.no_pvp,
+        friendly_fire: !args.no_friendly_fire,
+        bases,
+        uniforms: UNIFORMS.map(String::from),
         doors_open: None,
         mission: mission_file.map(|m| m.display().to_string()),
         npcs: npcs.iter().zip(&faces).map(|(n, f)| NpcSetup {

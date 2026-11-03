@@ -17,12 +17,12 @@ use crate::net::link::MAX_PACKET;
 use crate::sim::characters::REACTION_MOTIONS;
 use crate::sim::aim::{Aim, Pace};
 use crate::sim::peek::Peek;
-use crate::sim::{Cause, Event, Input, MAX_PLAYERS, Sim, Struck, TICK, Throw};
+use crate::sim::{Cause, Event, Input, MAX_PLAYERS, Side, Sim, Struck, TICK, Throw};
 
 type V3 = [f32; 3];
 
 /// Bumped whenever the messages change, so that a client and server that disagree notice
-pub const PROTOCOL: u8 = 11;
+pub const PROTOCOL: u8 = 12;
 
 const MAGIC: u16 = 0x5252;
 
@@ -56,8 +56,13 @@ pub struct Setup {
     pub speed_scale: f32,
     pub seed: u64,
     pub culling: bool,
-    /// Whether players can hurt each other
+    /// Whether players can hurt each other, and their own side
     pub pvp: bool,
+    pub friendly_fire: bool,
+    /// In a team game, where each side's players start: Blue's and Gold's (`Sim::bases`), and
+    /// the uniform each wears (a model of the players' body)
+    pub bases: [Vec<V3>; 2],
+    pub uniforms: [String; 2],
     pub doors_open: Option<f32>,
     /// The mission whose terrorists stand in the level, placed with `seed` the same way by
     /// everyone, in place of `npcs`
@@ -70,7 +75,8 @@ pub struct Setup {
 pub enum ToServer {
     /// Ask to join. `token` is picked by the client and goes on everything it sends, so that a
     /// stranger cannot speak for it. `build` says which version of the game it is.
-    Connect { token: u32, build: String },
+    /// `side` is the one the player would like, in a team game.
+    Connect { token: u32, build: String, side: Option<Side> },
     /// What the player did. `inputs` are those numbered `first_seq` and on, newest last.
     /// `ack_snapshot` is the tick of the latest snapshot seen. `view` is the server tick, in
     /// sixteenths, that the newest input's player was looking at the others as of, or 0 if
@@ -161,6 +167,7 @@ impl Parts {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayerSnap {
     pub slot: u8,
+    pub side: Option<Side>,
     pub pos: V3,
     pub vel_y: f32,
     pub on_ground: bool,
@@ -245,6 +252,7 @@ impl Snapshot {
             crouched: p.player.crouched,
             look: p.look,
             controlled: p.controlled,
+            side: p.side,
             ammo: if mine { p.ammo } else { 0 },
             reserve: if mine { p.reserve } else { 0 },
             reload_until: p.reload_until,
@@ -303,6 +311,7 @@ impl Snapshot {
                 p.charge_from = s.charge_from;
             }
             p.controlled = s.controlled;
+            p.side = s.side;
             p.reload_until = s.reload_until;
             p.flash_until = s.flash_until;
             p.gun_trigger = s.gun_trigger;
@@ -571,8 +580,10 @@ fn read_peek(r: &mut Reader) -> Result<Option<Peek>> {
     Ok(if b & 1 == 0 { None } else { Some(Peek { right: b & 2 != 0, crouched: b & 4 != 0, returning: b & 8 != 0, frame: r.u8()? as f32 / 2.0 }) })
 }
 
+/// The yes-or-no parts of a player, and their side in the top two bits
 fn flag_byte(p: &PlayerSnap) -> u8 {
     [p.on_ground, p.controlled, p.gun_trigger, p.equipped_grenade, p.crouched, p.aim.is_some()].iter().enumerate().fold(0, |acc, (n, &b)| acc | (b as u8) << n)
+        | side_code(p.side) << 6
 }
 
 fn write_message(w: &mut Writer, m: &Option<(String, f32)>) {
@@ -652,7 +663,7 @@ fn read_player(r: &mut Reader, slot: u8) -> Result<PlayerSnap> {
     }
     let aim = if on(5) { Some(read_aim(r)?) } else { None };
     Ok(PlayerSnap {
-        slot, pos, vel_y, on_ground: on(0), crouched: on(4), look, controlled: on(1), ammo, reserve, reload_until,
+        slot, side: side_from(flags >> 6)?, pos, vel_y, on_ground: on(0), crouched: on(4), look, controlled: on(1), ammo, reserve, reload_until,
         flash_until, gun_trigger: on(2), kills, deaths, hp, respawn_at, hit, equipped_grenade: on(3), grenades_left, charge_from,
         throw, message, target_hp, peek, aim,
     })
@@ -738,6 +749,7 @@ fn read_player_delta(r: &mut Reader, mask: u32, base: &PlayerSnap) -> Result<Pla
         let flags = r.u8()?;
         let f = |n: u8| flags >> n & 1 != 0;
         (p.on_ground, p.controlled, p.gun_trigger, p.equipped_grenade, p.crouched) = (f(0), f(1), f(2), f(3), f(4));
+        p.side = side_from(flags >> 6)?;
     }
     if on(13) { p.message = read_message(r)?; }
     if on(14) { p.target_hp = r.opt_f32()?; }
@@ -921,6 +933,16 @@ pub(crate) fn write_setup(w: &mut Writer, s: &Setup) {
     w.u64(s.seed);
     w.bool(s.culling);
     w.bool(s.pvp);
+    w.bool(s.friendly_fire);
+    for base in &s.bases {
+        w.u8(base.len() as u8);
+        for &p in base {
+            w.v3(p);
+        }
+    }
+    for u in &s.uniforms {
+        w.string(u);
+    }
     w.opt_f32(s.doors_open);
     w.string(s.mission.as_deref().unwrap_or(""));
     w.u16(s.npcs.len() as u16);
@@ -940,7 +962,10 @@ pub(crate) fn read_setup(r: &mut Reader) -> Result<Setup> {
     let speed_scale = r.f32()?;
     let seed = r.u64()?;
     let culling = r.bool()?;
-    let pvp = r.bool()?;
+    let (pvp, friendly_fire) = (r.bool()?, r.bool()?);
+    let mut base = || (0..r.u8()?).map(|_| r.v3()).collect::<Result<Vec<_>>>();
+    let bases = [base()?, base()?];
+    let uniforms = [r.string()?, r.string()?];
     let doors_open = r.opt_f32()?;
     let mission = Some(r.string()?).filter(|m| !m.is_empty());
     let n = r.u16()? as usize;
@@ -950,7 +975,25 @@ pub(crate) fn read_setup(r: &mut Reader) -> Result<Setup> {
         let actor = r.u16()?;
         npcs.push(NpcSetup { pos, floor, yaw, scale, stagger, actor: (actor != u16::MAX).then_some(actor) });
     }
-    Ok(Setup { map, model, idle, magazine, ammo, reserve, grenades, speed_scale, seed, culling, pvp, doors_open, mission, npcs })
+    Ok(Setup { map, model, idle, magazine, ammo, reserve, grenades, speed_scale, seed, culling, pvp, friendly_fire, bases, uniforms, doors_open, mission, npcs })
+}
+
+/// What each side wears unless the server says otherwise: "Blue Medium" and "Desert 1 Medium",
+/// as ladder play had it
+pub const UNIFORMS: [&str; 2] = ["data/character/team_hrt/blue_M_a.CRP", "data/character/team_camo/desert1_M_a.CRP"];
+
+/// A side as a number: 0 for none, then Blue and Gold
+pub(crate) fn side_code(side: Option<Side>) -> u8 {
+    side.map_or(0, |s| 1 + s.index() as u8)
+}
+
+pub(crate) fn side_from(code: u8) -> Result<Option<Side>> {
+    match code {
+        0 => Ok(None),
+        1 => Ok(Some(Side::Blue)),
+        2 => Ok(Some(Side::Gold)),
+        c => bail!("no such side as {c}"),
+    }
 }
 
 fn header(w: &mut Writer, kind: u8) {
@@ -970,10 +1013,11 @@ impl ToServer {
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
         match self {
-            ToServer::Connect { token, build } => {
+            ToServer::Connect { token, build, side } => {
                 header(&mut w, 0);
                 w.u32(*token);
                 w.string(build);
+                w.u8(side_code(*side));
             }
             ToServer::Input { token, ack_snapshot, first_seq, view, inputs } => {
                 header(&mut w, 1);
@@ -999,7 +1043,7 @@ impl ToServer {
         let mut r = Reader::new(bytes);
         let kind = check_header(&mut r)?;
         let msg = match kind {
-            0 => ToServer::Connect { token: r.u32()?, build: r.string()? },
+            0 => ToServer::Connect { token: r.u32()?, build: r.string()?, side: side_from(r.u8()?)? },
             1 => {
                 let (token, ack_snapshot, first_seq, view) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
                 let n = r.u8()? as usize;
@@ -1128,7 +1172,8 @@ mod tests {
         Setup {
             map: "data/map/rm11/rm11.map".to_string(), model: "data/character/team_hrt/blue_M_a.CRP".to_string(),
             idle: "up_none_cyc".to_string(), magazine: 30, ammo: 30, reserve: 900, grenades: 3, speed_scale: 1.0,
-            seed: 0x5eed, culling: true, pvp: true, doors_open: Some(0.0), mission: Some("data/mission/RM11Med.mdf".to_string()),
+            seed: 0x5eed, culling: true, pvp: true, friendly_fire: false,
+            bases: [vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], vec![[7.0, 8.0, 9.0]]], uniforms: UNIFORMS.map(String::from), doors_open: Some(0.0), mission: Some("data/mission/RM11Med.mdf".to_string()),
             npcs: (0..8).map(|i| NpcSetup {
                 pos: [i as f32 * 110.0, 0.0, 12.0], floor: 0.0, yaw: 90.0 + i as f32, scale: [1.0, 1.0, 1.0],
                 stagger: i as f32 * 0.73, actor: (i % 3 != 0).then_some(i as u16),
@@ -1138,7 +1183,7 @@ mod tests {
 
     fn player(slot: u8) -> PlayerSnap {
         PlayerSnap {
-            slot, pos: [1.0, 2.0, 3.0], vel_y: -4.0, on_ground: true, crouched: true, look: (123, 65000), controlled: true,
+            slot, side: Some(Side::Gold), pos: [1.0, 2.0, 3.0], vel_y: -4.0, on_ground: true, crouched: true, look: (123, 65000), controlled: true,
             ammo: 12, reserve: 400, reload_until: Some(3.5), flash_until: 1.25, gun_trigger: true, kills: 3, deaths: 1, hp: 62.5,
             respawn_at: Some(20.0),
             hit: Some(("thiu_la", 250)),
@@ -1180,7 +1225,7 @@ mod tests {
     #[test]
     fn every_message_survives_the_trip() {
         let messages = [
-            ToServer::Connect { token: 42, build: "abc1234".to_string() },
+            ToServer::Connect { token: 42, build: "abc1234".to_string(), side: Some(Side::Gold) },
             ToServer::Input { token: 42, ack_snapshot: 897, first_seq: 5000, view: 14400, inputs: (0..5).map(|i| {
                 let mut x = Input { forward: i % 2 == 0, fire: i > 2, run: true, ..Input::default() };
                 x.set_look(i as f32 * 10.0, -5.0);
@@ -1382,6 +1427,30 @@ mod tests {
             junk[i] = junk[i].wrapping_add(0x55);
             let _ = ToClient::decode_with(&junk, &|_| Some(&base));
             junk[i] = saved;
+        }
+    }
+
+    #[test]
+    fn each_uniform_fits_the_skeleton_and_follows_the_body_bullets_hit() {
+        let read = |p: &str| crate::crp::read(std::path::Path::new(p)).ok();
+        let Some(body) = read("data/character/team_hrt/blue_M_a.CRP") else { return };
+        let skeleton = crate::skeleton::read(std::path::Path::new("data/character/team_hrt/blue_M_a.SKL")).unwrap();
+        // The body's corners and the middles of its triangles
+        let v = &body.vertices;
+        let surface: Vec<[f32; 3]> = v.iter().copied().chain(body.parts.iter().flat_map(|p| &p.triangles).map(|t| {
+            let [a, b, c] = t.map(|i| v[i as usize]);
+            [0, 1, 2].map(|k| (a[k] + b[k] + c[k]) / 3.0)
+        })).collect();
+        for path in UNIFORMS {
+            let uniform = read(path).unwrap();
+            assert!(uniform.skin(&skeleton).is_some(), "{path}");
+            let mut off: Vec<f32> = uniform.vertices.iter().map(|p| {
+                surface.iter().map(|q| (0..3).map(|k| (p[k] - q[k]).powi(2)).sum::<f32>().sqrt()).fold(f32::MAX, f32::min)
+            }).collect();
+            off.sort_by(f32::total_cmp);
+            let (median, p90) = (off[off.len() / 2], off[off.len() * 9 / 10]);
+            // About 2 cm and 6 cm for Desert 1 Medium
+            assert!(median < 4.0 && p90 < 8.0, "{path}: median {median}, p90 {p90}");
         }
     }
 }

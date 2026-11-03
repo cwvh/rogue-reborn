@@ -24,7 +24,7 @@ use crate::net::proto::Setup;
 use crate::net::record::ClientRecorder;
 use crate::net::server::Server;
 use crate::net::setup::build_sim;
-use crate::sim::{Event, Input, MAX_PLAYERS, Sim, TICK};
+use crate::sim::{Event, Input, MAX_PLAYERS, Side, Sim, TICK};
 
 type V3 = [f32; 3];
 
@@ -44,10 +44,18 @@ pub fn demo_setup() -> Setup {
         seed: 7,
         culling: true,
         pvp: false,
+        friendly_fire: true,
+        bases: [Vec::new(), Vec::new()],
+        uniforms: crate::net::proto::UNIFORMS.map(String::from),
         doors_open: None,
         mission: None,
         npcs: Vec::new(),
     }
+}
+
+/// The box room set up for a team game: Blue starts along the south wall, Gold along the north
+pub fn team_setup() -> Setup {
+    Setup { pvp: true, bases: crate::demo::bases().map(|b| b.starts().to_vec()), ..demo_setup() }
 }
 
 /// Where player `i` starts in the box room: in rows of eight along the south wall
@@ -273,6 +281,13 @@ impl Game {
     pub fn join_bot(&mut self, skill: Skill, seed: u64) -> usize {
         let peer = self.join(|_| Input::default());
         self.peers[peer].bot = Some(Bot::new(skill, seed));
+        peer
+    }
+
+    /// A player who asks for a side on joining a team game
+    pub fn join_on(&mut self, side: Side, script: impl FnMut(u32) -> Input + 'static) -> usize {
+        let peer = self.join(script);
+        self.peers[peer].client.ask_side(Some(side));
         peer
     }
 

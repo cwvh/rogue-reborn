@@ -33,29 +33,8 @@ pub fn find_zone_spawn(map_path: &Path, zone: &str, world: &CollisionWorld) -> O
 // repeat the same points, so duplicates are dropped.
 pub fn find_mission_spawns(map_path: &Path) -> Vec<[f32; 3]> {
     let mut points: Vec<[f32; 3]> = Vec::new();
-    let Some(map_name) = map_path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
-        return points;
-    };
-    let Ok(dir) = std::fs::read_dir("data/mission") else { return points };
-    let mut files: Vec<PathBuf> = dir.flatten().map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("mis")))
-        .collect();
-    files.sort();
-
-    for file in files {
-        let Ok(bytes) = std::fs::read(&file) else { continue };
-        let text = String::from_utf8_lossy(&bytes);
+    for text in missions_of(map_path) {
         let lines: Vec<&str> = text.lines().map(str::trim).collect();
-
-        // The first quoted string in the file is the map filename
-        let named = lines.iter().find_map(|l| {
-            let rest = l.strip_prefix('"')?;
-            Some(rest[..rest.find('"')?].to_string())
-        });
-        if !named.is_some_and(|n| n.eq_ignore_ascii_case(&map_name)) {
-            continue;
-        }
-
         let Some(at) = lines.iter().position(|l| l.contains("Number of spawn points")) else { continue };
         let count: usize = lines[at].split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
         for l in lines.iter().skip(at + 1).take(count) {
@@ -69,6 +48,83 @@ pub fn find_mission_spawns(map_path: &Path) -> Vec<[f32; 3]> {
         }
     }
     points
+}
+
+// The text of every mission file in data/mission that names this map, in file name order
+fn missions_of(map_path: &Path) -> Vec<String> {
+    let Some(map_name) = map_path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+        return Vec::new();
+    };
+    let Ok(dir) = std::fs::read_dir("data/mission") else { return Vec::new() };
+    let mut files: Vec<PathBuf> = dir.flatten().map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("mis")))
+        .collect();
+    files.sort();
+    files.into_iter().filter_map(|file| {
+        let text = String::from_utf8_lossy(&std::fs::read(&file).ok()?).into_owned();
+        // The first quoted string in the file is the map filename
+        let named = text.lines().map(str::trim).find_map(|l| {
+            let rest = l.strip_prefix('"')?;
+            Some(rest[..rest.find('"')?].to_string())
+        });
+        named.is_some_and(|n| n.eq_ignore_ascii_case(&map_name)).then_some(text)
+    }).collect()
+}
+
+/// A side's base in a multiplayer mission: a box between two corners (map space), and its name
+/// in the game's text (`ZONE_KDBL_TOP` is "Top of Building")
+#[derive(Clone, Debug, PartialEq)]
+pub struct Base {
+    pub name: String,
+    pub corners: [[f32; 3]; 2],
+}
+
+impl Base {
+    /// Where a side's players start, in turn (0x56c7a0): the two corners given, which are
+    /// opposite, then the other two, then the middles of the four edges. All but the first two
+    /// are at the height of the higher corner. Feet go on the floor below.
+    pub fn starts(&self) -> [[f32; 3]; 8] {
+        let [a, b] = self.corners;
+        let y = a[1].max(b[1]);
+        let (mx, mz) = ((a[0] + b[0]) / 2.0, (a[2] + b[2]) / 2.0);
+        [a, b, [a[0], y, b[2]], [b[0], y, a[2]], [mx, y, a[2]], [mx, y, b[2]], [a[0], y, mz], [b[0], y, mz]]
+    }
+}
+
+/// The two bases a match on this level can start from, Blue's and Gold's, and the pair's name
+#[derive(Clone, Debug, PartialEq)]
+pub struct BasePair {
+    pub name: String,
+    pub blue: Base,
+    pub gold: Base,
+}
+
+// The base pairs of the level's multiplayer mission (`_MUL.mis`), as the original reads them
+// (0x569310): after "Number of base pairs", each pair is its quoted name, then for each side two
+// corners and the base's quoted name. The game picks one at random, or the host names one.
+pub fn find_bases(map_path: &Path) -> Vec<BasePair> {
+    for text in missions_of(map_path) {
+        let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        let Some(at) = lines.iter().position(|l| l.contains("Number of base pairs")) else { continue };
+        let count: usize = lines[at].split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        let quoted = |l: &str| -> Option<String> {
+            let rest = l.strip_prefix('"')?;
+            Some(rest[..rest.find('"')?].to_string())
+        };
+        let point = |l: &str| -> Option<[f32; 3]> {
+            let v: Vec<f32> = l.split_whitespace().map_while(|n| n.parse().ok()).collect();
+            (v.len() >= 3).then(|| [v[0], v[1], v[2]])
+        };
+        let base = |l: &[&str]| -> Option<Base> { Some(Base { corners: [point(l[0])?, point(l[1])?], name: quoted(l[2])? }) };
+        let pairs: Option<Vec<BasePair>> = (0..count).map(|i| {
+            let l = lines.get(at + 1 + i * 7..at + 8 + i * 7)?;
+            Some(BasePair { name: quoted(l[0])?, blue: base(&l[1..4])?, gold: base(&l[4..7])? })
+        }).collect();
+        if let Some(pairs) = pairs.filter(|p| !p.is_empty()) {
+            return pairs;
+        }
+    }
+    Vec::new()
 }
 
 // Pick an index in 0..n; random unless a seed is given (splitmix64)
@@ -136,4 +192,42 @@ pub fn extract_map_num(path: &Path) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_double_killhouse_has_four_pairs_of_bases() {
+        let pairs = find_bases(Path::new("data/map/m00/killhouse_2story_dbl.map"));
+        assert_eq!(pairs.len(), 4);
+        let p = &pairs[0];
+        assert_eq!(p.name, "ZONE_KDBL_GROUP_4_DESC");
+        assert_eq!(p.blue, Base { name: "ZONE_KDBL_TOP".to_string(), corners: [[32613.9, 33447.0, 30400.8], [32950.6, 33457.0, 30088.4]] });
+        assert_eq!(p.gold.name, "ZONE_KDBL_BACK");
+        assert_eq!(pairs[3].gold.corners[1], [33109.8, 33457.0, 32342.5]);
+    }
+
+    #[test]
+    fn a_sides_first_two_start_at_opposite_corners_and_the_rest_around_the_edges() {
+        let base = Base { name: String::new(), corners: [[0.0, 10.0, 0.0], [100.0, 20.0, 40.0]] };
+        let s = base.starts();
+        assert_eq!(&s[..2], &base.corners);
+        assert_eq!(&s[2..], &[[0.0, 20.0, 40.0], [100.0, 20.0, 0.0], [50.0, 20.0, 0.0], [50.0, 20.0, 40.0], [0.0, 20.0, 20.0], [100.0, 20.0, 20.0]]);
+    }
+
+    #[test]
+    fn every_multiplayer_level_has_bases() {
+        let mut levels = 0;
+        for (_, _, path) in list_levels() {
+            if find_mission_spawns(&path).is_empty() {
+                continue;
+            }
+            let pairs = find_bases(&path);
+            assert!((1..=20).contains(&pairs.len()), "{} has {} pairs", path.display(), pairs.len());
+            levels += 1;
+        }
+        assert!(levels >= 20, "only {levels} levels with spawn points");
+    }
 }

@@ -49,6 +49,8 @@ pub fn build_sim(setup: &Setup) -> Result<Sim> {
     };
     let mut sim = Sim::new(level, world, config, characters, npcs);
     sim.pvp = setup.pvp;
+    sim.friendly_fire = setup.friendly_fire;
+    sim.bases = setup.bases.clone();
     if let Some(open) = setup.doors_open {
         sim.set_doors_open(open);
     }
@@ -68,7 +70,7 @@ mod tests {
         let setup = Setup {
             map: map.to_string(), model: "data/character/team_hrt/blue_M_a.CRP".to_string(), idle: "up_none_cyc".to_string(),
             magazine: 30, ammo: 30, reserve: 900, grenades: 3, speed_scale: 1.0, seed: 99, culling: true, pvp: true,
-            doors_open: None, mission: Some(mission.display().to_string()), npcs: Vec::new(),
+            friendly_fire: true, bases: [Vec::new(), Vec::new()], uniforms: crate::net::proto::UNIFORMS.map(String::from), doors_open: None, mission: Some(mission.display().to_string()), npcs: Vec::new(),
         };
         let (server, client) = (build_sim(&setup).unwrap(), build_sim(&setup).unwrap());
         // The most terrorists on any level at medium

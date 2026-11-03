@@ -19,20 +19,20 @@ use anyhow::{Context, Result, bail, ensure};
 use crate::bytes::{Before, Reader, Writer};
 use crate::net::client::{Client, Frame};
 use crate::net::link::{Addr, Link};
-use crate::net::proto::{Setup, read_setup, write_setup};
+use crate::net::proto::{Setup, read_setup, side_code, side_from, write_setup};
 use crate::net::setup::build_sim;
 use crate::recording::{CHECK_EVERY, Desync};
-use crate::sim::{Input, Sim, TICK};
+use crate::sim::{Input, Side, Sim, TICK};
 
 type V3 = [f32; 3];
 
-const SERVER_MAGIC: &[u8; 8] = b"RRSERV\0\x01";
+const SERVER_MAGIC: &[u8; 8] = b"RRSERV\0\x02";
 const CLIENT_MAGIC: &[u8; 8] = b"RRCLNT\0\x01";
 
 /// A change in who plays, between two ticks
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Change {
-    Joined { slot: u8, spawn: V3 },
+    Joined { slot: u8, spawn: V3, side: Option<Side> },
     Left { slot: u8 },
 }
 
@@ -71,9 +71,10 @@ impl ServerRecording {
         let t = &self.ticks[n];
         for change in &t.changes {
             match *change {
-                Change::Joined { slot, spawn } => {
+                Change::Joined { slot, spawn, side } => {
                     let got = sim.add_player(spawn);
                     ensure!(got == Some(slot as usize), "player {slot} joined at tick {n}, but the game put them in {got:?}");
+                    sim.players[slot as usize].side = side;
                 }
                 Change::Left { slot } => sim.remove_player(slot as usize),
             }
@@ -114,10 +115,11 @@ impl ServerRecording {
             w.varint(t.changes.len() as u32);
             for change in &t.changes {
                 match *change {
-                    Change::Joined { slot, spawn } => {
+                    Change::Joined { slot, spawn, side } => {
                         w.u8(0);
                         w.u8(slot);
                         w.v3(spawn);
+                        w.u8(side_code(side));
                     }
                     Change::Left { slot } => {
                         w.u8(1);
@@ -160,7 +162,7 @@ impl ServerRecording {
             let mut changes = Vec::new();
             for _ in 0..r.varint()? {
                 changes.push(match r.u8()? {
-                    0 => Change::Joined { slot: r.u8()?, spawn: r.v3()? },
+                    0 => Change::Joined { slot: r.u8()?, spawn: r.v3()?, side: side_from(r.u8()?)? },
                     1 => Change::Left { slot: r.u8()? },
                     k => bail!("no such change as {k}"),
                 });
@@ -207,8 +209,8 @@ impl ServerRecorder {
         ServerRecorder { rec: ServerRecording { build: build.to_string(), setup, spawns, ticks: Vec::new(), checks: Vec::new() }, changes: Vec::new() }
     }
 
-    pub fn joined(&mut self, slot: usize, spawn: V3) {
-        self.changes.push(Change::Joined { slot: slot as u8, spawn });
+    pub fn joined(&mut self, slot: usize, spawn: V3, side: Option<Side>) {
+        self.changes.push(Change::Joined { slot: slot as u8, spawn, side });
     }
 
     pub fn left(&mut self, slot: usize) {

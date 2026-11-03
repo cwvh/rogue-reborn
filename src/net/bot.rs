@@ -197,12 +197,16 @@ impl Bot {
         let feet = state.player.pos;
         let eye = sim.eye(me);
 
-        // Who it can see: alive, near enough, within its field of view (or already its target),
-        // and with nothing in between
+        // Who it can see: the other side's, alive, near enough, within its field of view (or
+        // already its target), and with nothing in between
         let mut best: Option<(f32, usize, V3)> = None;
+        let side = sim.players.get(me).and_then(|p| p.side);
         for &(slot, pos, ..) in &view.players {
             let Some(other) = sim.players.get(slot) else { continue };
             if slot == me || !other.active || other.respawn_at.is_some() || other.hp <= 0.0 {
+                continue;
+            }
+            if side.is_some() && other.side == side {
                 continue;
             }
             let aim = [pos[0], pos[1] + CHEST, pos[2]];

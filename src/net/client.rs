@@ -13,7 +13,7 @@ use crate::net::animation::TELEPORT;
 use crate::net::link::{Addr, Link};
 use crate::net::meter::Meter;
 use crate::net::proto::{INPUTS_PER_PACKET, Parts, Setup, Snapshot, ToClient, ToServer};
-use crate::sim::{Event, Input, Sim, TICK};
+use crate::sim::{Event, Input, Side, Sim, TICK};
 
 type V3 = [f32; 3];
 
@@ -94,6 +94,8 @@ pub struct Client {
     received: VecDeque<Snapshot>,
     /// Parts of snapshots too big for a datagram
     parts: Parts,
+    /// The side the player would like, in a team game
+    wish: Option<Side>,
     /// How many snapshot intervals behind the newest others are shown (`VIEW_DELAY`)
     view_delay: f64,
     /// Frames drawn, and those that wanted a moment past the newest snapshot, so that what moves
@@ -117,7 +119,7 @@ impl Client {
             server, token, build: build.to_string(), status: Status::Connecting, setup: None, slot: 0, seq: 1,
             recent: VecDeque::new(), pending: VecDeque::new(), last_snapshot: 0, event_seen: 0, heard: 0.0,
             asked: f64::NEG_INFINITY, correction: 0.0, snapshots: 0,
-            history: VecDeque::new(), received: VecDeque::new(), parts: Parts::default(), view_delay: VIEW_DELAY, frames: 0, starved: 0, tape: None, arrived: 0.0, view_tick: None, view_at: 0.0,
+            history: VecDeque::new(), received: VecDeque::new(), parts: Parts::default(), wish: None, view_delay: VIEW_DELAY, frames: 0, starved: 0, tape: None, arrived: 0.0, view_tick: None, view_at: 0.0,
             meter: Meter::default(),
         }
     }
@@ -135,6 +137,11 @@ impl Client {
     pub fn leave(&mut self, link: &mut impl Link) {
         link.send(self.server, &ToServer::Leave { token: self.token }.encode());
         self.status = Status::Lost;
+    }
+
+    /// Ask for this side on joining a team game
+    pub fn ask_side(&mut self, side: Option<Side>) {
+        self.wish = side;
     }
 
     /// Show others this many snapshot intervals behind the newest (`VIEW_DELAY` unless told)
@@ -161,7 +168,7 @@ impl Client {
     pub fn connect(&mut self, now: f64, link: &mut impl Link) -> Option<&Setup> {
         if self.status == Status::Connecting && now - self.asked >= RETRY {
             self.asked = now;
-            link.send(self.server, &ToServer::Connect { token: self.token, build: self.build.clone() }.encode());
+            link.send(self.server, &ToServer::Connect { token: self.token, build: self.build.clone(), side: self.wish }.encode());
         }
         self.listen(now, link);
         if self.status == Status::Connected { self.setup.as_ref() } else { None }

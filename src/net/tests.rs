@@ -2,11 +2,11 @@
 
 use crate::net::bot::Skill;
 use crate::net::client::Status;
-use crate::net::lab::{Game, Peer, demo_setup, spawn};
+use crate::net::lab::{Game, Peer, demo_setup, spawn, team_setup};
 use crate::net::link::Conditions;
 use crate::net::proto::Setup;
 use crate::net::record::{ClientRecording, ServerRecording};
-use crate::sim::{self, Event, Input, MAX_PLAYERS, TICK};
+use crate::sim::{self, Event, Input, MAX_PLAYERS, Side, TICK};
 
 fn setup() -> Setup {
     demo_setup()
@@ -251,7 +251,8 @@ fn a_snapshot_too_big_for_a_datagram_reaches_the_clients_in_parts() {
 /// A match on a poor connection with players coming and going, recorded by the server and by
 /// one of the players
 fn recorded_match() -> (Game, usize) {
-    let mut game = Game::with_setup(Conditions::poor(), Setup { pvp: true, ..setup() });
+    // A team game, so that the recording has sides to play back too
+    let mut game = Game::with_setup(Conditions::poor(), team_setup());
     game.server.record();
     game.join_bot(Skill::hard(), 3);
     let watcher = game.join_recorded(|t| {
@@ -594,4 +595,82 @@ fn players_on_wifi_keep_playing_through_its_bursts_and_stalls() {
     // a stall longer than the server looks back, and the shooter's own place mispredicted
     assert!(f.remote.agreement() > 0.9, "{:?}", f.remote.agreement());
     assert!(f.lan.agreement() > 0.97, "{:?}", f.lan.agreement());
+}
+
+/// Where a side's players start in the box room
+fn starts(side: Side) -> Vec<[f32; 3]> {
+    team_setup().bases[side.index()].clone()
+}
+
+#[test]
+fn players_join_on_alternate_sides_and_start_in_their_own_base() {
+    let mut game = Game::with_setup(Conditions::lan(), team_setup());
+    for _ in 0..4 {
+        game.join(|_| Input::default());
+        game.run(0.3);
+    }
+    game.run(0.5);
+    let sides: Vec<Option<Side>> = (0..4).map(|i| game.server.sim.players[i].side).collect();
+    assert_eq!(sides, [Some(Side::Blue), Some(Side::Gold), Some(Side::Blue), Some(Side::Gold)]);
+    // A side's first two at its base's opposite corners
+    for (slot, side, k) in [(0, Side::Blue, 0), (1, Side::Gold, 0), (2, Side::Blue, 1), (3, Side::Gold, 1)] {
+        assert!(distance(game.server_pos(slot), starts(side)[k]) < 1.0, "player {slot} at {:?}", game.server_pos(slot));
+    }
+    // And every client knows who is on which side
+    for p in 0..4 {
+        let seen: Vec<Option<Side>> = (0..4).map(|i| game.sim_of(p).players[i].side).collect();
+        assert_eq!(seen, sides);
+    }
+}
+
+#[test]
+fn a_player_gets_the_side_they_ask_for_unless_it_has_more() {
+    let mut game = Game::with_setup(Conditions::lan(), team_setup());
+    for side in [Side::Gold, Side::Gold, Side::Gold, Side::Blue] {
+        game.join_on(side, |_| Input::default());
+        game.run(0.3);
+    }
+    let sides: Vec<Option<Side>> = (0..4).map(|i| game.server.sim.players[i].side).collect();
+    // The second to ask for Gold is turned to Blue, which has fewer; then Gold is level again
+    assert_eq!(sides, [Some(Side::Gold), Some(Side::Blue), Some(Side::Gold), Some(Side::Blue)]);
+}
+
+#[test]
+fn without_friendly_fire_a_side_cannot_hurt_its_own() {
+    for friendly_fire in [true, false] {
+        let mut game = Game::with_setup(Conditions::lan(), Setup { friendly_fire, ..team_setup() });
+        // Two on Blue at their base's opposite corners, one firing at the other's head, and
+        // one on Gold so that sides stay even
+        let (from, to) = (starts(Side::Blue)[0], starts(Side::Blue)[1]);
+        let yaw = (-(to[0] - from[0])).atan2(to[2] - from[2]).to_degrees();
+        let shooter = game.join_on(Side::Blue, move |t| {
+            let mut i = Input { fire: t > 60 && t < 70, ..Input::default() };
+            i.set_look(yaw, 0.0);
+            i
+        });
+        game.run(0.3);
+        game.join_on(Side::Gold, |_| Input::default());
+        game.run(0.3);
+        let target = game.join_on(Side::Blue, |_| Input::default());
+        game.run(1.5);
+        assert_eq!(game.server.sim.players[game.peers[target].client.slot()].side, Some(Side::Blue));
+        let slot = game.peers[target].client.slot();
+        let hurt = game.server.sim.players[slot].hp < sim::PLAYER_HP || game.server.sim.players[slot].deaths > 0;
+        assert_eq!(hurt, friendly_fire, "friendly fire {friendly_fire}: {:?} shot at {:?}", game.server_pos(game.peers[shooter].client.slot()), game.server_pos(slot));
+    }
+}
+
+#[test]
+fn bots_fight_only_the_other_side() {
+    let mut game = Game::with_setup(Conditions::lan(), Setup { friendly_fire: false, reserve: 3000, ..team_setup() });
+    for i in 0..4 {
+        game.join_bot(crate::net::bot::Skill::hard(), 50 + i);
+        game.run(0.2);
+    }
+    game.run(30.0);
+    let side = |i: usize| game.server.sim.players[i].side;
+    let kills: Vec<(usize, usize)> = game.peers[0].events.iter()
+        .filter_map(|e| match *e { Event::Kill { killer: Some(k), victim, .. } => Some((k, victim)), _ => None }).collect();
+    assert!(!kills.is_empty(), "nobody was killed");
+    assert!(kills.iter().all(|&(k, v)| side(k) != side(v)), "{kills:?}");
 }

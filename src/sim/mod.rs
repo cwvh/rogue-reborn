@@ -258,6 +258,34 @@ enum Wound {
     Blast(combat::Facing),
 }
 
+/// A side in a team game
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Blue,
+    Gold,
+}
+
+impl Side {
+    pub const BOTH: [Side; 2] = [Side::Blue, Side::Gold];
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    pub fn other(self) -> Side {
+        match self { Side::Blue => Side::Gold, Side::Gold => Side::Blue }
+    }
+
+    /// "blue" or "gold", as a player names it
+    pub fn named(name: &str) -> Option<Side> {
+        match name.to_ascii_lowercase().as_str() {
+            "blue" => Some(Side::Blue),
+            "gold" => Some(Side::Gold),
+            _ => None,
+        }
+    }
+}
+
 /// What killed a player
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Cause {
@@ -357,6 +385,8 @@ pub struct Thrown {
 pub struct PlayerState {
     /// Whether anyone is playing this slot
     pub active: bool,
+    /// Their side in a team game
+    pub side: Option<Side>,
     pub player: Player,
     /// Where the player looked in the last tick, as an `Input` says
     pub look: (u16, u16),
@@ -433,6 +463,10 @@ pub struct Sim {
     speed_scale: f32,
     /// Whether players can hurt each other (a server's game: it is off when playing alone)
     pub pvp: bool,
+    /// Whether players can hurt their own side (the original's FF, on in competitive play)
+    pub friendly_fire: bool,
+    /// Where each side's players start in a team game, Blue's and Gold's (`levels::Base::starts`)
+    pub bases: [Vec<V3>; 2],
     /// Players take no harm, but flinch as they would (--god)
     pub god: bool,
     /// Where players come back after they die
@@ -500,6 +534,8 @@ impl Sim {
             culling: config.culling,
             speed_scale: config.speed_scale,
             pvp: false,
+            friendly_fire: true,
+            bases: [Vec::new(), Vec::new()],
             god: false,
             rewind: Vec::new(),
             past: VecDeque::new(),
@@ -526,6 +562,7 @@ impl Sim {
         let (ammo, reserve, grenades) = self.loadout;
         PlayerState {
             active: true,
+            side: None,
             player: Player::new(feet),
             look: (0, 0),
             last_observer: None,
@@ -611,6 +648,20 @@ impl Sim {
         self.apply_union_rooms();
     }
 
+    /// Where a player on `side` starts: the next of their base's places, by how many are on
+    /// that side already, as the original fills a base
+    pub fn start_for(&self, side: Side) -> Option<V3> {
+        let places = &self.bases[side.index()];
+        let taken = self.players.iter().filter(|p| p.active && p.side == Some(side)).count();
+        (!places.is_empty()).then(|| places[taken % places.len()])
+    }
+
+    /// Whether `by` can hurt `victim`: themselves always, and their own side only with friendly fire
+    fn may_hurt(&self, by: usize, victim: usize) -> bool {
+        let side = |i: usize| self.players.get(i).and_then(|p| p.side);
+        by == victim || self.friendly_fire || side(by).is_none() || side(by) != side(victim)
+    }
+
     /// Where a player's eyes are
     pub fn eye(&self, slot: usize) -> V3 {
         let p = &self.players[slot].player;
@@ -670,6 +721,7 @@ impl Sim {
             h.f32(p.next_shot);
             h.f32(p.flash_until);
             h.u32(p.kills);
+            h.u32(p.side.map_or(0, |s| 1 + s.index() as u32));
             h.f32(p.hp);
             h.opt_f32(p.respawn_at);
             h.u32(p.deaths);
@@ -1497,7 +1549,7 @@ impl Sim {
         // Players are hurt as characters are, if they can be
         if self.pvp {
             for i in 0..self.players.len() {
-                if !self.players[i].active || self.players[i].respawn_at.is_some() {
+                if !self.players[i].active || self.players[i].respawn_at.is_some() || !self.may_hurt(owner, i) {
                     continue;
                 }
                 let feet = self.players[i].player.pos;
@@ -1565,6 +1617,7 @@ impl Sim {
         }
         (0..self.players.len())
             .filter(|&i| Some(i) != shooter && self.players[i].active && self.players[i].respawn_at.is_none())
+            .filter(|&i| shooter.is_none_or(|s| self.may_hurt(s, i)))
             .filter_map(|i| {
                 // Where the shooter saw the body
                 let seen = self.seen_then(i, back)?;
@@ -1710,15 +1763,20 @@ impl Sim {
             .collect();
         let nearest = |s: &V3| others.iter().map(|o| dist3(*s, *o)).fold(f32::INFINITY, f32::min);
         let here = self.players[slot].player.pos;
-        let spawn = self.spawns.iter().copied().fold(None, |best: Option<(V3, f32)>, s| {
+        // Their own base, in a team game
+        let spawns = match self.players[slot].side {
+            Some(side) if !self.bases[side.index()].is_empty() => &self.bases[side.index()],
+            _ => &self.spawns,
+        };
+        let spawn = spawns.iter().copied().fold(None, |best: Option<(V3, f32)>, s| {
             let d = nearest(&s);
             if best.is_none_or(|b| d > b.1) { Some((s, d)) } else { best }
         }).map_or(here, |b| b.0);
         let (kills, deaths) = (self.players[slot].kills, self.players[slot].deaths);
-        let look = self.players[slot].look;
+        let (look, side) = (self.players[slot].look, self.players[slot].side);
         self.players[slot] = self.new_player(spawn);
         let p = &mut self.players[slot];
-        (p.kills, p.deaths, p.look) = (kills, deaths, look);
+        (p.kills, p.deaths, p.look, p.side) = (kills, deaths, look, side);
     }
 
     /// Work out which rooms a player is in and which are solid to them. The view is the

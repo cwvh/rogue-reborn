@@ -19,7 +19,7 @@ use rogue_reborn::net::bot::{Bot, Skill};
 use rogue_reborn::net::client::{Client, Status};
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
 use rogue_reborn::net::setup::build_sim;
-use rogue_reborn::sim::{Event, Input, TICK};
+use rogue_reborn::sim::{Event, Input, Side, TICK};
 
 fn usage(problem: &str) -> ! {
     if !problem.is_empty() {
@@ -27,6 +27,7 @@ fn usage(problem: &str) -> ! {
     }
     eprintln!("usage: rrbot --connect HOST:PORT [--keys WASDFTL] [--seconds N] [--yaw DEGREES] [--turn DEGREES_PER_SECOND]");
     eprintln!("       rrbot --connect HOST:PORT --fight [--skill easy|normal|hard] [--seconds N, 0 for as long as the server runs] [--trace]");
+    eprintln!("             [--side blue|gold]   (the side to ask for in a team game)");
     eprintln!("             [--sim-latency MS] [--sim-jitter MS] [--sim-loss PERCENT] [--quiet]");
     std::process::exit(if problem.is_empty() { 0 } else { 2 });
 }
@@ -35,11 +36,13 @@ fn main() {
     let (mut connect, mut keys, mut seconds, mut yaw, mut turn) = (None, String::new(), 10.0f64, 0.0f32, 0.0f32);
     let (mut latency, mut jitter, mut loss, mut quiet) = (0.0f64, 0.0f64, 0.0f32, false);
     let (mut fight, mut skill, mut seconds_given, mut trace) = (false, Skill::normal(), false, false);
+    let mut side = None;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut value = |name: &str| it.next().unwrap_or_else(|| usage(&format!("{name} needs a value")));
         match arg.as_str() {
             "--connect" => connect = Some(value("--connect")),
+            "--side" => side = Some(Side::named(&value("--side")).unwrap_or_else(|| usage("--side expects blue or gold"))),
             "--keys" => keys = value("--keys").to_ascii_uppercase(),
             "--seconds" => {
                 seconds = value("--seconds").parse().unwrap_or_else(|_| usage("--seconds expects a number"));
@@ -74,6 +77,7 @@ fn main() {
     let token = (std::process::id() ^ 0x5bd1e995).wrapping_mul(2654435761);
     let build = option_env!("GIT_HASH").unwrap_or("unknown");
     let mut client = Client::new(to_server, token, build);
+    client.ask_side(side);
 
     // Join: ask until the server says yes or no
     let start = Instant::now();

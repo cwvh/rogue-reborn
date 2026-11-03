@@ -149,6 +149,12 @@ pub fn spawns(npcs: usize) -> Vec<[f32; 3]> {
     points
 }
 
+/// The box room's two bases for team games: Blue's along the south wall, Gold's along the north
+pub fn bases() -> [crate::levels::Base; 2] {
+    let base = |name: &str, a: [f32; 3], b: [f32; 3]| crate::levels::Base { name: name.to_string(), corners: [a, b] };
+    [base("South", [-300.0, 0.0, -420.0], [300.0, 0.0, -300.0]), base("North", [300.0, 0.0, 420.0], [-300.0, 0.0, 300.0])]
+}
+
 /// Where up to `MAX_PLAYERS` players start, side by side near the south wall, eight to a row
 pub fn player_spawns(count: usize) -> Vec<[f32; 3]> {
     const PER_ROW: usize = 8;

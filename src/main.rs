@@ -13,7 +13,7 @@ use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 use std::rc::Rc;
 use std::net::ToSocketAddrs;
-use rogue_reborn::{map, rsb, actor, combat, demo, grenade, blastlight, concussion, recording, skeleton, sim, sound, weapon, ambience, glass};
+use rogue_reborn::{map, rsb, actor, combat, crp, demo, grenade, blastlight, concussion, recording, skeleton, sim, sound, weapon, ambience, glass};
 use rogue_reborn::net::client::{Client, Status};
 use rogue_reborn::net::animation::Doing;
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
@@ -65,6 +65,24 @@ fn sprite_blend(m: &map::Material, map_num: &str) -> Option<bool> {
     }
     let glows = m.emissive_strength != 0;
     (glows || textures::has_soft_alpha(map_num, &m.filename)).then_some(glows)
+}
+
+/// What a player wears: their side's uniform in a team game, or else the players' model
+/// A side's uniform: its own mesh, skinned to the players' skeleton
+struct Uniform {
+    model: crp::Crp,
+    arrays: CharacterArrays,
+    textures: Vec<Option<u32>>,
+    skin: crp::Skin,
+}
+
+/// What a player on `side` is drawn with: their side's uniform, or else the players' model
+fn dress<'a>(side: Option<sim::Side>, sides: &'a [Option<Uniform>], model: &'a crp::Crp, arrays: &'a CharacterArrays,
+             textures: &'a [Option<u32>], skin: Option<&'a crp::Skin>) -> (&'a crp::Crp, &'a CharacterArrays, &'a [Option<u32>], Option<&'a crp::Skin>) {
+    match side.and_then(|s| sides.get(s.index())).and_then(Option::as_ref) {
+        Some(u) => (&u.model, &u.arrays, &u.textures, Some(&u.skin)),
+        None => (model, arrays, textures, skin),
+    }
 }
 
 fn main() {
@@ -131,6 +149,7 @@ fn main() {
         let to_server = link.inner_mut().addr_of(server);
         let token = (std::process::id() ^ 0x5bd1e995).wrapping_mul(2654435761);
         let mut client = Client::new(to_server, token, option_env!("GIT_HASH").unwrap_or("unknown"));
+        client.ask_side(args.side);
         if args.record.is_some() {
             client.start_tape();
             net_recorder = Some(ClientRecorder::new(option_env!("GIT_HASH").unwrap_or("unknown"), token));
@@ -410,8 +429,7 @@ fn main() {
     })();
 
     // One GL texture per part, from the character's own directory
-    let part_textures: Vec<Option<u32>> = characters.as_ref().map(|c| &c.model).map_or_else(Vec::new, |c| {
-        let dir = model_path.parent().unwrap_or(Path::new("."));
+    let textures_of = |c: &crp::Crp, dir: &Path| -> Vec<Option<u32>> {
         let mut cache: HashMap<String, Option<u32>> = HashMap::new();
         c.parts.iter().map(|part| {
             *cache.entry(part.material.clone()).or_insert_with(|| {
@@ -422,9 +440,27 @@ fn main() {
                 id
             })
         }).collect()
-    });
+    };
+    let part_textures: Vec<Option<u32>> = characters.as_ref().map_or_else(Vec::new, |c| textures_of(&c.model, model_path.parent().unwrap_or(Path::new("."))));
     // The model's triangle corners, laid out for glDrawArrays
     let character_arrays = characters.as_ref().map_or_else(CharacterArrays::default, |c| CharacterArrays::new(&c.model));
+    // What each side wears in a team game, as the server says. Each uniform is its own mesh on
+    // the players' skeleton, so one posing dresses them all.
+    let side_dress: Vec<Option<Uniform>> = joined.iter()
+        .filter(|s| s.bases.iter().all(|b| !b.is_empty()))
+        .flat_map(|s| s.uniforms.clone())
+        .map(|path| {
+            let path = PathBuf::from(path);
+            let model = crp::read(&path).map_err(|e| eprintln!("could not load the uniform {}: {e:#}", path.display())).ok()?;
+            let skin = characters.as_ref().and_then(|c| c.rig.as_ref()).and_then(|r| model.skin(&r.skeleton));
+            let Some(skin) = skin else {
+                eprintln!("the uniform {} does not fit the players' skeleton", path.display());
+                return None;
+            };
+            let textures = textures_of(&model, path.parent().unwrap_or(Path::new(".")));
+            Some(Uniform { arrays: CharacterArrays::new(&model), textures, skin, model })
+        })
+        .collect();
     // Team members whose faces the models wear: --actor picks one, otherwise
     // they are dealt out in turn
     let mut actors = actor::read_all(Path::new("data/actor"));
@@ -1652,7 +1688,7 @@ fn main() {
             // it plays. `hip_turn` is how far the hips would turn toward a side step (see
             // `movement::hip_turn`). `peek` takes the whole body, as a flinch does, while it lasts.
             // `body` is what the drawing remembers of this body from frame to frame.
-            let draw_body = |chars: &Characters, movement: Movement, frame: f32, feet: [f32; 3], yaw_deg: f32, scale: [f32; 3],
+            let draw_body = |chars: &Characters, side: Option<sim::Side>, movement: Movement, frame: f32, feet: [f32; 3], yaw_deg: f32, scale: [f32; 3],
                              face: Option<u32>, hand: Option<&Option<WeaponDraw>>, grenade: bool, flash: bool, reloading: Option<Reloading>,
                              firing: bool, crouched: bool, hip_turn: f32, flinch: Option<(&rogue_reborn::motion::Motion, f32, f32)>,
                              peek: Option<rogue_reborn::sim::peek::Peek>, body: &mut BodyState| -> bool {
@@ -1680,15 +1716,18 @@ fn main() {
                 let key = BodyKey { movement, reload: reloading.map(|r| r.empty), aiming, crouched, changing: changing.is_some(), flinch: flinch.map(|f| f.2.to_bits()), shuffle: shuffle.filter(|_| shuffling).map(|s| s.2.to_bits()), peek: peeking };
                 body.fade.apply(key, game_time, ease, &mut root, &mut rots);
                 let pose = skel.pose([0.0, root[1], 0.0], &rots);
-                let verts = skin.apply(&pose);
+                let (model, arrays, textures, worn) = dress(side, &side_dress, &chars.model, &character_arrays, &part_textures, Some(skin));
+                let verts = worn.unwrap_or(skin).apply(&pose);
                 glPushMatrix();
                 glTranslatef(feet[0], feet[1], feet[2]);
                 // The body faces where the player looks (model forward is +Z)
                 glRotatef(yaw_deg, 0.0, 1.0, 0.0);
                 glScalef(scale[0], scale[1], scale[2]);
-                draw_character(&chars.model, &character_arrays, &verts, &part_textures, face, textured, glow_on(feet));
-                // What bullets hit (B): the posed body itself, outlined over it
+                draw_character(model, arrays, &verts, textures, face, textured, glow_on(feet));
+                // What bullets hit (B): the players' model posed alike, whatever the uniform,
+                // outlined over it
                 if show_hitboxes {
+                    let verts = skin.apply(&pose);
                     glDisable(0x0DE1); // GL_TEXTURE_2D
                     glDisable(0x0B71); // GL_DEPTH_TEST
                     glColor3f(1.0, 0.85, 0.0);
@@ -1756,7 +1795,7 @@ fn main() {
                         // Hidden, the animation still follows them
                         let flinch = flinch_at(chars, p, view_time);
                         let hip_turn = remote_anim.hip_turn(slot, yaw);
-                        if !visible || draw_body(chars, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, doing.reloading, doing.firing, doing.crouched, hip_turn, flinch, p.peek, bodies.entry(slot).or_default()) {
+                        if !visible || draw_body(chars, p.side, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, doing.reloading, doing.firing, doing.crouched, hip_turn, flinch, p.peek, bodies.entry(slot).or_default()) {
                             continue;
                         }
                     } else {
@@ -1779,12 +1818,13 @@ fn main() {
                         ..Npc::default()
                     };
                     let idle = game_time * 30.0 + ghost.stagger * 9.0;
-                    let posed = chars.pose(&ghost, view_time, idle);
-                    let verts: &[[f32; 3]] = if posed.is_empty() { &chars.model.vertices } else { &posed };
+                    let (model, arrays, textures, skin) = dress(p.side, &side_dress, &chars.model, &character_arrays, &part_textures, chars.rig.as_ref().map(|r| &r.skin));
+                    let posed = chars.bones(&ghost, view_time, idle).zip(skin).map(|(b, s)| s.apply(&b)).unwrap_or_default();
+                    let verts: &[[f32; 3]] = if posed.is_empty() { &model.vertices } else { &posed };
                     glPushMatrix();
                     glTranslatef(ghost.pos[0], ghost.pos[1], ghost.pos[2]);
                     glRotatef(ghost.yaw, 0.0, 1.0, 0.0);
-                    draw_character(&chars.model, &character_arrays, verts, &part_textures, face, textured, glow_on(ghost.pos));
+                    draw_character(model, arrays, verts, textures, face, textured, glow_on(ghost.pos));
                     glPopMatrix();
                 }
                 glColor4f(1.0, 1.0, 1.0, 1.0);
@@ -1803,7 +1843,7 @@ fn main() {
                 let flash = !mine.equipped_grenade && game_time < mine.flash_until;
                 if mine.respawn_at.is_none() {
                     let flinch = flinch_at(chars, mine, game_time);
-                    draw_body(chars, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash, mine.reloading(game_time), sim.firing(me), mine.player.crouched, player_hip_turn, flinch, mine.peek, bodies.entry(me).or_default());
+                    draw_body(chars, mine.side, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash, mine.reloading(game_time), sim.firing(me), mine.player.crouched, player_hip_turn, flinch, mine.peek, bodies.entry(me).or_default());
                 }
             }
 
@@ -1836,13 +1876,15 @@ fn main() {
                         continue;
                     }
                     let face = (!actors.is_empty()).then(|| face_textures[slot % actors.len()].0).flatten();
-                    let posed = chars.pose(body, now, 0.0);
-                    let verts: &[[f32; 3]] = if posed.is_empty() { &chars.model.vertices } else { &posed };
+                    let side = sim.players.get(slot).and_then(|p| p.side);
+                    let (model, arrays, textures, skin) = dress(side, &side_dress, &chars.model, &character_arrays, &part_textures, chars.rig.as_ref().map(|r| &r.skin));
+                    let posed = chars.bones(body, now, 0.0).zip(skin).map(|(b, s)| s.apply(&b)).unwrap_or_default();
+                    let verts: &[[f32; 3]] = if posed.is_empty() { &model.vertices } else { &posed };
                     glPushMatrix();
                     glTranslatef(body.pos[0], body.pos[1], body.pos[2]);
                     glRotatef(body.yaw, 0.0, 1.0, 0.0);
                     glScalef(body.scale[0], body.scale[1], body.scale[2]);
-                    draw_character(&chars.model, &character_arrays, verts, &part_textures, face, textured, glow_on(body.pos));
+                    draw_character(model, arrays, verts, textures, face, textured, glow_on(body.pos));
                     glPopMatrix();
                 }
                 glColor4f(1.0, 1.0, 1.0, 1.0);

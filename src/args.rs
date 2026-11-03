@@ -11,6 +11,8 @@ pub struct Args {
     pub list_levels: bool,
     /// Join the server at this address (host:port) instead of playing alone
     pub connect: Option<String>,
+    /// The side to ask for, in a team game
+    pub side: Option<rogue_reborn::sim::Side>,
     /// Make the connection to the server worse, to see how the game copes: milliseconds each
     /// way, milliseconds of jitter, and the share of datagrams lost (0 to 1)
     pub sim_latency: f64,
@@ -112,6 +114,7 @@ pub fn parse_args() -> Args {
             "--level" => args.level = it.next(),
             "--list-levels" => args.list_levels = true,
             "--connect" => args.connect = it.next(),
+            "--side" => args.side = it.next().and_then(|s| rogue_reborn::sim::Side::named(&s)),
             "--sim-latency" => args.sim_latency = it.next().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 1000.0,
             "--sim-jitter" => args.sim_jitter = it.next().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 1000.0,
             "--sim-loss" => args.sim_loss = it.next().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0) / 100.0,

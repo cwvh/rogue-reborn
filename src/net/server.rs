@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, VecDeque};
 use crate::net::link::{Addr, Link};
 use crate::net::proto::{Setup, Snapshot, ToClient, ToServer, split};
 use crate::net::record::{ServerRecorder, ServerRecording};
-use crate::sim::{Event, Input, Sim, TICK};
+use crate::sim::{Event, Input, Side, Sim, TICK};
 
 type V3 = [f32; 3];
 
@@ -234,7 +234,7 @@ impl Server {
 
     fn receive(&mut self, now: f64, from: Addr, msg: ToServer, link: &mut impl Link) {
         match msg {
-            ToServer::Connect { token, build } => {
+            ToServer::Connect { token, build, side: wish } => {
                 if let Some(r) = self.remotes.iter().find(|r| r.addr == from) {
                     // It did not hear us the first time
                     if r.token == token {
@@ -247,14 +247,17 @@ impl Server {
                     link.send(from, &ToClient::Refuse { token, reason }.encode().0);
                     return;
                 }
-                let spawn = self.spawns[self.spawned % self.spawns.len()];
+                // In a team game, their side and its base
+                let side = self.side_for(wish);
+                let spawn = side.and_then(|s| self.sim.start_for(s)).unwrap_or(self.spawns[self.spawned % self.spawns.len()]);
                 let Some(slot) = self.sim.add_player(spawn) else {
                     link.send(from, &ToClient::Refuse { token, reason: "the game is full".to_string() }.encode().0);
                     return;
                 };
+                self.sim.players[slot].side = side;
                 self.spawned += 1;
                 if let Some(rec) = self.recorder.as_mut() {
-                    rec.joined(slot, spawn);
+                    rec.joined(slot, spawn, side);
                 }
                 self.remotes.push(Remote {
                     addr: from, token, slot, queue: BTreeMap::new(), next_seq: None, last_input: Input { run: true, ..Input::default() }, starved: 0, last_view: 0, low: usize::MAX, looked: 0,
@@ -288,6 +291,20 @@ impl Server {
                     self.drop_player(r.slot);
                 }
             }
+        }
+    }
+
+    /// The side a player joining a team game goes on: the one they asked for, unless it has
+    /// more players than the other, and else the smaller, Blue if they are even
+    fn side_for(&self, wish: Option<Side>) -> Option<Side> {
+        if self.sim.bases.iter().any(Vec::is_empty) {
+            return None;
+        }
+        let on = |s: Side| self.sim.players.iter().filter(|p| p.active && p.side == Some(s)).count();
+        match wish {
+            Some(w) if on(w) <= on(w.other()) => Some(w),
+            _ if on(Side::Gold) < on(Side::Blue) => Some(Side::Gold),
+            _ => Some(Side::Blue),
         }
     }
 

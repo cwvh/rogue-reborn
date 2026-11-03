@@ -290,6 +290,20 @@ Each `_MUL` mission has an adversarial section:
 - 1 to 5 base pairs, for the types that start in bases. Each pair has a name, then a Blue base
   and a Gold base. A base is a box between two corners, with a name of its own.
 
+From the exe (the mission reader, 0x569310): there may be 1 to 20 base pairs, and the game
+picks one at random when the mission loads. There must be at least as many spawn points as
+players, and they are shuffled. Within a base, a side's players start in turn at eight places
+(0x56c7a0): the two corners given, which are opposite, then the other two corners, then the
+middles of the four edges. So a side's first two start at opposite ends, as remembered. All but
+the first two are at the height of the higher corner. The pair's name in the game's text lists
+the Blue base first ("Top & Back"), and the mission gives it first.
+
+The uniforms are the team's medium bodies: "Blue Medium" is `team_hrt/blue_M_a.CRP`,
+"Street2 Medium" is `team_hrt/Street2_M_a.CRP` and "Desert 1 Medium" is
+`team_camo/desert1_M_a.CRP`. All the bodies of one weight share their corners and differ only
+in their parts' textures. Ladder play used Blue Medium against Desert 1 Medium, so those are
+our defaults.
+
 The `_MULT` missions add the terrorists for the hunts. A `.mgt` names the missions it may be
 played on, or allows all of them.
 
@@ -431,6 +445,26 @@ the lobby again.
 - **Kits.** Each player picks their own. How is not settled; see below.
 - **Bots fill empty slots**, so uneven teams still play. They are also the lab's players.
 - **Respawning** soon after dying stays as a server option, for tests and trying things out.
+
+### Sides (done)
+
+- **Bases** (`levels::find_bases`, `Base::starts`): read from every multiplayer level; each
+  has 1 to 5 pairs. The box room has its own, Blue along the south wall and Gold along the north.
+- **A player's side** (`PlayerState::side`, in the top bits of the snapshot's flag byte). The
+  server puts a joining player on the side they ask for (`--side` on `rr` and `rrbot`), unless it
+  has more players than the other; else on the smaller side, Blue if even. They start at their
+  base's next place, and a respawn, where allowed, is in their own base.
+- **Friendly fire** (`Setup::friendly_fire`, `rrsrv --no-friendly-fire`): on by default. Off,
+  neither bullets nor grenades hurt one's own side; one's own grenade still hurts oneself.
+- **The setup** carries the bases' starting places and each side's uniform, so every client,
+  and a recording played back, has them. `rrsrv --teams` starts a team game, from
+  `--base-pair N` or a pair the seed picks.
+- **Uniforms**: each side's players are drawn in their side's uniform, alive or dead. A uniform
+  may be its own mesh (the camo ones have 369 corners, the HRT ones 339), skinned to the
+  players' skeleton. Bullets still hit the players' model (Blue Medium) whatever the uniform, so
+  a Desert edge may differ a little from what bullets hit. B shows what they hit.
+- **A team game has no terrorists.**
+- **Bots** fight only the other side.
 
 Team Survival first. Survival comes almost free once rounds work. Terrorist Hunt follows,
 since the AI already runs the `_MULT` missions' terrorists.
