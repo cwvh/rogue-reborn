@@ -1,12 +1,26 @@
 # rogue-reborn
 
-A first-person viewer and sandbox for the levels of Tom Clancy's Rainbow Six:
-Rogue Spear.  It reads the original game's data files (maps, textures,
-characters, animations, sounds) directly, so you need your own copy of the
-game.
+A reimplementation of Tom Clancy's Rainbow Six: Rogue Spear. It reads the original
+game's data files (maps, textures, characters, animations, sounds) directly, so you need your
+own copy of the game.
+
+What works today:
+
+- **The levels**, drawn with the original's textures, rooms and portals. You walk them in first
+  person, with collision, doors that open and glass that breaks.
+- **The MP5K and frag grenades**, with the original's spread, damage and wound reactions.
+- **The missions' terrorists**, placed as the original places them. They see and hear you, turn
+  on you and fire, and come to look when they hear something.
+- **Network play**: a server, players and bots, free for all or in two teams, with rounds of
+  Team Survival or Survival.
+- **Recordings** that play back exactly, alone or on a server.
+
+The design notes are in [docs/](docs/): [multiplayer.md](docs/multiplayer.md) for network play
+and the match flow, [terrorist-ai.md](docs/terrorist-ai.md) for the terrorists, and
+[walking.md](docs/walking.md) for how players and characters move.
 
 .MAP and .RSB parsing credit to [RSE-file-formats](https://github.com/AlexKimov/RSE-file-formats)
-by Alex Kimov. I adapted his 010 templates to Rust for initial map loading and
+by Alexander Evdokimov. I adapted his 010 templates to Rust for initial map loading and
 wireframe rendering in 2023. As of 2026 frontier models have advanced enough
 that figuring out the binary formats is no longer the headache it once was.
 
@@ -65,7 +79,7 @@ textures, realistic bullet holes and a 144 fps cap. Other shortcuts:
 ```
 cargo rr --level rm11 --first-person --textured   # any level, any options
 cargo rr --list-levels                            # what is in data/map
-cargo wtest                                              # run the tests
+cargo wtest                                       # run the tests
 ```
 
 On other platforms, or without the aliases:
@@ -134,49 +148,65 @@ can be kept as a test.
 
 ## Playing over a network
 
-The game can be played by several people at once, with a server that owns the game and runs it for
-everyone. Start a server and join it from two (or more) windows:
+A server owns the game and runs it for everyone. Players send it what they do, and it sends back
+what happened.
+
+### Hosting and joining
 
 ```
-rrsrv --demo --max-players 4                  # the box room, or --level rm11 for a level from the game
+rrsrv --demo --max-players 4                  # the box room, or --level rm11 for a level
 rr --connect 127.0.0.1:27960 --first-person --textured
 rr --connect 127.0.0.1:27960 --first-person --textured
 ```
 
-`rrsrv` listens on UDP port 27960 (`--port` changes it). It places `--npcs` characters for the box
-room, a level's mission terrorists (medium difficulty, which every client places from the mission
-file the same way) where it has a mission, or else characters at the
-level's spawn points after the first `--max-players`. Build `rr` and `rrsrv`
-together (the same `cargo build`): the server turns away a client built from a different commit,
-because the two must move a player the same way. Snapshots go out 30 times a second (`--snapshot-rate`
-changes it), and other players, the characters and grenades are drawn a little in the past, moving smoothly between them.
-Players can hurt each other on a server (`rrsrv --no-pvp` turns it off): a head shot kills, a body
-shot takes a third, a grenade by how close it is, and a player who dies comes back after 3.7 seconds
-at the spawn point farthest from the others, with a full loadout. A wound makes the body flinch, and
-a death makes it fall, with the motions characters use for the part hit and the side the shot came
-from; the body lies where it fell until the fall is over or the player is back, whichever is later.
-Playing alone, nothing can hurt you.
-A shot is judged against where the other players were when the shooter saw them (the client says
-which moment that was, up to half a second back), so there is no need to lead a target by your
-ping; `rrsrv --no-lag-compensation` judges against where they are now instead.
-The last few kills are listed at the top left (yours in yellow, your death in red). When you die your
-view sinks to the floor and turns to whoever killed you, tinted red, until you come back.
-Other players are drawn with the player's own animations and weapon: walking, running or strafing
-according to how they are seen to move, and firing, reloading or throwing as the snapshots say.
-A snapshot is sent as only what has changed since the latest one the client says it has, or in full
-if there is none, so a quiet game costs about a hundred bytes a snapshot.
+`rrsrv` listens on UDP port 27960 (`--port` changes it) for up to 16 players (`--max-players`).
+Build `rr` and `rrsrv` together, from the same commit: the server turns away a client built from
+another, because the two must move a player the same way.
 
-Each player's own movement happens at once on their screen and is checked by the server, which
-moves them back, rarely and by little, if it disagreed. Everything else is the server's word:
-shots, hits, grenades, doors, glass, kills. Other players are shown standing where they are.
+The server places a level's mission terrorists (medium difficulty) where it has a mission, or
+`--npcs` characters in the box room. Players can hurt each other (`--no-pvp` turns it off): a
+head shot kills, a body shot takes a fifth, a grenade by how close it is. Without rounds, a player
+who dies comes back after 3.7 seconds at the spawn point farthest from the others.
 
-To see how it copes with a poor connection, add `--sim-latency 80 --sim-jitter 30 --sim-loss 5` to
-`rrsrv` and/or `rr` (milliseconds each way, milliseconds of jitter, percent lost).
+### Team games and rounds
 
-L shows the lag meter at the top left, over the last 4 seconds. Its figures:
+```
+rrsrv --level citystreet_large --teams --rounds
+rr --connect 127.0.0.1:27960 --side blue --first-person --textured
+```
+
+- `--teams` puts players on two sides, Blue and Gold, starting from a pair of the level's bases
+  (`--base-pair N`, or one the seed picks). `--side blue|gold` on `rr` and `rrbot` asks for a
+  side; a player goes to the smaller side if theirs has more. Blue wears Blue Medium and Gold
+  Desert 1 Medium, as ladder play had it.
+- Friendly fire is on, as in competitive play. `--no-friendly-fire` turns it off.
+- `--rounds` plays in rounds with one life each: Team Survival with `--teams`, last one standing
+  without. A round starts with a 5 second countdown once both sides have someone. Everyone is
+  put back in their base and held for 2 seconds, then let go. The round lasts 3 minutes
+  (`--round-time SECONDS`, 0 for no limit). It ends when one side is left, or in a draw when the
+  time runs out or no one is left. Then 8 seconds of results, and the next countdown.
+- A team game has no terrorists.
+
+### How it stays fair
+
+Snapshots go out 60 times a second, as only what changed since the last one the client has.
+Other players are drawn about 25 ms in the past, moving smoothly between snapshots. Your own
+movement happens at once on your screen; the server checks it, and rarely moves you back by a
+little. Everything else is the server's word: shots, hits, grenades, doors, glass, kills.
+
+A shot is judged against where the others were when you saw them, up to 0.75 seconds back, so
+there is no need to lead a target by your ping. `rrsrv --no-lag-compensation` judges against
+where they are now instead.
+
+To see how the game copes with a poor connection, add `--sim-latency 80 --sim-jitter 30
+--sim-loss 5` to `rrsrv` or `rr` (milliseconds each way, milliseconds of jitter, percent lost).
+
+### The lag meter
+
+L shows the lag meter at the top left, over the last 4 seconds:
+
 - **ping:** from sending an input until a snapshot says the server used it. This includes the
-  inputs the server holds back against late ones, so it is the lag you feel, a little more than
-  the network's.
+  inputs the server holds back against late ones, so it is the lag you feel.
 - **jitter:** the spread of the snapshots' arrival times.
 - **loss:** snapshots that never came.
 - **view:** how far in the past the other players are shown.
@@ -188,8 +218,17 @@ The graph's upper band is how much the view of the other players has in hand: bl
 when it runs dry and they stall. The lower band has a bar for each snapshot: green to its ping,
 red for one lost, and yellow from the top for a fix.
 
-To play alone against the computer, `scripts/mp.sh` starts a server, some bots and your own window,
-and stops them all when you close it:
+### Recording a network game
+
+`rrsrv --record match.rrs` records the match as the server ran it, and `rrsrv --check match.rrs`
+plays it back and says whether it comes out the same. `rr --record FILE` on a server records
+what that player saw, and M marks a moment in it to find later. `rrsrv --check` plays those back
+too.
+
+### Bots
+
+To play alone against the computer, `scripts/mp.sh` starts a server, some bots and your own
+window, and stops them all when you close it:
 
 ```
 scripts/mp.sh                              # the box room, three bots
@@ -199,19 +238,28 @@ scripts/mp.sh rm08 --net bad               # your connection 90 ms each way, 30 
 
 `--net` is `clean`, `good`, `typical`, `bad` or `awful`, and makes only your own connection worse.
 `--skill` is `easy`, `normal` or `hard`, `--npcs N` and `--no-pvp` go to the server, and anything
-after `--` goes to `rr`. Who killed whom is printed as it happens.
+after `--` goes to `rr`.
 
-The bots are `rrbot --connect HOST:PORT --fight [--skill hard]`. They wander the level, opening the
-doors they come to, and turn on whoever they see: they react after a moment, turn at a limited rate,
-fire in bursts with an aim that drifts and settles, sidestep, keep their distance and now and then
-throw a grenade. They see what a person on the same computer would (other players as the client
-shows them, not through walls, within a field of view), so their shots are judged the same way.
-`--trace` prints where a bot is and whom it fights, once a second.
+The bots are `rrbot --connect HOST:PORT --fight [--skill hard] [--side gold]`. They wander the
+level, opening the doors they come to, and turn on whoever they see on the other side: they react
+after a moment, turn at a limited rate, fire in bursts with an aim that drifts and settles,
+sidestep and now and then throw a grenade. They see only what a player on the same computer
+would, so their shots are judged the same way. They are poor at finding each other on a big
+level. `--trace` prints where a bot is and whom it fights, once a second.
 
-`rrbot` without `--fight` is a scripted client, for trying the server without a screen (`rrbot --connect
-HOST:PORT --keys WF --seconds 10`; `--keys` takes the letters of `--hold`), and
-`scripts/net-test.sh` runs a server and two bots over real sockets, on a clean and a bad connection,
-and checks that the game stayed in agreement.
+`rrbot` without `--fight` is a scripted client (`rrbot --connect HOST:PORT --keys WF --seconds
+10`), and `scripts/net-test.sh` runs a server and two bots over real sockets and checks that the
+game stayed in agreement.
+
+### The lab
+
+`rrlab` plays bots against each other over pretend connections, in moments, and prints how fair
+and smooth it was: how often a shot's result on the shooter's screen matched the server's, how
+far the victim was from where the shot found them, how much sooner a player stepping round a
+corner sees the one waiting than they are seen, and the bytes sent. `rrlab --tune` tries the
+snapshot rate, the view delay and how far back shots are judged against each other. Tests hold
+its figures, so a change that makes play less fair fails them. See
+[docs/multiplayer.md](docs/multiplayer.md) for the figures and how they were tuned.
 
 ## How the code is laid out
 
@@ -220,7 +268,8 @@ doors and glass, and what a tick of time does to them. It reads no clock, window
 device, and takes its randomness from its own generator, so the same inputs always give the
 same game (a test checks this). Each tick takes an `Input` and returns `Event`s.
 
-The server logic and wire format are `src/net/`, tested against a pretend network. The client, `src/main.rs` and its modules, is a window around that: it turns keys and the mouse
+The server, client, wire format, rounds, recordings and lab are `src/net/`, tested against a
+pretend network with a pretend clock. The client, `src/main.rs` and its modules, is a window around that: it turns keys and the mouse
 into `Input`, steps the sim in fixed 60 Hz ticks, and draws, plays sounds and prints the events.
 
 ## Other tools
