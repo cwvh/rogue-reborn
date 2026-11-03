@@ -80,11 +80,11 @@ pub enum ToServer {
     /// stranger cannot speak for it. `build` says which version of the game it is.
     /// `side` is the one the player would like, in a team game.
     Connect { token: u32, build: String, side: Option<Side> },
-    /// What the player did. `inputs` are those numbered `first_seq` and on, newest last.
-    /// `ack_snapshot` is the tick of the latest snapshot seen. `view` is the server tick, in
-    /// sixteenths, that the newest input's player was looking at the others as of, or 0 if
-    /// that is not known: a shot is judged against where the others were then. `round` is the
-    /// number of the round the client's game is in, which tells the server it has it.
+    /// Player inputs starting at `first_seq`, ordered oldest to newest. `ack_snapshot` acknowledges
+    /// the latest received snapshot tick. `view` is the server tick at which other players were
+    /// shown when the newest input was sampled, in sixteenths of a tick. Zero means unknown. Lag
+    /// compensation judges shots against other players' positions at that time. `round` identifies
+    /// the round loaded by the client and acknowledges its setup.
     Input { token: u32, ack_snapshot: u32, first_seq: u32, view: u32, round: u16, inputs: Vec<Input> },
     /// Leave
     Leave { token: u32 },
@@ -171,7 +171,7 @@ impl Parts {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayerSnap {
     pub slot: u8,
-    /// Which join this is (`PlayerState::joined`): someone new in the slot has another
+    /// Occupant's join number, copied from `PlayerState::joined`.
     pub joined: u32,
     pub side: Option<Side>,
     pub pos: V3,
@@ -693,7 +693,7 @@ fn read_player(r: &mut Reader, slot: u8) -> Result<PlayerSnap> {
     })
 }
 
-/// A float as the bits that make it up, so that two are the same only if nothing about them differs
+/// Returns the float's bit representation for exact comparisons.
 fn bits(v: f32) -> u32 {
     v.to_bits()
 }
@@ -702,7 +702,7 @@ fn opt_bits(v: Option<f32>) -> Option<u32> {
     v.map(f32::to_bits)
 }
 
-/// A player's mask of what changed is this when they are sent in full instead
+/// Mask value indicating a full player record instead of a delta.
 const FULL: u32 = 1 << 31;
 
 /// A player as it differs from `base`: a mask of the parts that changed, then those parts

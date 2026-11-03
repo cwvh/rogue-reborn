@@ -8,21 +8,23 @@ use crate::sim::{Input, Sim};
 
 type V3 = [f32; 3];
 
-/// How long (seconds) after dying before watching starts: the fall and the turn to whoever did it
+/// Delay in seconds after death before watching starts. The death camera shows the fall and turns
+/// toward the killer first.
 pub const DEATH_VIEW: f32 = 2.0;
 
-/// How long (seconds) a watched player is still watched once seen dead, so their death is seen
+/// Seconds to hold the view after the target's death appears in the displayed frame. Gives the
+/// watcher time to see the death before switching targets.
 pub const TARGET_GONE: f32 = 1.5;
 
 /// How far back and how far up the camera behind a player goes
 pub const BEHIND: f32 = 220.0;
 pub const RISE: f32 = 40.0;
 
-/// How far short of what it would hit the camera behind stops: well beyond the near plane, which
-/// is at most 4 units
+/// Distance to stop short of a camera-ray hit. Exceeds the maximum near-plane distance of 4 units.
 const CLEARANCE: f32 = 12.0;
 
-/// How far beside the line from the eyes the camera's other four lines run, for a little volume
+/// Offset of the four additional camera rays: right, left, up and down. These approximate a camera
+/// with some volume.
 const SPREAD: f32 = 8.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -32,7 +34,7 @@ pub enum WatchMode {
     Behind,
 }
 
-/// What the choice of whom to watch depends on, each frame
+/// State used each frame to choose whom to watch and position the camera.
 pub struct WatchContext<'a> {
     /// The client's copy of the game: sides, joins, who is alive as of the newest snapshot
     pub sim: &'a Sim,
@@ -73,7 +75,7 @@ impl WatchContext<'_> {
     }
 }
 
-/// Where a camera is and which way it looks: degrees, as an `Input`'s look
+/// Camera position in MAP space. Yaw and pitch use the same degree convention as `Input::look`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pose {
     pub eye: V3,
@@ -98,8 +100,7 @@ pub struct Watch {
     started: Option<f32>,
     target: Option<Target>,
     pub mode: WatchMode,
-    /// The latest view through a living target's eyes, held once they are gone, with whose it
-    /// was and where they stood
+    /// Last target eye pose, slot and feet position. Retained after the target is lost.
     last: Option<(Pose, usize, V3)>,
 }
 
@@ -185,18 +186,20 @@ impl Watch {
         self.mode = if self.mode == WatchMode::Eyes { WatchMode::Behind } else { WatchMode::Eyes };
     }
 
-    /// Whom the camera is on and where they stand, as of its latest view, held with it: the
-    /// view is drawn from the rooms around them
+    /// Returns the slot and feet position associated with the last target eye pose. Retained for
+    /// room selection while that view is held.
     pub fn standing(&self) -> Option<(usize, V3)> {
         self.last.map(|(_, slot, feet)| (slot, feet))
     }
 
-    /// Whether the player is dead in a round, so that F is the watch's even before it starts
+    /// Whether the player is dead in a round. Reserves F for watch controls, including during the
+    /// initial death delay.
     pub fn in_round(&self) -> bool {
         self.key.is_some()
     }
 
-    /// Whether watching has started: until then the dead player's own death view shows
+    /// Whether the death delay is over and watching has started. Until then, the player's own death
+    /// camera is shown.
     pub fn watching(&self) -> bool {
         self.started.is_some()
     }
@@ -224,10 +227,10 @@ impl Watch {
     }
 }
 
-/// A camera `distance` back along `from`'s look, turned `orbit` degrees round the eye, and `rise`
-/// up, stopped short of whatever is in the way. Five lines are traced, the middle one and four
-/// `SPREAD` beside it, and the camera stops `CLEARANCE` short of the nearest hit along them: an
-/// approximation of a camera with some size, so the near plane does not reach a wall.
+/// Places the camera `distance` behind the eye and `rise` above that point. Adds `orbit` degrees to
+/// the yaw before computing the desired position. Traces the central ray and four rays offset by
+/// `SPREAD`, then stops `CLEARANCE` short of the nearest hit. This approximates a camera volume to
+/// reduce near-plane clipping.
 pub fn behind(sim: &Sim, from: Pose, distance: f32, rise: f32, orbit: f32) -> Pose {
     let yaw = from.yaw + orbit;
     let (y, p) = (yaw.to_radians(), from.pitch.to_radians());

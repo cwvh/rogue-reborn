@@ -392,7 +392,7 @@ pub struct Thrown {
 pub struct PlayerState {
     /// Whether anyone is playing this slot
     pub active: bool,
-    /// Which join this is, counted over the game: a slot taken by someone new has another
+    /// Join number identifying this occupant. Changes when someone new takes the slot.
     pub joined: u32,
     /// Their side in a team game
     pub side: Option<Side>,

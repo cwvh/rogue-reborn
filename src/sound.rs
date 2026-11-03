@@ -17,14 +17,14 @@ use std::sync::Arc;
 // A blast that reaches the player is felt before it is heard: a low thump in the chest, and
 // then the world goes dull, as it does with ringing ears.
 
-/// The highest sound that gets through when ears are fully stunned, and the highest when they
-/// are fine, in hertz
+/// Low-pass cutoff in hertz when hearing is fully stunned.
 const STUNNED_CUTOFF: f32 = 250.0;
+/// Cutoff in hertz for clear hearing. At or above this cutoff, the filter is bypassed.
 const CLEAR_CUTOFF: f32 = 16000.0;
 
-/// Seconds the ears stay as stunned as the blast made them, and the seconds after that over
-/// which they come back
+/// Seconds to hold the initial hearing-stun strength after a blast.
 const STUN_HOLD: f32 = 4.0;
+/// Seconds for hearing stun to fade after the hold period.
 const STUN_ROLL_OFF: f32 = 4.0;
 
 /// How stunned the ears are (0..1) `seconds` after a blast that stunned them `strength`: just

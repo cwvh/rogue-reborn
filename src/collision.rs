@@ -904,9 +904,7 @@ impl CollisionWorld {
         }
     }
 
-    /// Smallest distance from any wall-like triangle to the body's spheres;
-    /// negative when penetrating. Used by tests.
-    /// The rooms with floors to walk on, each once
+    /// Returns unique room IDs containing walkable floor triangles.
     pub fn rooms_with_floors(&self) -> Vec<u32> {
         let ny = self.walkable_ny();
         let mut rooms: Vec<u32> = self.tris.iter().filter(|t| t.room != NO_ROOM && t.n[1] >= ny).map(|t| t.room).collect();
@@ -965,6 +963,8 @@ impl CollisionWorld {
         worst
     }
 
+    /// Minimum clearance between the body's spheres and triangles that stop the body and are too
+    /// steep to walk on. Negative values indicate penetration.
     pub fn wall_clearance(&self, p: &Player) -> f32 {
         let prm = &self.params;
         let ny_floor = self.walkable_ny();

@@ -19,7 +19,7 @@ use crate::sim::{Event, Input, Side, Sim, TICK};
 
 type V3 = [f32; 3];
 
-/// A player as a snapshot had them, or as they are shown between two
+/// A player as shown in one snapshot or interpolated between two snapshots.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Seen {
     pub slot: usize,
@@ -29,7 +29,7 @@ pub struct Seen {
     pub dead: Option<f32>,
     pub crouched: bool,
     pub peek: Option<Peek>,
-    /// Which join this is (`PlayerState::joined`)
+    /// Occupant's join number, copied from `PlayerState::joined`.
     pub joined: u32,
 }
 
@@ -52,8 +52,8 @@ pub struct Frame {
 /// stand still for want of one in 1% of frames at 100 ms, and never on the LAN.
 pub const VIEW_DELAY: f64 = 1.5;
 
-/// How many snapshots are kept to be the difference from. It is more than the server keeps, so
-/// that whichever it picks is here.
+/// Number of snapshots retained as possible delta bases. Retains more than the server does so a
+/// base chosen by the server is still available here.
 const REMEMBERED: usize = 192;
 
 /// The most snapshots kept to look back through
@@ -101,8 +101,7 @@ pub struct Client {
     pub snapshots: u32,
     /// The other players in the latest snapshots, by server tick
     history: VecDeque<(u32, Frame)>,
-    /// The latest snapshots received, without their events: what the server may say a snapshot
-    /// is the difference from
+    /// Recent snapshots retained for decoding deltas. Events are excluded.
     received: VecDeque<Snapshot>,
     /// Parts of snapshots too big for a datagram
     parts: Parts,
@@ -110,9 +109,10 @@ pub struct Client {
     wish: Option<Side>,
     /// How many snapshot intervals behind the newest others are shown (`VIEW_DELAY`)
     view_delay: f64,
-    /// Frames drawn, and those that wanted a moment past the newest snapshot, so that what moves
-    /// stood still
+    /// Number of `view` calls.
     pub frames: u32,
+    /// Number of `view` calls past the newest snapshot. Moving objects hold their state from that
+    /// snapshot.
     pub starved: u32,
     /// What the server has sent, kept for a recording
     tape: Option<Vec<Vec<u8>>>,
@@ -264,9 +264,9 @@ impl Client {
         Some(snap)
     }
 
-    /// One tick of the client's game, with what the player did in it. Their player moves at once;
-    /// the server is told; and whatever it has said is put into `sim`. Returns what has happened
-    /// that is news.
+    /// Processes server updates, predicts one tick of local input and sends input to the server.
+    /// Returns newly received events. While disconnected, only attempts to connect and returns no
+    /// events.
     pub fn tick(&mut self, now: f64, link: &mut impl Link, sim: &mut Sim, input: Input) -> Vec<Event> {
         if self.status != Status::Connected {
             self.connect(now, link);
@@ -333,9 +333,9 @@ impl Client {
         }
     }
 
-    /// What moves, as it is shown at time `now`: a little behind the newest snapshot,
-    /// moving smoothly between the two that surround that moment, however unevenly they came.
-    /// Call it once a frame.
+    /// Returns a delayed view of players, characters and grenades at client time `now`. The view
+    /// lags behind the newest snapshot and interpolates between snapshots to smooth uneven arrival
+    /// times. Call once per frame.
     pub fn view(&mut self, now: f64) -> Frame {
         let Some(newest) = self.history.back().map(|h| h.0) else { return Frame::default() };
         let interval = match self.history.len() {
