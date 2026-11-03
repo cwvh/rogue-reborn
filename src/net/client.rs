@@ -334,7 +334,9 @@ impl Client {
         for input in &inputs {
             sim.predict(self.slot, input, TICK);
         }
-        if let (Some(b), false) = (before, was_dead) {
+        // Nor is falling dead where the server says, though the player's own copy ran on a tick
+        let dead = mine.respawn_at.is_some();
+        if let (Some(b), false) = (before, was_dead || dead) {
             let a = sim.players[self.slot].player.pos;
             self.correction = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
         }

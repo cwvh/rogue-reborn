@@ -95,8 +95,8 @@ fn main() {
     println!("{:<22} {:>9} {:>9} {:>9} {:>9} {:>8} {:>8} {:>8} {:>8}",
         "players", "shot LAN", "shot net", "died LAN", "died net", "fixes", "worst", "down KB", "up KB");
     for (label, f) in &fights {
-        let fixes: u32 = f.meters.iter().map(|(_, m)| m.fixes).sum();
-        let worst = f.meters.iter().map(|(_, m)| m.worst_fix).fold(0.0, f32::max);
+        let fixes = f.lan.fixes + f.remote.fixes;
+        let worst = f.lan.worst_fix.max(f.remote.worst_fix);
         let down = mean(&f.meters.iter().map(|(_, m)| m.bytes_in).collect::<Vec<_>>());
         println!("{label:<22} {:>9} {:>9} {:>9} {:>9} {:>8.1} {:>8.0} {:>8.1} {:>8.1}",
             ms(mean(&f.lan.shot_delays)), ms(mean(&f.remote.shot_delays)), ms(mean(&f.lan.death_delays)), ms(mean(&f.remote.death_delays)),

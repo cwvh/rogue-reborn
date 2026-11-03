@@ -13,4 +13,6 @@ pub mod server;
 pub mod setup;
 
 #[cfg(test)]
+mod fairness;
+#[cfg(test)]
 mod tests;

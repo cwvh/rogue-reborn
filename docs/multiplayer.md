@@ -110,7 +110,9 @@ First findings (60 seconds a row):
 - The gap is about 40 units on the LAN, 60 to 70 for a player at 100 to 150 ms.
 - Being told of one's own shot takes about 43 ms on the LAN, 160 ms at 100 ms; of one's death,
   about 26 ms and 76 ms.
-- The server moves a player from where they predicted less than once a minute.
+- The server moves a player from where they predicted almost never. (Counted over whole
+  games, there seemed to be ten a minute; all were players dying, whose own copy ran on a tick
+  before the server's word came. A death is no longer counted as a fix.)
 - 16 players take about 92 KB a second of the host's upload, about 0.75 Mbit/s, and each client
   about 5 KB a second.
 
@@ -118,6 +120,23 @@ First findings (60 seconds a row):
 
 Tests that hold the lab's numbers once we know what is good. For example: "at 100 ms each way,
 the server agrees with at least 95% of hits."
+
+How it is done (`net::fairness`): each limit is what the lab measured, with room to spare, and
+its comment gives the figure measured. When tuning makes a figure better, its limit is
+tightened. They hold:
+
+- agreement: 97% on the LAN, 95% at 100 ms;
+- the gap: 55 units on the LAN, 80 at 100 ms;
+- being told of one's shot and death: 60 and 40 ms on the LAN, 190 and 100 ms at 100 ms;
+- fixes: half a fix a minute for each player, none over 50 units;
+- 16 players: 120 KB a second of the host's upload, 9 KB a second for any client;
+- peeker's advantage: 120 ms on the LAN, 190 and 235 ms for a peeker at 100 and 150 ms, 175 ms
+  for a holder at 100 ms;
+- hits behind cover: 30% for a peeker at 100 ms, 33% for a holder at 100 ms.
+
+Other tests hold the rest: Wi-Fi (`players_on_wifi_keep_playing...`), drift, freezes, the size
+of snapshots and recordings. Showing others twice as far in the past (`VIEW_DELAY` 4) fails four
+of the five.
 
 More realistic conditions for them and the lab:
 
@@ -189,7 +208,7 @@ Not done yet: a way to watch a recording, from any player's eyes.
 2. Record network games, on the server and on the client. Done (`net::record`).
 3. The lab. Done, with bots fighting everyone for themselves until they know their side.
 4. Burst loss and latency spikes. Done, with freezes and drifting clocks.
-5. Tests that hold the lab's numbers.
+5. Tests that hold the lab's numbers. Done (`net::fairness`).
 
 ## The original's match flow
 

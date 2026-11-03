@@ -94,9 +94,11 @@ pub struct Peer {
     ran: u64,
     /// For the lab: what was on screen as each of the latest inputs was sent
     shown: VecDeque<Shown>,
-    /// For the lab: how many of their own shots and deaths they have been told of
+    /// For the lab: how many of their own shots and deaths they have been told of, and how
+    /// many snapshots have come
     told_shots: usize,
     told_deaths: usize,
+    snapshots: u32,
 }
 
 /// What a player's screen showed as they sent an input
@@ -135,6 +137,9 @@ pub struct Tally {
     pub shot_delays: Vec<f32>,
     /// Seconds from dying on the server to being told
     pub death_delays: Vec<f32>,
+    /// Times the server moved this player from where they predicted, and the furthest (units)
+    pub fixes: u32,
+    pub worst_fix: f32,
 }
 
 impl Tally {
@@ -153,6 +158,8 @@ impl Tally {
         self.behind += o.behind;
         self.shot_delays.extend(&o.shot_delays);
         self.death_delays.extend(&o.death_delays);
+        self.fixes += o.fixes;
+        self.worst_fix = self.worst_fix.max(o.worst_fix);
     }
 }
 
@@ -216,7 +223,7 @@ impl Game {
         let client = Client::new(self.server_link.addr(), 1000 + self.peers.len() as u32, build);
         self.peers.push(Peer {
             client, link, sim: None, script: Box::new(script), bot: None, sees: None, ticks: 0, on: true, events: Vec::new(),
-            recorder: None, frames: Vec::new(), view: None, remote: false, clock: 1.0, frozen: None, ran: self.steps, shown: VecDeque::new(), told_shots: 0, told_deaths: 0,
+            recorder: None, frames: Vec::new(), view: None, remote: false, clock: 1.0, frozen: None, ran: self.steps, shown: VecDeque::new(), told_shots: 0, told_deaths: 0, snapshots: 0,
         });
         self.peers.len() - 1
     }
@@ -329,6 +336,14 @@ impl Game {
                 let bodies = view.players.iter().filter(|s| s.0 != slot && s.3.is_none())
                     .map(|&(i, feet, _, _)| (i, feet, sim.players.get(i).is_some_and(|q| q.player.crouched))).collect();
                 p.shown.push_back(Shown { seq: p.client.last_seq(), sent: now, eye: sim.eye(slot), bodies });
+                // A snapshot came this tick, and moved them
+                let fix = p.client.correction;
+                if p.client.snapshots != p.snapshots && fix > 1.0 {
+                    let t = lab.tally(slot);
+                    t.fixes += 1;
+                    t.worst_fix = t.worst_fix.max(fix);
+                }
+                p.snapshots = p.client.snapshots;
                 while p.shown.len() > SHOWN {
                     p.shown.pop_front();
                 }
