@@ -116,7 +116,8 @@ mod tests {
         sim.set_doors_open(1.0);
         sim.npcs[0].pos[0] += 500.0;
         sim.add_player([0.0; 3]);
-        sim.thrown.push(crate::sim::Thrown { grenade: crate::grenade::Grenade::thrown([0.0; 3], [0.0, 1.0, 0.0], 0.5, [0.0; 3]), owner: 0 });
+        let by = sim.occupant(0);
+        sim.thrown.push(crate::sim::Thrown { grenade: crate::grenade::Grenade::thrown([0.0; 3], [0.0, 1.0, 0.0], 0.5, [0.0; 3]), owner: 0, by, side: None });
 
         sim.new_round(5);
         assert!(sim.broken_at.iter().all(Option::is_none));

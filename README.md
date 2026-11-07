@@ -171,8 +171,8 @@ who dies comes back after 3.7 seconds at the spawn point farthest from the other
 ### Team games and rounds
 
 ```
-rr --host --level citystreet_large --first-person --textured
-rr --connect HOST:27960 --side blue --first-person --textured
+rr --host --level citystreet_large --name "JOHN DOE" --first-person --textured
+rr --connect HOST:27960 --side blue --name "[RAINBOW] Pie4Foo" --first-person --textured
 ```
 
 `rr --host` starts a Team Survival server and joins it as the host. Between rounds everyone
@@ -190,7 +190,10 @@ citystreet_large --teams --rounds`, starts each round by itself instead.
   without. A round starts with a 5 second countdown, from the host or once both sides have
   someone. Everyone is put back in their base and held for 2 seconds, then let go. The round
   lasts 3 minutes (`--round-time SECONDS`, 0 for no limit). It ends when one side is left, or in
-  a draw when the time runs out or no one is left. Then 8 seconds of results, and the lobby.
+  a draw when the time runs out or no one is left. After a moment, everyone sees the results
+  screen: each player's kills, hit percentage, rounds fired and taken, and whom they killed.
+  When all have pressed continue, or the host takes them, it is back to the lobby.
+- `--name` on `rr` and `rrbot` asks for a name; without one a player is "PLAYER n".
 - A team game has no terrorists.
 
 ### How it stays fair

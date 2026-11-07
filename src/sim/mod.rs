@@ -329,12 +329,14 @@ pub enum Event {
     Blast { point: V3, normal: V3, surface: Surface, on_surface: bool, seed: u64 },
     /// What a blast did to a player: how hard it shook them, and how white it made their view
     PlayerBlast { player: usize, shake: f32, veil: f32 },
-    /// A player died: who killed them (none if they did it to themselves) and how
-    Kill { killer: Option<usize>, victim: usize, cause: Cause },
+    /// A player died: who killed them (none if they did it to themselves) and how. Each is named
+    /// as they were then, by join number and name, since the event may arrive after they have
+    /// left and someone else has the slot.
+    Kill { killer: Option<usize>, victim: usize, cause: Cause, killer_joined: u32, victim_joined: u32, killer_name: String, victim_name: String },
     /// A player said something. The server makes these, never the game itself. `dead` if they
     /// were dead in a round, when only the dead hear them, so that they cannot call out to the
     /// living.
-    Chat { player: usize, text: String, dead: bool },
+    Chat { player: usize, name: String, text: String, dead: bool },
 }
 
 /// FNV-1a, a simple hash that gives the same answer on every machine
@@ -385,11 +387,61 @@ pub struct Config {
     pub culling: bool,
 }
 
-/// A grenade in flight, and who threw it
+/// A grenade in flight, and who threw it: the slot, and the thrower as they were when they threw
+/// it, since they may leave and someone else take the slot before it goes off
 #[derive(Clone, Debug)]
 pub struct Thrown {
     pub grenade: Grenade,
     pub owner: usize,
+    pub by: Occupant,
+    pub side: Option<Side>,
+}
+
+/// Whoever has a slot: the slot and their join number, which no one else in it has
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Occupant {
+    pub slot: usize,
+    pub joined: u32,
+}
+
+/// What a player did in a round, while counting is open (`Sim::open_round`)
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RoundStats {
+    pub kills: u32,
+    /// Bullets fired
+    pub fired: u32,
+    /// Their bullets that struck someone living
+    pub hits: u32,
+    /// Bullets that struck them while alive
+    pub taken: u32,
+}
+
+impl RoundStats {
+    /// Hits as a percentage of rounds fired, rounded down
+    pub fn hit_percent(&self) -> u32 {
+        (self.hits as u64 * 100).checked_div(self.fired as u64).unwrap_or(0).min(100) as u32
+    }
+}
+
+/// How a player ended a round. Wounded and incapacitated wait for the original's hurt rules.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Ending {
+    #[default]
+    Alive,
+    Killed,
+}
+
+/// Someone who played a round: everyone in the game when it began, whether they stay or not
+#[derive(Clone, Debug, PartialEq)]
+pub struct Participant {
+    pub who: Occupant,
+    pub side: Option<Side>,
+    /// They left before the round was decided
+    pub left: bool,
+    pub end: Ending,
+    pub stats: RoundStats,
+    /// Who killed them, if a participant did
+    pub killed_by: Option<Occupant>,
 }
 
 /// One player: their body, weapon, grenades and where they are in the level
@@ -510,6 +562,14 @@ pub struct Sim {
 
     pub players: Vec<PlayerState>,
     pub thrown: Vec<Thrown>,
+    /// Who played the round under way, whether what they do counts yet, and when (sim time)
+    /// counting opened, which is when the round's players were let go
+    pub round: Vec<Participant>,
+    pub counting: bool,
+    pub opened: Option<f32>,
+    /// Players' names, the ones who left this round too, as the server gives them. Only for
+    /// what the game says on screen and in its events, so not in the checksum.
+    pub names: Vec<(Occupant, String)>,
     /// What is solid in the world right now (see `PlayerState::collision_rooms`)
     applied_rooms: Option<Vec<SolidRoom>>,
 
@@ -575,6 +635,10 @@ impl Sim {
             loadout: (config.ammo, config.reserve, config.grenades),
             players: Vec::new(),
             thrown: Vec::new(),
+            round: Vec::new(),
+            counting: false,
+            opened: None,
+            names: Vec::new(),
             applied_rooms: None,
             characters,
             npcs,
@@ -675,10 +739,62 @@ impl Sim {
 
     /// A player leaves. Their slot is free for the next to join, and their grenades stay in the air.
     pub fn remove_player(&mut self, slot: usize) {
-        if let Some(p) = self.players.get_mut(slot) {
-            p.active = false;
+        if !self.players.get(slot).is_some_and(|p| p.active) {
+            return;
         }
+        // They stay in the round's table, as they were when they went
+        let who = self.occupant(slot);
+        let end = self.ending(slot);
+        if let Some(p) = self.round.iter_mut().find(|p| p.who == who && !p.left) {
+            (p.left, p.end) = (true, end);
+        }
+        self.players[slot].active = false;
         self.apply_union_rooms();
+    }
+
+    pub fn occupant(&self, slot: usize) -> Occupant {
+        Occupant { slot, joined: self.players.get(slot).map_or(0, |p| p.joined) }
+    }
+
+    /// Whether `who` still has their slot
+    fn present(&self, who: Occupant) -> bool {
+        self.players.get(who.slot).is_some_and(|p| p.active && p.joined == who.joined)
+    }
+
+    fn ending(&self, slot: usize) -> Ending {
+        if self.players[slot].respawn_at.is_some() { Ending::Killed } else { Ending::Alive }
+    }
+
+    /// A player's name, as the server gave it, or "PLAYER n"
+    pub fn name_of(&self, who: Occupant) -> String {
+        self.names.iter().find(|(o, _)| *o == who).map_or_else(|| format!("PLAYER {}", who.slot + 1), |(_, n)| n.clone())
+    }
+
+    /// From now on, what the round's players do counts
+    pub fn open_round(&mut self) {
+        self.counting = true;
+        self.opened = Some(self.time);
+    }
+
+    /// The round is decided: nothing counts any more, and how each player ended is kept
+    pub fn close_round(&mut self) {
+        self.counting = false;
+        for i in 0..self.round.len() {
+            let who = self.round[i].who;
+            if !self.round[i].left && self.present(who) {
+                self.round[i].end = self.ending(who.slot);
+            }
+        }
+    }
+
+    /// Change what `who` did in this round, if they played it and counting is open
+    fn count(&mut self, who: Occupant, change: impl FnOnce(&mut Participant)) {
+        if !self.counting {
+            return;
+        }
+        if let Some(p) = self.round.iter_mut().find(|p| p.who == who) {
+            change(p);
+        }
     }
 
     /// Where a player on `side` starts: the next of their base's places, by how many are on
@@ -736,6 +852,16 @@ impl Sim {
             let p = &mut self.players[i];
             (p.side, p.look, p.kills, p.deaths, p.joined) = (side, look, kills, deaths, joined);
         }
+        // Who plays this round: everyone here now. Counting waits for them to be let go.
+        self.round = (0..self.players.len()).filter(|&i| self.players[i].active)
+            .map(|i| Participant { who: self.occupant(i), side: self.players[i].side, left: false, end: Ending::Alive, stats: RoundStats::default(), killed_by: None })
+            .collect();
+        self.counting = false;
+        self.opened = None;
+        // The names of those who left are needed no more: their grenades went with the last round
+        let here: Vec<bool> = self.names.iter().map(|(o, _)| self.present(*o)).collect();
+        let mut keep = here.into_iter();
+        self.names.retain(|_| keep.next().unwrap_or(false));
         self.apply_union_rooms();
     }
 
@@ -882,8 +1008,26 @@ impl Sim {
             }
             h.u32(p.current_room.map_or(u32::MAX, |r| r as u32));
         }
+        h.u32(self.counting as u32);
+        h.opt_f32(self.opened);
+        for p in &self.round {
+            h.u32(p.who.slot as u32);
+            h.u32(p.who.joined);
+            h.u32(p.side.map_or(0, |s| 1 + s.index() as u32) + 4 * p.left as u32 + 8 * (p.end == Ending::Killed) as u32);
+            for v in [p.stats.kills, p.stats.fired, p.stats.hits, p.stats.taken] {
+                h.u32(v);
+            }
+            match p.killed_by {
+                None => h.u32(u32::MAX),
+                Some(o) => { h.u32(o.slot as u32); h.u32(o.joined); }
+            }
+        }
         for t in &self.thrown {
             let g = &t.grenade;
+            h.u32(t.by.slot as u32);
+            h.u32(t.by.joined);
+            // The side it was thrown from says whom it may hurt
+            h.u32(t.side.map_or(0, |s| 1 + s.index() as u32));
             h.v3(g.pos);
             h.v3(g.vel);
             h.f32(g.fuse);
@@ -1306,7 +1450,8 @@ impl Sim {
                         Some(d) => { let d = (d - grenade::RADIUS - 1.0).max(0.0); [eye[0] + to[0] * d, eye[1] + to[1] * d, eye[2] + to[2] * d] }
                         None => want,
                     };
-                    self.thrown.push(Thrown { grenade: Grenade::thrown(from, aim, th.charge, [0.0; 3]), owner: slot });
+                    let (by, side) = (self.occupant(slot), self.players[slot].side);
+                    self.thrown.push(Thrown { grenade: Grenade::thrown(from, aim, th.charge, [0.0; 3]), owner: slot, by, side });
                     ev.push(Event::Log(format!("t={now:.2} threw a grenade at {:.0}% power", th.charge * 100.0)));
                 }
                 self.players[slot].throw = Some(th);
@@ -1339,6 +1484,8 @@ impl Sim {
         p.flash_until = now + 0.05;
         let noise = (p.player.pos, self.reach_of(PLAYER_SHOT), terrorist::Noise::Sound);
         self.noises.push(noise);
+        let who = self.occupant(slot);
+        self.count(who, |p| p.stats.fired += 1);
 
         let eye = self.eye(slot);
         let f = forward_cam;
@@ -1469,9 +1616,14 @@ impl Sim {
             let point = [eye[0] + dir[0] * dist, eye[1] + dir[1] * dist, eye[2] + dir[2] * dist];
             let from = self.placement(victim).facing_of_shot(dir);
             let (attacker, cause) = match by {
-                Shooter::Player(a) => (Some(a), if part == combat::BodyPart::Head { Cause::HeadShot } else { Cause::Shot }),
+                Shooter::Player(a) => (Some(self.occupant(a)), if part == combat::BodyPart::Head { Cause::HeadShot } else { Cause::Shot }),
                 Shooter::Character(_) => (None, Cause::Terrorist),
             };
+            if let Some(a) = attacker {
+                self.count(a, |p| p.stats.hits += 1);
+            }
+            let struck = self.occupant(victim);
+            self.count(struck, |p| p.stats.taken += 1);
             let effect = self.bullet_effect(ammo.as_deref(), part, dist);
             let hp = self.players[victim].hp;
             let amount = combat::bullet_damage(effect, part, hp, PLAYER_HP / crate::gfcm::wounds_to_fall(PLAYER_STAMINA) as f32);
@@ -1516,9 +1668,12 @@ impl Sim {
                 let result = self.npcs[i].health.apply_hit(&hit, effect, now, (self.rng >> 33) as u32, how);
                 self.players[slot].target_hp = Some(self.npcs[i].health.hp);
                 ev.push(Event::Log(format!("t={now:.2} shot hit character {i}: {:?} from the {:?}, {:?}, hp now {}", hit.part, hit.facing, result, self.npcs[i].health.hp)));
+                let who = self.occupant(slot);
+                self.count(who, |p| p.stats.hits += 1);
                 let text = match result {
                     HitResult::Killed => {
                         self.players[slot].kills += 1;
+                        self.count(who, |p| p.stats.kills += 1);
                         if hit.part == combat::BodyPart::Head { "HEAD SHOT KILL".to_string() } else { "KILLED".to_string() }
                     }
                     _ => format!("HIT {:?}", hit.part).to_uppercase(),
@@ -1603,7 +1758,7 @@ impl Sim {
     /// Grenades in the air: they bounce off the level and go off when the fuse runs out
     fn update_grenades(&mut self, dt: f32, ev: &mut Vec<Event>) {
         let now = self.time;
-        let mut blasts: Vec<(V3, usize)> = Vec::new();
+        let mut blasts: Vec<(V3, Occupant, Option<Side>)> = Vec::new();
         let mut thrown = std::mem::take(&mut self.thrown);
         for t in thrown.iter_mut() {
             let g = &mut t.grenade;
@@ -1639,18 +1794,21 @@ impl Sim {
                 ev.push(Event::Sound { name: name.to_string(), at: Some(b.point), gain: (b.speed / 500.0).clamp(0.25, 1.0) });
             }
             if g.goes_off() {
-                blasts.push((g.pos, t.owner));
+                blasts.push((g.pos, t.by, t.side));
             }
         }
         thrown.retain(|t| !t.grenade.goes_off());
         self.thrown = thrown;
-        for (c, owner) in blasts {
-            self.blast(c, owner, ev);
+        for (c, by, side) in blasts {
+            self.blast(c, by, side, ev);
         }
     }
 
     /// A grenade thrown by `owner` goes off at `c`
-    fn blast(&mut self, c: V3, owner: usize, ev: &mut Vec<Event>) {
+    fn blast(&mut self, c: V3, by: Occupant, side: Option<Side>, ev: &mut Vec<Event>) {
+        // The thrower may have left, and someone else taken the slot
+        let owner = by.slot;
+        let theirs = self.present(by);
         let now = self.time;
         // The surface it went off against, the nearest of the six directions
         let mut near: Option<(f32, V3, V3, Option<usize>)> = None;
@@ -1686,15 +1844,14 @@ impl Sim {
             let from = place.facing_of_shot(unit3([chest[0] - c[0], chest[1] - c[1], chest[2] - c[2]]));
             let how = self.npcs[i].posture();
             let result = self.npcs[i].health.apply_blast(100.0 * strength, from, now, how);
-            if let Some(p) = self.players.get_mut(owner) {
-                p.target_hp = Some(self.npcs[i].health.hp);
+            if theirs {
+                self.players[owner].target_hp = Some(self.npcs[i].health.hp);
             }
             ev.push(Event::Log(format!("t={now:.2} grenade hit character {i} at {:.0} units: {result:?}, hp now {}", dist3(c, chest), self.npcs[i].health.hp)));
             if matches!(result, HitResult::Killed) {
-                if let Some(p) = self.players.get_mut(owner) {
-                    p.kills += 1;
-                }
-                if owner < self.players.len() {
+                self.count(by, |p| p.stats.kills += 1);
+                if theirs {
+                    self.players[owner].kills += 1;
                     self.announce(owner, "GRENADE KILL", 1.2);
                 }
             }
@@ -1705,7 +1862,10 @@ impl Sim {
         // Players are hurt as characters are, if they can be
         if self.pvp {
             for i in 0..self.players.len() {
-                if !self.players[i].active || self.players[i].respawn_at.is_some() || !self.may_hurt(owner, i) {
+                // The thrower is always hurt by their own. Anyone else, the newcomer in their
+                // slot included, by the friendly fire rule for the side they threw from.
+                let hurts = self.occupant(i) == by || self.friendly_fire || side.is_none() || side != self.players[i].side;
+                if !self.players[i].active || self.players[i].respawn_at.is_some() || !hurts {
                     continue;
                 }
                 let feet = self.players[i].player.pos;
@@ -1716,7 +1876,7 @@ impl Sim {
                     continue;
                 }
                 let from = self.placement(i).facing_of_shot(unit3([chest[0] - c[0], chest[1] - c[1], chest[2] - c[2]]));
-                self.hurt_player(i, Some(owner), PLAYER_HP * strength, chest, Wound::Blast(from), Cause::Grenade, ev);
+                self.hurt_player(i, Some(by), PLAYER_HP * strength, chest, Wound::Blast(from), Cause::Grenade, ev);
             }
         }
 
@@ -1851,8 +2011,12 @@ impl Sim {
     /// Take health from a player, who flinches with the `wound`. If it is all of it they die and
     /// fall for it instead, and `attacker` (who is not the victim) is credited, with the kill on
     /// their screen.
-    fn hurt_player(&mut self, victim: usize, attacker: Option<usize>, amount: f32, at: V3, wound: Wound, cause: Cause, ev: &mut Vec<Event>) {
+    fn hurt_player(&mut self, victim: usize, attacker: Option<Occupant>, amount: f32, at: V3, wound: Wound, cause: Cause, ev: &mut Vec<Event>) {
         let now = self.time;
+        let struck = self.occupant(victim);
+        // Who is credited: someone else, and they may have left since they threw
+        let attacker = attacker.filter(|&a| a != struck);
+        let theirs = attacker.filter(|&a| self.present(a)).map(|a| a.slot);
         let p = &mut self.players[victim];
         if p.respawn_at.is_some() {
             return;
@@ -1863,12 +2027,12 @@ impl Sim {
         let killed = p.hp <= 0.0;
         let hp = p.hp;
         let pos = p.player.pos;
-        if let Some(a) = attacker.filter(|&a| a != victim) {
+        if let Some(a) = theirs {
             self.players[a].target_hp = Some(hp);
         }
         next_rng(&mut self.rng);
         let roll = (self.rng >> 40) as u32;
-        ev.push(Event::Log(format!("t={now:.2} player {victim} hurt by {amount:.0}{}, hp now {hp:.0}", attacker.map_or(String::new(), |a| format!(" from player {a}")))));
+        ev.push(Event::Log(format!("t={now:.2} player {victim} hurt by {amount:.0}{}, hp now {hp:.0}", attacker.map_or(String::new(), |a| format!(" from player {}", a.slot)))));
         ev.push(Event::Sound { name: "C_BHTHT.WAV".to_string(), at: Some(at), gain: 1.0 });
         ev.push(Event::Sound { name: voice(killed, roll), at: Some(pos), gain: 1.0 });
         let p = &mut self.players[victim];
@@ -1892,22 +2056,35 @@ impl Sim {
         p.throw = None;
         p.reload_until = None;
         p.gun_trigger = false;
-        match attacker.filter(|&a| a != victim) {
+        match attacker {
             Some(a) => {
-                self.players[a].kills += 1;
-                let text = match cause {
-                    Cause::HeadShot => "HEAD SHOT KILL",
-                    Cause::Shot | Cause::Terrorist => "KILLED",
-                    Cause::Grenade => "GRENADE KILL",
-                };
-                self.announce(a, text, 1.2);
-                self.announce(victim, &format!("KILLED BY PLAYER {}", a + 1), RESPAWN_SECONDS);
+                self.count(a, |p| p.stats.kills += 1);
+                self.count(struck, |p| p.killed_by = Some(a));
+                if let Some(slot) = theirs {
+                    self.players[slot].kills += 1;
+                    let text = match cause {
+                        Cause::HeadShot => "HEAD SHOT KILL",
+                        Cause::Shot | Cause::Terrorist => "KILLED",
+                        Cause::Grenade => "GRENADE KILL",
+                    };
+                    self.announce(slot, text, 1.2);
+                }
+                let by = self.name_of(a);
+                self.announce(victim, &format!("KILLED BY {by}"), RESPAWN_SECONDS);
             }
             None if cause == Cause::Terrorist => self.announce(victim, "KILLED BY A TERRORIST", RESPAWN_SECONDS),
             None => self.announce(victim, "YOU KILLED YOURSELF", RESPAWN_SECONDS),
         }
         ev.push(Event::Log(format!("t={now:.2} player {victim} died")));
-        ev.push(Event::Kill { killer: attacker.filter(|&a| a != victim), victim, cause });
+        ev.push(Event::Kill {
+            killer: attacker.map(|a| a.slot),
+            victim,
+            cause,
+            killer_joined: attacker.map_or(0, |a| a.joined),
+            victim_joined: struck.joined,
+            killer_name: attacker.map_or(String::new(), |a| self.name_of(a)),
+            victim_name: self.name_of(struck),
+        });
     }
 
     /// A dead player comes back at the spawn point farthest from the players still standing, with
@@ -1989,6 +2166,11 @@ impl Sim {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whether `killer` killed `victim` this way, whatever they were called
+    fn killed(events: &[Event], killer: Option<usize>, victim: usize, cause: Cause) -> bool {
+        events.iter().any(|e| matches!(e, Event::Kill { killer: k, victim: v, cause: c, .. } if (*k, *v, *c) == (killer, victim, cause)))
+    }
     use crate::collision::Params;
 
     /// A sim of the demo room with nobody in it but the player
@@ -2345,7 +2527,7 @@ mod tests {
         // Level with the eyes is the head, and a head shot kills
         let mut sim = duel();
         let events = sim.tick(&[aim(0.0), holding()], TICK);
-        assert!(events.contains(&Event::Kill { killer: Some(0), victim: 1, cause: Cause::HeadShot }));
+        assert!(killed(&events, Some(0), 1, Cause::HeadShot));
         // With a Rainbow operative's cry, not a terrorist's
         assert!(events.iter().any(|e| matches!(e, Event::Sound { name, .. } if name.starts_with("English/tm_inc"))));
         assert!(!events.iter().any(|e| matches!(e, Event::Sound { name, .. } if name.starts_with("English/re_"))));
@@ -2386,7 +2568,7 @@ mod tests {
         let from = sim.eye(0);
         let pitch = (target[1] - from[1]).atan2((target[2] - from[2]).abs()).to_degrees();
         let events = sim.tick(&[aim(pitch), peeking], TICK);
-        assert!(events.contains(&Event::Kill { killer: Some(0), victim: 1, cause: Cause::HeadShot }), "{events:?}");
+        assert!(killed(&events, Some(0), 1, Cause::HeadShot), "{events:?}");
     }
 
     /// A duel between two players with the game's model, to be hit where the posed body is.
@@ -2563,15 +2745,156 @@ mod tests {
     #[test]
     fn a_grenade_hurts_the_players_it_reaches_and_credits_the_thrower() {
         let mut sim = duel();
-        sim.thrown.push(Thrown { grenade: Grenade { pos: [0.0, 100.0, -90.0], vel: [0.0; 3], fuse: 0.0, spin: 0.0, at_rest: true }, owner: 0 });
+        let by = sim.occupant(0);
+        sim.thrown.push(Thrown { grenade: Grenade { pos: [0.0, 100.0, -90.0], vel: [0.0; 3], fuse: 0.0, spin: 0.0, at_rest: true }, owner: 0, by, side: None });
         let events = sim.tick(&[holding(), holding()], TICK);
         assert!(events.iter().any(|e| matches!(e, Event::Blast { .. })));
         assert_eq!(sim.players[1].hp, 0.0);
         assert_eq!(sim.players[0].kills, 1);
-        assert!(events.contains(&Event::Kill { killer: Some(0), victim: 1, cause: Cause::Grenade }));
-        assert!(events.contains(&Event::Kill { killer: None, victim: 0, cause: Cause::Grenade }));
+        assert!(killed(&events, Some(0), 1, Cause::Grenade));
+        assert!(killed(&events, None, 0, Cause::Grenade));
         // So close that the thrower is caught too: that is a death, but not a kill
         assert_eq!((sim.players[0].kills, sim.players[0].deaths), (1, 1));
+    }
+
+    /// Everyone here plays a round, and what they do counts from now
+    fn counting(sim: &mut Sim) {
+        sim.round = (0..sim.players.len()).filter(|&i| sim.players[i].active)
+            .map(|i| Participant { who: sim.occupant(i), side: sim.players[i].side, left: false, end: Ending::Alive, stats: RoundStats::default(), killed_by: None })
+            .collect();
+        sim.open_round();
+    }
+
+    fn stats(sim: &Sim, i: usize) -> RoundStats {
+        sim.round[i].stats
+    }
+
+    /// One shot at `pitch` from player 0, then long enough for the gun to fire again
+    fn shoot_once(sim: &mut Sim, pitch: f32) {
+        sim.tick(&[aim(pitch), holding()], TICK);
+        for _ in 0..10 {
+            sim.tick(&[holding(), holding()], TICK);
+        }
+    }
+
+    #[test]
+    fn a_round_counts_rounds_fired_hits_taken_and_kills_only_while_counting_is_open() {
+        let mut sim = duel();
+        // Before counting opens, nothing counts
+        shoot_once(&mut sim, 8.0);
+        assert!(sim.round.is_empty());
+        counting(&mut sim);
+        // Over their head: fired, not a hit
+        shoot_once(&mut sim, 8.0);
+        assert_eq!(stats(&sim, 0), RoundStats { fired: 1, ..RoundStats::default() });
+        // In the chest: a hit for one, a bullet taken for the other
+        shoot_once(&mut sim, -14.6);
+        assert_eq!(stats(&sim, 0), RoundStats { fired: 2, hits: 1, ..RoundStats::default() });
+        assert_eq!(stats(&sim, 1), RoundStats { taken: 1, ..RoundStats::default() });
+        // In the head: a kill, and who did it
+        shoot_once(&mut sim, 0.0);
+        assert_eq!(stats(&sim, 0), RoundStats { kills: 1, fired: 3, hits: 2, taken: 0 });
+        assert_eq!(sim.round[1].killed_by, Some(sim.occupant(0)));
+        assert_eq!(stats(&sim, 0).hit_percent(), 66);
+        // The body takes no more: the bullet goes past it
+        shoot_once(&mut sim, 0.0);
+        assert_eq!((stats(&sim, 0).hits, stats(&sim, 1).taken), (2, 2));
+        // Decided: how they ended is kept, and nothing counts after
+        sim.close_round();
+        assert_eq!((sim.round[0].end, sim.round[1].end), (Ending::Alive, Ending::Killed));
+        shoot_once(&mut sim, 8.0);
+        assert_eq!(stats(&sim, 0).fired, 4);
+    }
+
+    #[test]
+    fn a_hit_on_a_teammate_counts_only_if_it_could_hurt_them_and_god_mode_still_counts() {
+        // Friendly fire off: the bullet passes through a teammate, a miss
+        let mut sim = duel();
+        sim.players[0].side = Some(Side::Blue);
+        sim.players[1].side = Some(Side::Blue);
+        sim.friendly_fire = false;
+        counting(&mut sim);
+        shoot_once(&mut sim, -14.6);
+        assert_eq!((stats(&sim, 0).fired, stats(&sim, 0).hits, stats(&sim, 1).taken), (1, 0, 0));
+        // On, it is a hit, and a teammate killed counts as a kill
+        sim.friendly_fire = true;
+        shoot_once(&mut sim, 0.0);
+        assert_eq!((stats(&sim, 0).hits, stats(&sim, 0).kills, stats(&sim, 1).taken), (1, 1, 1));
+        // In god mode no one is hurt, but the bullet struck
+        let mut sim = duel();
+        sim.god = true;
+        counting(&mut sim);
+        shoot_once(&mut sim, 0.0);
+        assert_eq!(sim.players[1].hp, PLAYER_HP);
+        assert_eq!((stats(&sim, 0).hits, stats(&sim, 1).taken), (1, 1));
+    }
+
+    #[test]
+    fn a_grenade_counts_its_kills_but_no_rounds_and_not_the_thrower_killing_themselves() {
+        let mut sim = duel();
+        counting(&mut sim);
+        let by = sim.occupant(0);
+        sim.thrown.push(Thrown { grenade: Grenade { pos: [0.0, 100.0, -90.0], vel: [0.0; 3], fuse: 0.0, spin: 0.0, at_rest: true }, owner: 0, by, side: None });
+        sim.tick(&[holding(), holding()], TICK);
+        assert_eq!(stats(&sim, 0), RoundStats { kills: 1, ..RoundStats::default() });
+        assert_eq!(stats(&sim, 1), RoundStats::default());
+        assert_eq!((sim.round[0].killed_by, sim.round[1].killed_by), (None, Some(by)));
+    }
+
+    /// The thrower in slot 0 of a duel throws, leaves, and a newcomer on `side` takes the slot
+    /// where the grenade will go off. Player 1 is on Gold.
+    fn thrower_gone(friendly_fire: bool, side: Side) -> (Sim, Occupant) {
+        let mut sim = duel();
+        sim.friendly_fire = friendly_fire;
+        (sim.players[0].side, sim.players[1].side) = (Some(Side::Blue), Some(Side::Gold));
+        counting(&mut sim);
+        let by = sim.occupant(0);
+        sim.names = vec![(by, "Thrower".to_string()), (sim.occupant(1), "Target".to_string())];
+        sim.thrown.push(Thrown { grenade: Grenade { pos: [0.0, 100.0, -90.0], vel: [0.0; 3], fuse: 0.0, spin: 0.0, at_rest: true }, owner: 0, by, side: Some(Side::Blue) });
+        sim.remove_player(0);
+        assert_eq!(sim.add_player([0.0, 0.0, -100.0]), Some(0));
+        sim.players[0].side = Some(side);
+        (sim, by)
+    }
+
+    #[test]
+    fn the_side_a_grenade_was_thrown_from_is_part_of_the_game_state() {
+        // Alike but for that side, and with friendly fire off it decides who is hurt
+        let checksums: Vec<u64> = [None, Some(Side::Blue), Some(Side::Gold)].into_iter().map(|side| {
+            let mut sim = duel();
+            let by = sim.occupant(0);
+            sim.thrown.push(Thrown { grenade: Grenade { pos: [0.0, 100.0, -90.0], vel: [0.0; 3], fuse: 1.0, spin: 0.0, at_rest: true }, owner: 0, by, side });
+            sim.checksum()
+        }).collect();
+        assert_ne!(checksums[0], checksums[1]);
+        assert_ne!(checksums[1], checksums[2]);
+        assert_ne!(checksums[0], checksums[2]);
+    }
+
+    #[test]
+    fn a_grenade_thrown_before_its_owner_left_credits_them_and_not_whoever_has_the_slot() {
+        let (mut sim, by) = thrower_gone(true, Side::Gold);
+        let events = sim.tick(&[holding(), holding()], TICK);
+        // Their kills are theirs, though they have gone
+        assert!(sim.round[0].left);
+        assert_eq!(sim.round[0].stats.kills, 2, "the target and the newcomer");
+        assert_eq!(sim.round[1].killed_by, Some(by));
+        assert_eq!(sim.players[0].kills, 0, "the newcomer is credited");
+        let named: Vec<(&str, &str)> = events.iter().filter_map(|e| match e {
+            Event::Kill { killer_name, victim_name, .. } => Some((killer_name.as_str(), victim_name.as_str())),
+            _ => None,
+        }).collect();
+        assert!(named.contains(&("Thrower", "Target")), "{named:?}");
+        // The newcomer is not the thrower: friendly fire off, one on the thrower's side is spared,
+        // as the thrower would not have been
+        let (mut sim, _) = thrower_gone(false, Side::Blue);
+        sim.tick(&[holding(), holding()], TICK);
+        assert_eq!(sim.players[0].hp, PLAYER_HP);
+        assert_eq!(sim.players[1].hp, 0.0);
+        // and one on the other side is not
+        let (mut sim, _) = thrower_gone(false, Side::Gold);
+        sim.tick(&[holding(), holding()], TICK);
+        assert_eq!(sim.players[0].hp, 0.0);
     }
 
     #[test]

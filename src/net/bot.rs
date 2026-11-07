@@ -40,11 +40,15 @@ const DOOR_SIGHT: f32 = 600.0;
 const DOOR_PRESS: f32 = 170.0;
 const DOOR_AGAIN: f32 = 30.0;
 
-/// A bot is always ready: it says so in each lobby, so that a host need not wait for it
+/// A bot is always ready: it says so in each lobby, and continues from each round's results at
+/// once, so that no one need wait for it
 pub fn say_ready(client: &mut Client) {
     let ready = client.ready.contains(&client.slot());
     if client.round.phase == Phase::Lobby && !ready && client.lobby_waiting().next().is_none() {
         client.lobby(LobbyCommand::Ready(true));
+    }
+    if client.may_continue() {
+        client.lobby(LobbyCommand::Continue);
     }
 }
 

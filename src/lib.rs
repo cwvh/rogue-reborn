@@ -33,3 +33,4 @@ pub mod kit;
 pub mod gfcm;
 pub mod ui;
 pub mod lobby;
+pub mod results;

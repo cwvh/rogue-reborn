@@ -19,20 +19,20 @@ use anyhow::{Context, Result, bail, ensure};
 use crate::bytes::{Before, Reader, Writer};
 use crate::net::client::{Client, Frame};
 use crate::net::link::{Addr, Link};
-use crate::net::proto::{LobbyCommand, Session, Setup, ToServer, read_session, read_setup, side_code, side_from, write_session, write_setup};
+use crate::net::proto::{LobbyCommand, RoundResults, Session, Setup, ToServer, read_results, read_session, read_setup, round_results, side_code, side_from, write_results, write_session, write_setup};
 use crate::net::setup::build_sim;
 use crate::recording::{CHECK_EVERY, Desync};
 use crate::sim::{Input, Side, Sim, TICK};
 
 type V3 = [f32; 3];
 
-const SERVER_MAGIC: &[u8; 8] = b"RRSERV\0\x04";
-const CLIENT_MAGIC: &[u8; 8] = b"RRCLNT\0\x04";
+const SERVER_MAGIC: &[u8; 8] = b"RRSERV\0\x05";
+const CLIENT_MAGIC: &[u8; 8] = b"RRCLNT\0\x05";
 
 /// A change in who plays, between two ticks
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Change {
-    Joined { slot: u8, spawn: V3, side: Option<Side> },
+    Joined { slot: u8, spawn: V3, side: Option<Side>, name: String },
     Left { slot: u8 },
     /// A new round began from this seed (`Sim::new_round`)
     Round { seed: u64 },
@@ -48,6 +48,10 @@ pub enum Change {
     /// The session's settings changed. The sim needs nothing from it: it is kept to show the
     /// lobby.
     Session(Session),
+    /// What players do counts from now (`Sim::open_round`), or no longer (`Sim::close_round`)
+    Counting(bool),
+    /// The round's results as the server sent them, which a replay makes again and compares
+    Results(RoundResults),
 }
 
 /// One tick of the server's game
@@ -84,23 +88,31 @@ impl ServerRecording {
     pub fn step(&self, sim: &mut Sim, n: usize) -> Result<()> {
         let t = &self.ticks[n];
         for change in &t.changes {
-            match *change {
-                Change::Joined { slot, spawn, side } => {
-                    let got = sim.add_player(spawn);
-                    ensure!(got == Some(slot as usize), "player {slot} joined at tick {n}, but the game put them in {got:?}");
-                    sim.players[slot as usize].side = side;
+            match change {
+                Change::Joined { slot, spawn, side, name } => {
+                    let got = sim.add_player(*spawn);
+                    ensure!(got == Some(*slot as usize), "player {slot} joined at tick {n}, but the game put them in {got:?}");
+                    sim.players[*slot as usize].side = *side;
+                    let who = sim.occupant(*slot as usize);
+                    sim.names.push((who, name.clone()));
                 }
-                Change::Left { slot } => sim.remove_player(slot as usize),
-                Change::Round { seed } => sim.new_round(seed),
-                Change::Frozen(on) => sim.frozen = on,
-                Change::SatOut { slot } => sim.sit_out(slot as usize),
-                Change::Side { slot, side } => sim.players[slot as usize].side = side,
-                Change::FriendlyFire(on) => sim.friendly_fire = on,
+                Change::Left { slot } => sim.remove_player(*slot as usize),
+                Change::Round { seed } => sim.new_round(*seed),
+                Change::Frozen(on) => sim.frozen = *on,
+                Change::SatOut { slot } => sim.sit_out(*slot as usize),
+                Change::Side { slot, side } => sim.players[*slot as usize].side = *side,
+                Change::FriendlyFire(on) => sim.friendly_fire = *on,
                 Change::Bases(i) => {
-                    let Some(pair) = sim.base_pairs.get(i as usize) else { bail!("tick {n} starts from bases {i}, which the level lacks") };
+                    let Some(pair) = sim.base_pairs.get(*i as usize) else { bail!("tick {n} starts from bases {i}, which the level lacks") };
                     sim.bases = pair.clone();
                 }
                 Change::Session(_) => {}
+                Change::Counting(true) => sim.open_round(),
+                Change::Counting(false) => sim.close_round(),
+                Change::Results(sent) => {
+                    let made = round_results(sim, sent.number, sent.outcome);
+                    ensure!(made == *sent, "the results of round {} differ at tick {n}: the server sent {sent:?}, and the replay made {made:?}", sent.number);
+                }
             }
         }
         sim.rewind = t.rewind.clone();
@@ -138,45 +150,54 @@ impl ServerRecording {
         for t in &self.ticks {
             w.varint(t.changes.len() as u32);
             for change in &t.changes {
-                match *change {
-                    Change::Joined { slot, spawn, side } => {
+                match change {
+                    Change::Joined { slot, spawn, side, name } => {
                         w.u8(0);
-                        w.u8(slot);
-                        w.v3(spawn);
-                        w.u8(side_code(side));
+                        w.u8(*slot);
+                        w.v3(*spawn);
+                        w.u8(side_code(*side));
+                        w.string(name);
                     }
                     Change::Left { slot } => {
                         w.u8(1);
-                        w.u8(slot);
+                        w.u8(*slot);
                     }
                     Change::Round { seed } => {
                         w.u8(2);
-                        w.u64(seed);
+                        w.u64(*seed);
                     }
                     Change::Frozen(on) => {
                         w.u8(3);
-                        w.bool(on);
+                        w.bool(*on);
                     }
                     Change::SatOut { slot } => {
                         w.u8(4);
-                        w.u8(slot);
+                        w.u8(*slot);
                     }
                     Change::Side { slot, side } => {
                         w.u8(5);
-                        w.u8(slot);
-                        w.u8(side_code(side));
+                        w.u8(*slot);
+                        w.u8(side_code(*side));
                     }
                     Change::FriendlyFire(on) => {
                         w.u8(6);
-                        w.bool(on);
+                        w.bool(*on);
                     }
                     Change::Bases(i) => {
                         w.u8(7);
-                        w.u8(i);
+                        w.u8(*i);
                     }
                     Change::Session(s) => {
                         w.u8(8);
-                        write_session(&mut w, &s);
+                        write_session(&mut w, s);
+                    }
+                    Change::Counting(on) => {
+                        w.u8(9);
+                        w.bool(*on);
+                    }
+                    Change::Results(results) => {
+                        w.u8(10);
+                        write_results(&mut w, results);
                     }
                 }
             }
@@ -215,7 +236,7 @@ impl ServerRecording {
             let mut changes = Vec::new();
             for _ in 0..r.varint()? {
                 changes.push(match r.u8()? {
-                    0 => Change::Joined { slot: r.u8()?, spawn: r.v3()?, side: side_from(r.u8()?)? },
+                    0 => Change::Joined { slot: r.u8()?, spawn: r.v3()?, side: side_from(r.u8()?)?, name: r.string()? },
                     1 => Change::Left { slot: r.u8()? },
                     2 => Change::Round { seed: r.u64()? },
                     3 => Change::Frozen(r.bool()?),
@@ -224,6 +245,8 @@ impl ServerRecording {
                     6 => Change::FriendlyFire(r.bool()?),
                     7 => Change::Bases(r.u8()?),
                     8 => Change::Session(read_session(&mut r)?),
+                    9 => Change::Counting(r.bool()?),
+                    10 => Change::Results(read_results(&mut r)?),
                     k => bail!("no such change as {k}"),
                 });
             }
@@ -269,8 +292,8 @@ impl ServerRecorder {
         ServerRecorder { rec: ServerRecording { build: build.to_string(), setup, spawns, ticks: Vec::new(), checks: Vec::new() }, changes: Vec::new() }
     }
 
-    pub fn joined(&mut self, slot: usize, spawn: V3, side: Option<Side>) {
-        self.changes.push(Change::Joined { slot: slot as u8, spawn, side });
+    pub fn joined(&mut self, slot: usize, spawn: V3, side: Option<Side>, name: &str) {
+        self.changes.push(Change::Joined { slot: slot as u8, spawn, side, name: name.to_string() });
     }
 
     pub fn left(&mut self, slot: usize) {

@@ -220,7 +220,7 @@ fn heard(game: &Game, peer: usize) -> Vec<(usize, String)> {
 }
 
 #[test]
-fn what_players_say_reaches_everyone_once_in_order_in_the_lobby_and_the_round() {
+fn what_players_say_reaches_everyone_once_in_order_but_not_while_a_round_is_played() {
     let mut game = hosted(false);
     let host = join(&mut game, Side::Blue, KEY);
     let other = join(&mut game, Side::Gold, 0);
@@ -242,39 +242,25 @@ fn what_players_say_reaches_everyone_once_in_order_in_the_lobby_and_the_round() 
         assert_eq!(said, want, "peer {p}");
     }
 
-    // In the round too, and what is said with an old lobby's number is said all the same
+    // Not while the round is played: players use their voices then
     game.net.set_conditions(Conditions::lan());
+    game.peers[other].continues = false;
     game.lobby(host, LobbyCommand::Start);
     assert!(run_until(&mut game, Phase::Live, 20.0));
     send(&mut game, other, 3, 0, LobbyCommand::Say("go go".to_string()));
     game.run(0.5);
     for p in [host, other] {
-        assert_eq!(heard(&game, p).last(), Some(&(o, "go go".to_string())));
+        assert!(!heard(&game, p).iter().any(|(_, t)| t == "go go"), "said in the round");
     }
-}
-
-#[test]
-fn in_a_round_the_living_do_not_hear_the_dead_and_the_dead_hear_everyone() {
-    let mut game = hosted(false);
-    let host = join(&mut game, Side::Blue, KEY);
-    let gold = join(&mut game, Side::Gold, 0);
-    let fallen = join(&mut game, Side::Gold, 0);
-    game.lobby(host, LobbyCommand::Start);
-    assert!(run_until(&mut game, Phase::Live, 20.0));
-    let f = slot(&game, fallen);
+    // On the results screen, said, though numbered for a lobby long gone
     let now = game.server.sim.time;
-    game.server.sim.players[f].respawn_at = Some(now);
-    game.lobby(fallen, LobbyCommand::Say("he is by the door".to_string()));
-    game.lobby(gold, LobbyCommand::Say("where are they".to_string()));
-    game.run(1.0);
-    assert_eq!(game.server.round().phase, Phase::Live);
-    let said = |p| heard(&game, p).into_iter().map(|(_, t)| t).collect::<Vec<_>>();
-    assert_eq!(said(host), ["where are they"]);
-    assert_eq!(said(gold), ["where are they"]);
-    let mut dead = said(fallen);
-    dead.sort();
-    assert_eq!(dead, ["he is by the door", "where are they"]);
-    assert!(game.peers[fallen].events.iter().any(|e| matches!(e, Event::Chat { dead: true, .. })));
+    game.server.sim.players[h].respawn_at = Some(now);
+    assert!(run_until(&mut game, Phase::Debrief, 10.0));
+    send(&mut game, other, 4, 0, LobbyCommand::Say("gg".to_string()));
+    game.run(0.5);
+    for p in [host, other] {
+        assert_eq!(heard(&game, p).last(), Some(&(o, "gg".to_string())));
+    }
 }
 
 #[test]
@@ -303,7 +289,8 @@ fn a_command_made_for_another_lobby_or_countdown_is_refused_and_the_next_still_w
     game.run(0.2);
     assert_eq!(game.server.round().phase, Phase::Countdown);
     // A Ready from the first lobby, arriving in the next one
-    assert!(run_until(&mut game, Phase::Lobby, 30.0));
+    // Its own Continue, numbered by the client, is out of turn here, so the results wait their time
+    assert!(run_until(&mut game, Phase::Lobby, 60.0));
     send(&mut game, host, 6, lobby, LobbyCommand::Ready(true));
     game.run(0.2);
     assert!(!ready(&game, host));

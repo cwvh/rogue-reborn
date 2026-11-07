@@ -12,8 +12,8 @@ use crate::collision::Player;
 use crate::net::animation::TELEPORT;
 use crate::net::link::{Addr, Link};
 use crate::net::meter::Meter;
-use crate::net::proto::{INPUTS_PER_PACKET, LobbyCommand, Parts, Session, Setup, Snapshot, ToClient, ToServer};
-use crate::net::round::RoundState;
+use crate::net::proto::{INPUTS_PER_PACKET, LobbyCommand, Parts, RoundResults, Session, Setup, Snapshot, ToClient, ToServer};
+use crate::net::round::{Phase, RoundState};
 use crate::sim::peek::Peek;
 use crate::sim::{Event, Input, Side, Sim, TICK};
 
@@ -141,6 +141,16 @@ pub struct Client {
     /// The session's settings, and the players who have said ready, as of the newest snapshot
     pub session: Session,
     pub ready: Vec<usize>,
+    /// Each slot's player's name and join number, as of the newest snapshot
+    pub names: Vec<(usize, u32, String)>,
+    /// The players who are done with the round's results, by slot and join number
+    pub continued: Vec<(usize, u32)>,
+    /// The last round's results, from its end until the lobby
+    pub results: Option<RoundResults>,
+    /// The name asked for (`player_name`); empty for one the server makes up
+    name: String,
+    /// The results screen (by its generation) this client has sent Continue for
+    continued_in: Option<u32>,
     /// Makes us the host, if it is the server's key
     key: u64,
     /// Lobby commands not yet taken by the server, oldest first, with their numbers and the
@@ -164,6 +174,11 @@ impl Client {
             session: Session::default(),
             ready: Vec::new(),
             key: 0,
+            names: Vec::new(),
+            continued: Vec::new(),
+            results: None,
+            name: String::new(),
+            continued_in: None,
             lobby: VecDeque::new(),
             lobby_seq: 0,
             lobby_sent: f64::NEG_INFINITY,
@@ -171,6 +186,16 @@ impl Client {
     }
 
     /// Join with this host key (see `ToServer::Connect`)
+    /// Ask for this name on joining
+    pub fn set_name(&mut self, name: &str) {
+        self.name = name.to_string();
+    }
+
+    /// A player's name, now
+    pub fn name_of(&self, slot: usize) -> String {
+        self.names.iter().find(|n| n.0 == slot).map_or_else(|| format!("PLAYER {}", slot + 1), |n| n.2.clone())
+    }
+
     pub fn set_key(&mut self, key: u64) {
         self.key = key;
     }
@@ -187,8 +212,16 @@ impl Client {
             return;
         };
         self.lobby_seq = seq;
+        if command == LobbyCommand::Continue {
+            self.continued_in = Some(self.session.generation);
+        }
         self.lobby.push_back((seq, self.session.generation, command));
         self.lobby_sent = f64::NEG_INFINITY;
+    }
+
+    /// Whether the results screen is up and this client has not continued from it yet
+    pub fn may_continue(&self) -> bool {
+        self.round.phase == Phase::Debrief && self.continued_in != Some(self.session.generation)
     }
 
     /// Lobby commands the server has not taken yet, oldest first
@@ -240,7 +273,7 @@ impl Client {
     pub fn connect(&mut self, now: f64, link: &mut impl Link) -> Option<&Setup> {
         if self.status == Status::Connecting && now - self.asked >= RETRY {
             self.asked = now;
-            link.send(self.server, &ToServer::Connect { token: self.token, build: self.build.clone(), side: self.wish, key: self.key }.encode());
+            link.send(self.server, &ToServer::Connect { token: self.token, build: self.build.clone(), side: self.wish, key: self.key, name: self.name.clone() }.encode());
         }
         self.listen(now, link);
         if self.status == Status::Connected { self.setup.as_ref() } else { None }
@@ -330,6 +363,9 @@ impl Client {
             self.round = snap.round;
             self.session = snap.session;
             self.ready = snap.players.iter().filter(|p| p.ready).map(|p| p.slot as usize).collect();
+            self.names = snap.players.iter().map(|p| (p.slot as usize, p.joined, p.name.clone())).collect();
+            self.continued = snap.players.iter().filter(|p| p.continued).map(|p| (p.slot as usize, p.joined)).collect();
+            self.results = snap.results.clone();
             if !self.loading {
                 self.have = snap.round.number;
             }

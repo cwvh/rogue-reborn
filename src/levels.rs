@@ -140,6 +140,25 @@ pub fn game_text(id: &str) -> Option<String> {
     })
 }
 
+/// A level's mission name as the original shows it ("City Street Large"), from the multiplayer
+/// mission file (`data/mission/*_MUL.mis`) whose map is `map`, the level's file
+pub fn mission_name(map: &str) -> Option<String> {
+    let file = std::path::Path::new(map).file_name()?.to_string_lossy().to_lowercase();
+    std::fs::read_dir("data/mission").ok()?.flatten().find_map(|entry| {
+        let path = entry.path();
+        let stem = path.file_name()?.to_string_lossy().to_lowercase();
+        if !stem.ends_with("_mul.mis") {
+            return None;
+        }
+        // Latin-1, as the string table is. The first quoted values are the map, its folder and
+        // the mission's name in the string table.
+        let text: String = std::fs::read(&path).ok()?.iter().map(|&b| b as char).collect();
+        let quoted: Vec<&str> = text.split('"').skip(1).step_by(2).take(3).collect();
+        let [mis_map, _, name] = quoted.as_slice() else { return None };
+        (mis_map.to_lowercase() == file).then(|| game_text(name)).flatten()
+    })
+}
+
 // Pick an index in 0..n; random unless a seed is given (splitmix64)
 pub fn pick_index(n: usize, seed: Option<u64>) -> usize {
     let seed = seed.unwrap_or_else(|| {
@@ -229,6 +248,15 @@ mod tests {
         }
         assert_eq!(game_text("ZONE_CSL_GROUP_1_DESC").as_deref(), Some("Upper Floors"));
         assert_eq!(game_text("ZONE_NO_SUCH_THING"), None);
+    }
+
+    #[test]
+    fn a_level_is_named_as_its_multiplayer_mission_names_it() {
+        if !Path::new("data/mission").exists() {
+            return;
+        }
+        assert_eq!(mission_name("data/map\\m00\\citystreet_large.map").as_deref(), Some("City Street Large"));
+        assert_eq!(mission_name("no_such_level.map"), None);
     }
 
     #[test]

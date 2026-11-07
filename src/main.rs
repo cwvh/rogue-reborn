@@ -19,6 +19,7 @@ use rogue_reborn::net::client::{Client, Seen, Status};
 use rogue_reborn::net::host::{HostedServer, STARTUP, new_key};
 use rogue_reborn::net::proto::LobbyCommand;
 use rogue_reborn::lobby::{self, Chat, Gate, LobbyView};
+use rogue_reborn::results::ResultsView;
 use rogue_reborn::ui::{Canvas, Pointer, Ui};
 use crate::ui_gl::UiGl;
 use rogue_reborn::net::animation::Doing;
@@ -93,8 +94,24 @@ fn dress<'a>(side: Option<sim::Side>, sides: &'a [Option<Uniform>], model: &'a c
     }
 }
 
-/// The line on screen for where the rounds are, or none while one is played
-fn round_banner(r: &RoundState, now: f32) -> String {
+#[cfg(test)]
+mod banner_tests {
+    use super::*;
+
+    #[test]
+    fn the_last_one_standing_is_named_as_the_results_have_them() {
+        let r = RoundState { phase: Phase::Results, number: 1, ends: None, wins: [0, 0], last: Some(Outcome::Survived(0)) };
+        // Whoever has slot 0 now, the banner names the winner the results kept
+        assert_eq!(round_banner(&r, 0.0, Some("OriginalWinner")), "OriginalWinner WINS");
+        // Before the results come, the slot
+        assert_eq!(round_banner(&r, 0.0, None), "PLAYER 1 WINS");
+    }
+}
+
+/// The line on screen for where the rounds are, or none while one is played. `winner` is the
+/// last one standing in Survival, named as the round's results have them, whoever has their
+/// slot by now.
+fn round_banner(r: &RoundState, now: f32, winner: Option<&str>) -> String {
     let left = r.ends.map_or(0.0, |e| (e - now).max(0.0));
     match (r.phase, r.last) {
         (Phase::Open | Phase::Live, _) => String::new(),
@@ -103,10 +120,11 @@ fn round_banner(r: &RoundState, now: f32) -> String {
         (Phase::Loading, _) => "WAITING FOR EVERYONE TO LOAD".to_string(),
         (Phase::Hold, _) => "GET READY".to_string(),
         (Phase::Results, Some(Outcome::Won(s))) => format!("{} WINS", format!("{s:?}").to_uppercase()),
-        (Phase::Results, Some(Outcome::Survived(p))) => format!("PLAYER {} WINS", p + 1),
+        (Phase::Results, Some(Outcome::Survived(p))) => format!("{} WINS", winner.map_or_else(|| format!("PLAYER {}", p + 1), str::to_string)),
         (Phase::Results, Some(Outcome::Draw)) => "EVERYBODY LOST".to_string(),
         (Phase::Results, Some(Outcome::CalledOff)) => "ROUND CALLED OFF".to_string(),
-        (Phase::Results, None) => String::new(),
+        // The results screen is up
+        (Phase::Results, None) | (Phase::Debrief, _) => String::new(),
     }
 }
 
@@ -209,6 +227,7 @@ fn main() {
         let mut client = Client::new(to_server, token, option_env!("GIT_HASH").unwrap_or("unknown"));
         client.ask_side(args.side);
         client.set_key(key);
+        client.set_name(args.name.as_deref().unwrap_or(""));
         if args.record.is_some() {
             client.start_tape();
             net_recorder = Some(ClientRecorder::new(option_env!("GIT_HASH").unwrap_or("unknown"), token));
@@ -698,10 +717,14 @@ fn main() {
     // The chat, for the whole game, what has been typed for it to say, and the wheel turned
     // over the lobby since the last frame
     let mut chat = Chat::default();
+    // Whom the results screen shows, by a click on their row
+    let mut picked = rogue_reborn::results::Picked::default();
     let mut typed: Vec<LobbyCommand> = Vec::new();
     let mut wheel = 0.0f32;
     let level_name = joined.as_ref().map(|s| Path::new(&s.map).file_stem().map_or(s.map.clone(), |n| n.to_string_lossy().into_owned())).unwrap_or_default();
     let pair_names: Vec<String> = joined.as_ref().map(|s| s.base_pairs.iter().map(|p| rogue_reborn::levels::game_text(&p.name).unwrap_or_else(|| p.name.clone())).collect()).unwrap_or_default();
+    // The mission's name for the results, as the original's mission file has it
+    let mission = joined.as_ref().and_then(|s| rogue_reborn::levels::mission_name(&s.map)).unwrap_or_else(|| level_name.clone());
     let uniform_names: [String; 2] = joined.as_ref().map(|s| s.uniforms.clone().map(|u| lobby::uniform_name(&u))).unwrap_or_default();
     // Hosting, the server we joined must name us its host, or it is someone else's
     let mut host_checked = hosted.is_none();
@@ -813,7 +836,7 @@ fn main() {
         glfw.poll_events();
 
         // Between rounds the lobby shows. Whatever was held when it comes or goes is let go.
-        let showing = net.as_ref().is_some_and(|(c, _)| c.status == Status::Connected && matches!(c.round.phase, Phase::Lobby | Phase::Countdown));
+        let showing = net.as_ref().is_some_and(|(c, _)| c.status == Status::Connected && c.round.phase.screen());
         if gate.show(showing) {
             (trigger, walk_held, pointer_down, wheel) = (false, false, false, 0.0);
             (use_pressed, reload_pressed, gun_pressed, grenade_pressed, culling_pressed) = (false, false, false, false, false);
@@ -1387,14 +1410,14 @@ fn main() {
                 // What happened to other players, or near the body of one watching, is not felt
                 // here
                 sim::Event::PlayerBlast { .. } => {}
-                sim::Event::Kill { killer, victim, cause } => {
-                    let who = |s: usize| format!("PLAYER {}", s + 1);
+                // Named as they were when it happened, whoever has their slots now
+                sim::Event::Kill { killer, victim, cause, killer_name, victim_name, .. } => {
                     let text = match (killer, cause) {
-                        (Some(k), sim::Cause::HeadShot) => format!("{} HEAD SHOT {}", who(k), who(victim)),
-                        (Some(k), sim::Cause::Shot) => format!("{} SHOT {}", who(k), who(victim)),
-                        (Some(k), sim::Cause::Grenade) => format!("{} BLEW UP {}", who(k), who(victim)),
-                        (_, sim::Cause::Terrorist) => format!("A TERRORIST SHOT {}", who(victim)),
-                        (None, _) => format!("{} KILLED THEMSELVES", who(victim)),
+                        (Some(_), sim::Cause::HeadShot) => format!("{killer_name} HEAD SHOT {victim_name}"),
+                        (Some(_), sim::Cause::Shot) => format!("{killer_name} SHOT {victim_name}"),
+                        (Some(_), sim::Cause::Grenade) => format!("{killer_name} BLEW UP {victim_name}"),
+                        (_, sim::Cause::Terrorist) => format!("A TERRORIST SHOT {victim_name}"),
+                        (None, _) => format!("{victim_name} KILLED THEMSELVES"),
                     };
                     let color = if victim == me { [1.0, 0.35, 0.3] } else if killer == Some(me) { [1.0, 0.85, 0.3] } else { [1.0, 1.0, 1.0] };
                     feed.push((game_time + 6.0, text, color));
@@ -1406,14 +1429,14 @@ fn main() {
                     }
                 }
                 // Said in the lobby or the round: in the chat, and in the feed for a while
-                sim::Event::Chat { player, text, dead } => {
-                    let line = format!("{}: {text}", lobby::speaker(player, dead));
+                sim::Event::Chat { name, text, dead, .. } => {
+                    let line = format!("{}: {text}", lobby::speaker(&name, dead));
                     println!("{line}");
                     feed.push((game_time + 8.0, line, [0.95, 0.78, 0.2]));
                     if feed.len() > 5 {
                         feed.remove(0);
                     }
-                    chat.said(player, &text, dead);
+                    chat.said(&name, &text, dead);
                 }
             }
         }
@@ -2464,7 +2487,7 @@ fn main() {
             // Watching, who it is and how they are, in place of the player's own
             if watch.watching() {
                 status = vec![match watch.target() {
-                    Some(t) => format!("WATCHING PLAYER {}  HEALTH: {:.0}", t + 1, sim.players[t].hp.ceil()),
+                    Some(t) => format!("WATCHING {}  HEALTH: {:.0}", net.as_ref().map_or_else(|| format!("PLAYER {}", t + 1), |(c, _)| c.name_of(t)), sim.players[t].hp.ceil()),
                     None if watch_pose.is_some() => "WATCHING".to_string(),
                     None => "NO ONE TO WATCH".to_string(),
                 }];
@@ -2477,7 +2500,9 @@ fn main() {
                     status.insert(1, format!("TIME: {}:{:02}", left / 60, left % 60));
                 }
             }
-            let banner = round_banner(&round, game_time);
+            let results = net.as_ref().and_then(|(c, _)| c.results.as_ref());
+            let winner = results.and_then(|r| r.rows.get(r.winner? as usize)).map(|row| row.name.as_str());
+            let banner = round_banner(&round, game_time, winner);
             let msg = if game_time < sim.players[me].message.1 { sim.players[me].message.0.as_str() } else { banner.as_str() };
             let marker = tracer.is_some_and(|t| t.2 && game_time < t.3);
             let lines: Vec<(String, [f32; 3])> = feed.iter().map(|(_, text, color)| (text.clone(), *color)).collect();
@@ -2517,14 +2542,17 @@ fn main() {
         }
         draw_debug_text(w, h, &debug_lines);
 
-        // The lobby, over the whole window, and the chat, which notes what happens all game
-        // long. What is clicked and said is sent with the next tick.
+        // The lobby or the results, over the whole window, and the chat, which notes what
+        // happens all game long. What is clicked and said is sent with the next tick.
         if let Some((client, _)) = net.as_mut().filter(|(c, _)| c.status == Status::Connected && c.snapshots > 0) {
-            let players: Vec<(usize, Option<sim::Side>)> = sim.players.iter().enumerate().filter(|(_, p)| p.active).map(|(i, p)| (i, p.side)).collect();
+            let players: Vec<lobby::Player> = sim.players.iter().enumerate().filter(|(_, p)| p.active)
+                .map(|(i, p)| lobby::Player { slot: i, joined: p.joined, side: p.side, name: client.name_of(i) })
+                .collect();
             let ready = client.ready.clone();
+            let mine = (me, sim.players[me].joined);
             let view = LobbyView {
-                round: client.round, time: game_time, session: client.session, me, players: &players, ready: &ready, level: &level_name,
-                base_pairs: &pair_names, uniforms: [&uniform_names[0], &uniform_names[1]],
+                round: client.round, time: game_time, session: client.session, me, players: &players, continued: client.continued.contains(&mine),
+                ready: &ready, level: &level_name, base_pairs: &pair_names, uniforms: [&uniform_names[0], &uniform_names[1]], results: client.results.as_ref(),
             };
             chat.watch(&view);
             let mut commands = std::mem::take(&mut typed);
@@ -2534,7 +2562,16 @@ fn main() {
                 let (cx, cy) = window.get_cursor_pos();
                 let at = Canvas::fit([fw as f32, fh as f32]).pointer([cx, cy], [ww, wh], [fw, fh]);
                 ui.begin(Pointer { at, down: pointer_down, wheel: std::mem::take(&mut wheel) }, client.session.generation);
-                commands.extend(lobby::lobby(&mut ui, &view, &mut chat));
+                match client.results.as_ref().filter(|_| client.round.phase == Phase::Debrief) {
+                    Some(table) => {
+                        let results = ResultsView {
+                            results: table, time: game_time, me: mine, host: client.session.host == Some(me as u8), continued: &client.continued,
+                            sent: !client.may_continue(), mission: &mission,
+                        };
+                        commands.extend(rogue_reborn::results::results(&mut ui, &results, &mut chat, &mut picked));
+                    }
+                    None => commands.extend(lobby::lobby(&mut ui, &view, &mut chat)),
+                }
                 let draws = ui.finish();
                 ui_gl.draw(&ui, &draws, [fw, fh]);
             }

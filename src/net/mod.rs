@@ -20,6 +20,8 @@ mod fairness;
 #[cfg(test)]
 mod lobby_tests;
 #[cfg(test)]
+mod results_tests;
+#[cfg(test)]
 mod round_tests;
 #[cfg(test)]
 mod tests;

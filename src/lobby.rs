@@ -10,14 +10,24 @@
 use std::collections::{HashSet, VecDeque};
 use std::hash::Hash;
 
-use crate::net::proto::{CHAT_LENGTH, LobbyCommand, Session, chat_text};
+use crate::net::proto::{CHAT_LENGTH, LobbyCommand, RoundResults, Session, chat_text};
 use crate::net::round::{Outcome, Phase, RoundState};
-use crate::sim::Side;
+use crate::sim::{MAX_PLAYERS, Side};
 use crate::ui::font::Font;
 use crate::ui::{Art, Color, FontId, Look, Rect, Ui};
 
 /// The round lengths the host can choose from (seconds), shortest first, and none
 pub const LENGTHS: [Option<u16>; 8] = [Some(60), Some(120), Some(180), Some(240), Some(300), Some(420), Some(600), None];
+
+/// Someone in the game: their slot, join number (which no one else in the slot has), side and
+/// name
+#[derive(Clone, Debug, PartialEq)]
+pub struct Player {
+    pub slot: usize,
+    pub joined: u32,
+    pub side: Option<Side>,
+    pub name: String,
+}
 
 /// What the client knows that the screen shows
 pub struct LobbyView<'a> {
@@ -26,10 +36,14 @@ pub struct LobbyView<'a> {
     pub time: f32,
     pub session: Session,
     pub me: usize,
-    /// Everyone in the game, by slot, and their side
-    pub players: &'a [(usize, Option<Side>)],
+    /// Everyone in the game
+    pub players: &'a [Player],
+    /// Whether this player has continued from the round's results
+    pub continued: bool,
     /// The slots of those who have said ready
     pub ready: &'a [usize],
+    /// The last round's results, from its end until the lobby
+    pub results: Option<&'a RoundResults>,
     pub level: &'a str,
     /// Each pair of bases, by name
     pub base_pairs: &'a [String],
@@ -43,17 +57,21 @@ impl LobbyView<'_> {
     }
 
     fn team_game(&self) -> bool {
-        self.players.iter().any(|p| p.1.is_some())
+        self.players.iter().any(|p| p.side.is_some())
     }
 
     fn side(&self) -> Option<Side> {
-        self.players.iter().find(|p| p.0 == self.me).and_then(|p| p.1)
+        self.players.iter().find(|p| p.slot == self.me).and_then(|p| p.side)
+    }
+
+    fn name_of(&self, slot: usize) -> String {
+        self.players.iter().find(|p| p.slot == slot).map_or_else(|| name(slot), |p| p.name.clone())
     }
 
     /// Whether there is anyone to play against: someone on each side, or two players
     fn two_sides(&self) -> bool {
         match self.team_game() {
-            true => Side::BOTH.iter().all(|&s| self.players.iter().any(|p| p.1 == Some(s))),
+            true => Side::BOTH.iter().all(|&s| self.players.iter().any(|p| p.side == Some(s))),
             false => self.players.len() >= 2,
         }
     }
@@ -68,12 +86,12 @@ impl LobbyView<'_> {
     }
 }
 
-/// A player as the screen names them
+/// A player as the screen names them when it does not know their name
 pub fn name(slot: usize) -> String {
     format!("PLAYER {}", slot + 1)
 }
 
-fn side_name(side: Side) -> &'static str {
+pub(crate) fn side_name(side: Side) -> &'static str {
     match side {
         Side::Blue => "Blue",
         Side::Gold => "Gold",
@@ -108,21 +126,21 @@ fn step_length(now: Option<u16>, up: bool) -> Option<Option<u16>> {
 }
 
 // The screen's colors, after the original's
-const BACK: Color = [0.01, 0.02, 0.04, 1.0];
-const LABEL: Color = [0.04, 0.16, 0.24, 1.0];
-const LABEL_EDGE: Color = [0.16, 0.42, 0.55, 1.0];
-const LABEL_TEXT: Color = [0.3, 0.75, 0.92, 1.0];
-const FIELD: Color = [0.01, 0.02, 0.03, 1.0];
-const FIELD_EDGE: Color = [0.85, 0.67, 0.15, 1.0];
-const FIELD_TEXT: Color = [1.0, 1.0, 1.0, 1.0];
-const HEADER: Color = [0.08, 0.3, 0.5, 1.0];
-const GOLD_TEXT: Color = [0.95, 0.78, 0.2, 1.0];
-const DIM_TEXT: Color = [0.45, 0.5, 0.52, 1.0];
+pub(crate) const BACK: Color = [0.01, 0.02, 0.04, 1.0];
+pub(crate) const LABEL: Color = [0.04, 0.16, 0.24, 1.0];
+pub(crate) const LABEL_EDGE: Color = [0.16, 0.42, 0.55, 1.0];
+pub(crate) const LABEL_TEXT: Color = [0.3, 0.75, 0.92, 1.0];
+pub(crate) const FIELD: Color = [0.01, 0.02, 0.03, 1.0];
+pub(crate) const FIELD_EDGE: Color = [0.85, 0.67, 0.15, 1.0];
+pub(crate) const FIELD_TEXT: Color = [1.0, 1.0, 1.0, 1.0];
+pub(crate) const HEADER: Color = [0.08, 0.3, 0.5, 1.0];
+pub(crate) const GOLD_TEXT: Color = [0.95, 0.78, 0.2, 1.0];
+pub(crate) const DIM_TEXT: Color = [0.45, 0.5, 0.52, 1.0];
 /// The chat's lines for what happens, quieter than what players say
-const NEWS_TEXT: Color = [0.42, 0.56, 0.64, 1.0];
-const WHITE: Color = [1.0, 1.0, 1.0, 1.0];
-const BLUE_BAR: Color = [0.15, 0.4, 0.7, 1.0];
-const GOLD_BAR: Color = [0.75, 0.6, 0.15, 1.0];
+pub(crate) const NEWS_TEXT: Color = [0.42, 0.56, 0.64, 1.0];
+pub(crate) const WHITE: Color = [1.0, 1.0, 1.0, 1.0];
+pub(crate) const BLUE_BAR: Color = [0.15, 0.4, 0.7, 1.0];
+pub(crate) const GOLD_BAR: Color = [0.75, 0.6, 0.15, 1.0];
 
 // Where things are, on the 640 x 480 canvas
 /// The player list: a header level with NAME, then a row each from level with SPECIALTY. A
@@ -131,7 +149,8 @@ const HEAD_Y: f32 = 42.0;
 const ROWS_Y: f32 = 60.0;
 const ROW: f32 = 19.0;
 const ROW_H: f32 = 17.0;
-const ROWS: usize = 15;
+/// Room for everyone a game can have, as the original has
+const ROWS: usize = MAX_PLAYERS;
 const PING_X: f32 = 25.0;
 const LIGHT_X: f32 = 43.0;
 const NAME_X: f32 = 61.0;
@@ -139,8 +158,9 @@ const NAME_W: f32 = 126.0;
 /// The states the ready lights and the header are drawn in, as the original's look
 const LIGHT: usize = 0;
 const HEAD: usize = 1;
-pub const BLUE: Rect = Rect::new(25.0, 362.0, 162.0, 16.0);
-pub const GOLD: Rect = Rect::new(25.0, 381.0, 162.0, 16.0);
+/// Below the last row, where the original has them
+pub const BLUE: Rect = Rect::new(25.0, 365.0, 162.0, 16.0);
+pub const GOLD: Rect = Rect::new(25.0, 383.0, 162.0, 16.0);
 /// The settings' boxes (`Art::Panel`): five rows of the player's own, then seven of the session's
 const PANEL: Rect = Rect::new(190.0, 41.0, 425.0, 233.0);
 /// The chat's box (`Art::ChatBox`), the lines in it, and the line being typed
@@ -151,7 +171,7 @@ pub const TYPING: Rect = Rect::new(201.0, 381.0, 388.0, 16.0);
 pub const SCROLL_UP: Rect = Rect::new(598.0, 285.0, 16.0, 14.0);
 pub const SCROLL_DOWN: Rect = Rect::new(598.0, 355.0, 16.0, 14.0);
 /// What the player can do now, across the bottom
-const STATUS: Rect = Rect::new(25.0, 401.0, 590.0, 13.0);
+pub(crate) const STATUS: Rect = Rect::new(25.0, 401.0, 590.0, 13.0);
 pub const READY: Rect = Rect::new(30.0, 428.0, 110.0, 26.0);
 pub const START: Rect = Rect::new(497.0, 428.0, 110.0, 26.0);
 
@@ -206,9 +226,10 @@ pub fn lobby(ui: &mut Ui, v: &LobbyView, chat: &mut Chat) -> Vec<LobbyCommand> {
     ui.art(Art::HeadPing, HEAD, Rect::new(PING_X, HEAD_Y, 15.0, 16.0), LABEL);
     ui.art(Art::HeadReady, HEAD, Rect::new(LIGHT_X, HEAD_Y, 15.0, 16.0), LABEL);
     ui.art(Art::HeadName, HEAD, Rect::new(NAME_X, HEAD_Y, NAME_W, 16.0), LABEL);
-    let mut players: Vec<&(usize, Option<Side>)> = v.players.iter().collect();
-    players.sort_by_key(|p| (p.1.map_or(2, |s| s.index()), p.0));
-    for (i, &&(slot, side)) in players.iter().enumerate().take(ROWS) {
+    let mut players: Vec<&Player> = v.players.iter().collect();
+    players.sort_by_key(|p| (p.side.map_or(2, |s| s.index()), p.slot));
+    for (i, p) in players.iter().enumerate().take(ROWS) {
+        let (slot, side) = (p.slot, p.side);
         let y = ROWS_Y + i as f32 * ROW;
         ui.art(Art::PingBox, 0, Rect::new(PING_X, y, 15.0, ROW_H), FIELD);
         let (light, fallback) = match () {
@@ -225,7 +246,7 @@ pub fn lobby(ui: &mut Ui, v: &LobbyView, chat: &mut Chat) -> Vec<LobbyCommand> {
         };
         // Dark, but the player's own, which is lit
         ui.art(art, (slot == v.me) as usize, bar, fallback);
-        ui.centered(&name(slot), FontId::Text, bar, WHITE);
+        ui.centered_clipped(&p.name, FontId::Text, bar, 4.0, WHITE);
     }
 
     // Choosing a side, in the lobby of a team game. The player's own is pressed in, and the
@@ -247,7 +268,7 @@ pub fn lobby(ui: &mut Ui, v: &LobbyView, chat: &mut Chat) -> Vec<LobbyCommand> {
     // The host steps through the choices.
     ui.art(Art::Panel, 0, PANEL, LABEL);
     let rows: [(&str, String, usize); 12] = [
-        ("NAME", name(v.me), 0),
+        ("NAME", v.name_of(v.me), 0),
         ("SPECIALTY", String::new(), 0),
         ("FIREARMS", "HK MP5K".to_string(), 0),
         ("AMMO", "9mm (FMJ)".to_string(), 0),
@@ -299,7 +320,7 @@ pub fn lobby(ui: &mut Ui, v: &LobbyView, chat: &mut Chat) -> Vec<LobbyCommand> {
         commands.push(LobbyCommand::FriendlyFire(!on));
     }
 
-    chat_box(ui, v, chat);
+    chat_box(ui, v.time, chat, &LOBBY_CHAT);
 
     // What the player can do now
     let hint = match v.round.phase {
@@ -335,7 +356,7 @@ pub fn lobby(ui: &mut Ui, v: &LobbyView, chat: &mut Chat) -> Vec<LobbyCommand> {
 }
 
 /// The art's state for how a control looks: up, lit, pressed and dark
-fn state(look: Look) -> usize {
+pub(crate) fn state(look: Look) -> usize {
     match look {
         Look::Normal => 0,
         Look::Hover => 1,
@@ -345,7 +366,7 @@ fn state(look: Look) -> usize {
 }
 
 /// A button with its label, lit while `on`
-fn button(ui: &mut Ui, rect: Rect, look: Look, on: bool, text: &str) {
+pub(crate) fn button(ui: &mut Ui, rect: Rect, look: Look, on: bool, text: &str) {
     let state = match look {
         Look::Normal if on => 1,
         _ => state(look),
@@ -355,15 +376,29 @@ fn button(ui: &mut Ui, rect: Rect, look: Look, on: bool, text: &str) {
     ui.centered(text, FontId::Text, rect, if look == Look::Disabled { DIM_TEXT } else { WHITE });
 }
 
+/// Where a chat box's parts are: its art and the box it fills, where the lines go, the line
+/// being typed, and the scroll arrows
+pub struct ChatPlace {
+    pub art: Art,
+    pub frame: Rect,
+    pub lines: Rect,
+    pub typing: Rect,
+    pub up: Rect,
+    pub down: Rect,
+}
+
+const LOBBY_CHAT: ChatPlace = ChatPlace { art: Art::ChatBox, frame: CHAT, lines: LINES, typing: TYPING, up: SCROLL_UP, down: SCROLL_DOWN };
+
 /// The chat's box: the newest lines that fit, or older ones as it is scrolled, the arrows and
-/// wheel to scroll it, and the line being typed
-fn chat_box(ui: &mut Ui, v: &LobbyView, chat: &mut Chat) {
-    ui.art(Art::ChatBox, 0, CHAT, FIELD);
+/// wheel to scroll it, and the line being typed. `time` blinks the caret.
+pub fn chat_box(ui: &mut Ui, time: f32, chat: &mut Chat, place: &ChatPlace) {
+    let ChatPlace { art, frame, lines, typing, up, down } = *place;
+    ui.art(art, 0, frame, FIELD);
     let wheel = ui.pointer().wheel;
-    if wheel != 0.0 && CHAT.contains(ui.pointer().at) {
+    if wheel != 0.0 && frame.contains(ui.pointer().at) {
         chat.scroll(wheel.round() as i32);
     }
-    for (rect, art, id, by) in [(SCROLL_UP, Art::ScrollUp, ID_SCROLL_UP, 1), (SCROLL_DOWN, Art::ScrollDown, ID_SCROLL_DOWN, -1)] {
+    for (rect, art, id, by) in [(up, Art::ScrollUp, ID_SCROLL_UP, 1), (down, Art::ScrollDown, ID_SCROLL_DOWN, -1)] {
         let can = if by > 0 { chat.scroll < chat.lines.len().saturating_sub(1) } else { chat.scroll > 0 };
         let (look, clicked) = ui.control(id, rect, can);
         ui.art(art, state(look), rect, LABEL_EDGE);
@@ -372,36 +407,36 @@ fn chat_box(ui: &mut Ui, v: &LobbyView, chat: &mut Chat) {
         }
     }
     // The knob is as far up as the box is scrolled back
-    let track = (SCROLL_UP.y + SCROLL_UP.h + 1.0, SCROLL_DOWN.y - 1.0 - 14.0);
+    let track = (up.y + up.h + 1.0, down.y - 1.0 - 14.0);
     let back = chat.scroll as f32 / chat.lines.len().saturating_sub(1).max(1) as f32;
-    ui.art(Art::ScrollKnob, 0, Rect::new(SCROLL_UP.x, (track.1 - back * (track.1 - track.0)).round(), 15.0, 14.0), LABEL_EDGE);
+    ui.art(Art::ScrollKnob, 0, Rect::new(up.x, (track.1 - back * (track.1 - track.0)).round(), 15.0, 14.0), LABEL_EDGE);
 
-    let fit = (LINES.h / LINE) as usize;
+    let fit = (lines.h / LINE) as usize;
     let mut rows: Vec<(String, Color)> = Vec::new();
     for line in chat.lines.range(..chat.lines.len() - chat.scroll).rev() {
-        let (text, color) = match line.who {
-            Some(p) => (format!("{}: {}", speaker(p, line.dead), line.text), GOLD_TEXT),
+        let (text, color) = match &line.who {
+            Some(who) => (format!("{}: {}", speaker(who, line.dead), line.text), GOLD_TEXT),
             None => (line.text.clone(), NEWS_TEXT),
         };
-        rows.extend(wrap(&ui.text, &text, LINES.w).into_iter().rev().map(|r| (r, color)));
+        rows.extend(wrap(&ui.text, &text, lines.w).into_iter().rev().map(|r| (r, color)));
         if rows.len() >= fit {
             break;
         }
     }
     for (i, (text, color)) in rows.iter().take(fit).enumerate() {
-        ui.text(text, FontId::Text, [LINES.x, LINES.y + LINES.h - (i + 1) as f32 * LINE], *color);
+        ui.text(text, FontId::Text, [lines.x, lines.y + lines.h - (i + 1) as f32 * LINE], *color);
     }
 
     // What is being typed, its end if it is too long to show, and a blinking caret
-    let caret = if (v.time * 2.0).rem_euclid(2.0) < 1.0 { "_" } else { "" };
-    let room = TYPING.w - 8.0 - ui.text.width("_");
+    let caret = if (time * 2.0).rem_euclid(2.0) < 1.0 { "_" } else { "" };
+    let room = typing.w - 8.0 - ui.text.width("_");
     let mut shown = chat.typing.as_str();
     while ui.text.width(shown) > room {
         let mut chars = shown.chars();
         chars.next();
         shown = chars.as_str();
     }
-    ui.left(&format!("{shown}{caret}"), FontId::Text, TYPING, 3.0, FIELD_TEXT);
+    ui.left(&format!("{shown}{caret}"), FontId::Text, typing, 3.0, FIELD_TEXT);
 }
 
 /// Text in lines no wider than `width`, broken between words, or within a word too long for one
@@ -432,18 +467,21 @@ fn wrap(font: &Font, text: &str, width: f32) -> Vec<String> {
 /// The most lines the chat keeps
 const KEPT: usize = 200;
 
+/// The results screen's first line, in the original's words
+pub const CONTINUE_LINE: &str = "Press the 'continue' button when you are ready to start next game";
+
 /// A line of the chat: what a player said, or what happened (with no one's name). `dead` if
 /// they said it dead in a round.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Line {
-    pub who: Option<usize>,
+    pub who: Option<String>,
     pub text: String,
     pub dead: bool,
 }
 
 /// Who said a line, as the chat and the feed show them
-pub fn speaker(slot: usize, dead: bool) -> String {
-    if dead { format!("{} (dead)", name(slot)) } else { name(slot) }
+pub fn speaker(name: &str, dead: bool) -> String {
+    if dead { format!("{name} (dead)") } else { name.to_string() }
 }
 
 /// The chat, kept for the whole game: what players say (`Event::Chat`), and what happens, which
@@ -455,6 +493,8 @@ pub struct Chat {
     scroll: usize,
     typing: String,
     before: Option<Before>,
+    /// The round whose result the chat has told
+    told: u16,
 }
 
 /// What the chat saw of the game last, to tell what has changed
@@ -463,7 +503,8 @@ struct Before {
     phase: Phase,
     count: Option<u32>,
     session: Session,
-    players: Vec<(usize, Option<Side>)>,
+    players: Vec<Player>,
+    continued: bool,
 }
 
 impl Chat {
@@ -471,8 +512,8 @@ impl Chat {
         self.lines.iter()
     }
 
-    fn add(&mut self, who: Option<usize>, text: impl Into<String>) {
-        self.line(Line { who, text: text.into(), dead: false });
+    fn add(&mut self, text: impl Into<String>) {
+        self.line(Line { who: None, text: text.into(), dead: false });
     }
 
     fn line(&mut self, line: Line) {
@@ -487,9 +528,9 @@ impl Chat {
         self.scroll = self.scroll.min(self.lines.len().saturating_sub(1));
     }
 
-    /// A player said something (`Event::Chat`)
-    pub fn said(&mut self, player: usize, text: &str, dead: bool) {
-        self.line(Line { who: Some(player), text: text.to_string(), dead });
+    /// A player said something (`Event::Chat`), named as they were when they said it
+    pub fn said(&mut self, name: &str, text: &str, dead: bool) {
+        self.line(Line { who: Some(name.to_string()), text: text.to_string(), dead });
     }
 
     /// Note what has changed since the last look: players coming, going and changing sides,
@@ -502,65 +543,76 @@ impl Chat {
             (Some(was), Some(n)) => Some(was.min(n)),
             (_, n) => n,
         };
-        let now = Before { phase: v.round.phase, count, session: v.session, players: v.players.to_vec() };
-        let Some(before) = self.before.replace(now) else { return };
+        let now = Before { phase: v.round.phase, count, session: v.session, players: v.players.to_vec(), continued: v.continued };
+        let Some(before) = self.before.replace(now) else {
+            // A result already shown when the client came is old news
+            self.told = v.results.map_or(0, |r| r.number);
+            return;
+        };
 
-        for &(slot, side) in v.players {
-            match before.players.iter().find(|p| p.0 == slot) {
-                None => self.add(None, format!("{} has joined{}", name(slot), side.map_or(String::new(), |s| format!(" {}", side_name(s))))),
-                Some(&(_, was)) if was != side => {
-                    if let Some(s) = side {
-                        self.add(None, format!("{} went to {}", name(slot), side_name(s)));
+        // By occupant, so that someone new in a slot is one going and another coming
+        let same = |a: &Player, b: &Player| (a.slot, a.joined) == (b.slot, b.joined);
+        for p in &before.players {
+            if !v.players.iter().any(|q| same(p, q)) {
+                self.add(format!("{} has disconnected", p.name));
+            }
+        }
+        for p in v.players {
+            match before.players.iter().find(|q| same(p, q)) {
+                None => self.add(format!("{} has joined{}", p.name, p.side.map_or(String::new(), |s| format!(" {}", side_name(s))))),
+                Some(was) if was.side != p.side => {
+                    if let Some(s) = p.side {
+                        self.add(format!("{} went to {}", p.name, side_name(s)));
                     }
                 }
                 _ => {}
             }
         }
-        for &(slot, _) in &before.players {
-            if !v.players.iter().any(|p| p.0 == slot) {
-                self.add(None, format!("{} has disconnected", name(slot)));
-            }
-        }
         let s = (before.session, v.session);
         if let Some(host) = s.1.host.filter(|_| s.0.host != s.1.host) {
-            self.add(None, format!("{} is the host", name(host as usize)));
+            self.add(format!("{} is the host", v.name_of(host as usize)));
         }
         if s.0.base_pair != s.1.base_pair {
-            self.add(None, format!("INSERTIONS changed to {}", v.base_pair(s.1.base_pair)));
+            self.add(format!("INSERTIONS changed to {}", v.base_pair(s.1.base_pair)));
         }
         if s.0.time_limit != s.1.time_limit {
-            self.add(None, format!("LENGTH changed to {}", length_text(s.1.time_limit)));
+            self.add(format!("LENGTH changed to {}", length_text(s.1.time_limit)));
         }
         if s.0.friendly_fire != s.1.friendly_fire {
-            self.add(None, format!("FRIENDLY FIRE changed to {}", if s.1.friendly_fire { "on" } else { "off" }));
+            self.add(format!("FRIENDLY FIRE changed to {}", if s.1.friendly_fire { "on" } else { "off" }));
         }
 
         // The countdown in the original's words, and the round's end
         match (before.phase, v.round.phase) {
             (Phase::Countdown, Phase::Countdown) => {}
-            (_, Phase::Countdown) => self.add(None, "--- Preparing to begin mission ---"),
-            (Phase::Countdown, Phase::Lobby) => self.add(None, "--- Start suspended ---"),
-            (Phase::Countdown, _) => self.add(None, "--- Away we go ---"),
-            (was, Phase::Results) if was != Phase::Results => self.ended(v),
+            (_, Phase::Countdown) => self.add("--- Preparing to begin mission ---"),
+            (Phase::Countdown, Phase::Lobby) => self.add("--- Start suspended ---"),
+            (Phase::Countdown, _) => self.add("--- Away we go ---"),
+            (was, Phase::Debrief) if was != Phase::Debrief => self.add(CONTINUE_LINE),
             _ => {}
         }
         if let Some(n) = count.filter(|&n| n > 0 && before.count != Some(n)) {
-            self.add(None, format!("Starting mission in {n} second{}", if n == 1 { "" } else { "s" }));
+            self.add(format!("Starting mission in {n} second{}", if n == 1 { "" } else { "s" }));
+        }
+        if v.continued && !before.continued && v.round.phase == Phase::Debrief {
+            self.add("Ready to continue");
+        }
+        // How the round ended, once, from its results, which keep the winner as they were
+        // whoever has their slot now, and come however late the client sees them
+        if let Some(results) = v.results.filter(|r| r.number != self.told) {
+            self.told = results.number;
+            self.ended(v, results);
         }
     }
 
-    fn ended(&mut self, v: &LobbyView) {
-        let n = v.round.number;
-        let result = match v.round.last {
-            Some(Outcome::Won(Side::Blue)) => "Blue Team Won".to_string(),
-            Some(Outcome::Won(Side::Gold)) => "Gold Team Won".to_string(),
-            Some(Outcome::Survived(p)) => format!("{} Won", name(p as usize)),
-            Some(Outcome::Draw) => "Everybody Lost".to_string(),
-            Some(Outcome::CalledOff) => return self.add(None, format!("Round {n} was called off")),
-            None => return,
-        };
-        let score = if v.team_game() { format!(" (Blue {}, Gold {})", v.round.wins[0], v.round.wins[1]) } else { String::new() };
-        self.add(None, format!("Round {n}: {result}{score}"));
+    fn ended(&mut self, v: &LobbyView, results: &RoundResults) {
+        let n = results.number;
+        if results.outcome == Outcome::CalledOff {
+            return self.add(format!("Round {n} was called off"));
+        }
+        let team_game = results.rows.iter().any(|r| r.side.is_some());
+        let score = if team_game { format!(" (Blue {}, Gold {})", v.round.wins[0], v.round.wins[1]) } else { String::new() };
+        self.add(format!("Round {n}: {}{score}", crate::results::result_text(results)));
     }
 
     /// A key typed on the line, if the game's fonts have it and the line has room
@@ -668,9 +720,10 @@ mod tests {
         time: f32,
         session: Session,
         me: usize,
-        players: Vec<(usize, Option<Side>)>,
+        players: Vec<Player>,
         ready: Vec<usize>,
         pairs: Vec<String>,
+        results: Option<RoundResults>,
     }
 
     impl Seen {
@@ -681,18 +734,24 @@ mod tests {
                 time: 0.0,
                 session: Session { generation: 1, host: Some(0), time_limit: Some(180), friendly_fire: true, base_pair: 0 },
                 me,
-                players: vec![(0, Some(Side::Blue)), (1, Some(Side::Gold)), (2, Some(Side::Gold))],
+                players: vec![pl(0, Some(Side::Blue)), pl(1, Some(Side::Gold)), pl(2, Some(Side::Gold))],
                 ready: vec![1],
                 pairs: vec!["Upper Floors".to_string(), "Streets".to_string(), "Garage".to_string()],
+                results: None,
             }
         }
 
         fn view(&self) -> LobbyView<'_> {
             LobbyView {
-                round: self.round, time: self.time, session: self.session, me: self.me, players: &self.players, ready: &self.ready, level: LEVEL,
-                base_pairs: &self.pairs, uniforms: ["Blue Medium", "Desert 1 Medium"],
+                round: self.round, time: self.time, session: self.session, me: self.me, players: &self.players, continued: false, ready: &self.ready,
+                level: LEVEL, base_pairs: &self.pairs, uniforms: ["Blue Medium", "Desert 1 Medium"], results: self.results.as_ref(),
             }
         }
+    }
+
+    /// The player in `slot`, named as the screen names one it does not know
+    fn pl(slot: usize, side: Option<Side>) -> Player {
+        Player { slot, joined: slot as u32 + 1, side, name: name(slot) }
     }
 
     /// A click in the middle of `rect`: what it made, and what was drawn
@@ -719,10 +778,24 @@ mod tests {
     }
 
     fn lines(chat: &Chat) -> Vec<String> {
-        chat.lines().map(|l| match l.who {
-            Some(p) => format!("{}: {}", speaker(p, l.dead), l.text),
+        chat.lines().map(|l| match &l.who {
+            Some(who) => format!("{}: {}", speaker(who, l.dead), l.text),
             None => l.text.clone(),
         }).collect()
+    }
+
+    #[test]
+    fn a_full_game_of_players_all_fit_above_the_side_buttons() {
+        let players: Vec<Player> = (0..MAX_PLAYERS).map(|i| pl(i, Some(if i % 2 == 0 { Side::Blue } else { Side::Gold }))).collect();
+        let (_, draws) = click(&Seen { players, ..Seen::new(0) }, Rect::default());
+        let bars: Vec<Rect> = draws.iter().filter_map(|d| match d {
+            Draw::Art { art: Art::NameBlue | Art::NameGold, rect, .. } => Some(*rect),
+            _ => None,
+        }).collect();
+        assert_eq!(bars.len(), MAX_PLAYERS);
+        let lowest = bars.iter().map(|r| r.y + r.h).fold(0.0, f32::max);
+        assert!(lowest <= BLUE.y, "the last row ends at {lowest}, under BLUE at {}", BLUE.y);
+        assert!(GOLD.y + GOLD.h <= STATUS.y, "GOLD runs into the bar under it");
     }
 
     #[test]
@@ -783,7 +856,7 @@ mod tests {
         }
         assert!(!texts(&click(&other, Rect::default()).1).contains(&"START"));
         // Nor can the host start with a side empty
-        let alone = Seen { players: vec![(0, Some(Side::Blue))], ..Seen::new(0) };
+        let alone = Seen { players: vec![pl(0, Some(Side::Blue))], ..Seen::new(0) };
         assert_eq!(click(&alone, START).0, []);
         assert!(texts(&click(&alone, Rect::default()).1).contains(&"Each side needs someone before you can start."));
     }
@@ -814,8 +887,13 @@ mod tests {
         seen.round = RoundState { phase: Phase::Loading, number: 1, ..RoundState::default() };
         chat.watch(&seen.view());
         seen.round = RoundState { phase: Phase::Results, number: 1, wins: [0, 1], last: Some(Outcome::Won(Side::Gold)), ..RoundState::default() };
+        seen.results = Some(table(1, Outcome::Won(Side::Gold), None, vec![row(0, "PLAYER 1", Some(Side::Blue))]));
+        chat.watch(&seen.view());
+        // Told once, though the table stays until the lobby
+        seen.round.phase = Phase::Debrief;
         chat.watch(&seen.view());
         seen.round.phase = Phase::Lobby;
+        seen.results = None;
         chat.watch(&seen.view());
         seen.round.phase = Phase::Countdown;
         seen.round.ends = Some(seen.time + 5.0);
@@ -825,8 +903,40 @@ mod tests {
         assert_eq!(lines(&chat), [
             "--- Preparing to begin mission ---", "Starting mission in 5 seconds", "Starting mission in 4 seconds", "Starting mission in 3 seconds",
             "Starting mission in 2 seconds", "Starting mission in 1 second", "--- Away we go ---", "Round 1: Gold Team Won (Blue 0, Gold 1)",
-            "--- Preparing to begin mission ---", "Starting mission in 5 seconds", "--- Start suspended ---",
+            CONTINUE_LINE, "--- Preparing to begin mission ---", "Starting mission in 5 seconds", "--- Start suspended ---",
         ]);
+    }
+
+    fn row(slot: u8, name: &str, side: Option<Side>) -> crate::net::proto::ResultRow {
+        crate::net::proto::ResultRow {
+            slot, joined: slot as u32 + 1, name: name.to_string(), side, left: false, end: crate::sim::Ending::Alive,
+            stats: crate::sim::RoundStats::default(), killed_by: None,
+        }
+    }
+
+    fn table(number: u16, outcome: Outcome, winner: Option<u8>, rows: Vec<crate::net::proto::ResultRow>) -> RoundResults {
+        RoundResults { number, outcome, winner, played: 60, rows }
+    }
+
+    #[test]
+    fn the_winner_is_told_as_they_were_though_they_left_and_the_client_missed_the_results() {
+        // Survival: the winner leaves as the round ends, and a newcomer takes their slot. The
+        // client sees the round under way, then nothing until the results screen.
+        let mut seen = Seen { players: vec![Player { name: "OriginalWinner".to_string(), ..pl(0, None) }, pl(1, None)], ..Seen::new(1) };
+        seen.round = RoundState { phase: Phase::Live, number: 1, ..RoundState::default() };
+        let mut chat = Chat::default();
+        chat.watch(&seen.view());
+        seen.players[0] = Player { joined: 50, name: "Newcomer".to_string(), ..pl(0, None) };
+        seen.round = RoundState { phase: Phase::Debrief, number: 1, last: Some(Outcome::Survived(0)), ..RoundState::default() };
+        seen.results = Some(table(1, Outcome::Survived(0), Some(0), vec![row(0, "OriginalWinner", None), row(1, "PLAYER 2", None)]));
+        chat.watch(&seen.view());
+        assert!(lines(&chat).contains(&"Round 1: OriginalWinner Won".to_string()), "{:?}", lines(&chat));
+        // A client that comes while a result is up does not tell it as news
+        let mut late = Chat::default();
+        late.watch(&seen.view());
+        seen.time += 1.0;
+        late.watch(&seen.view());
+        assert!(!lines(&late).iter().any(|l| l.starts_with("Round 1")));
     }
 
     #[test]
@@ -834,16 +944,19 @@ mod tests {
         let mut seen = Seen::new(2);
         let mut chat = Chat::default();
         chat.watch(&seen.view());
-        seen.players.push((3, Some(Side::Blue)));
-        seen.players.retain(|p| p.0 != 1);
-        seen.players[1].1 = Some(Side::Blue);
+        seen.players.push(Player { name: "Villico".to_string(), ..pl(3, Some(Side::Blue)) });
+        seen.players.retain(|p| p.slot != 1);
+        seen.players[1].side = Some(Side::Blue);
         seen.session = Session { time_limit: Some(300), friendly_fire: false, base_pair: 1, ..seen.session };
         chat.watch(&seen.view());
-        chat.said(3, "hello", false);
-        chat.said(2, "gg", true);
+        chat.said("Villico", "hello", false);
+        chat.said("PLAYER 3", "gg", true);
+        // Someone new in a slot is the last one going and another coming
+        seen.players[0] = Player { joined: 99, name: "Raithat".to_string(), ..pl(0, Some(Side::Blue)) };
+        chat.watch(&seen.view());
         assert_eq!(lines(&chat), [
-            "PLAYER 3 went to Blue", "PLAYER 4 has joined Blue", "PLAYER 2 has disconnected", "INSERTIONS changed to Streets", "LENGTH changed to 5:00",
-            "FRIENDLY FIRE changed to off", "PLAYER 4: hello", "PLAYER 3 (dead): gg",
+            "PLAYER 2 has disconnected", "PLAYER 3 went to Blue", "Villico has joined Blue", "INSERTIONS changed to Streets", "LENGTH changed to 5:00",
+            "FRIENDLY FIRE changed to off", "Villico: hello", "PLAYER 3 (dead): gg", "PLAYER 1 has disconnected", "Raithat has joined Blue",
         ]);
     }
 
@@ -869,7 +982,7 @@ mod tests {
         }
         assert_eq!(chat.typing().len(), CHAT_LENGTH);
         // What players say is drawn as "NAME: text"
-        chat.said(1, "on my way", false);
+        chat.said("PLAYER 2", "on my way", false);
         let mut ui = ui();
         ui.begin(Pointer::default(), 1);
         lobby(&mut ui, &seen.view(), &mut chat);
@@ -881,7 +994,7 @@ mod tests {
         let seen = Seen::new(2);
         let mut chat = Chat::default();
         for i in 0..30 {
-            chat.said(0, &format!("line {i}"), false);
+            chat.said("PLAYER 1", &format!("line {i}"), false);
         }
         let shown = |chat: &mut Chat, pointer: Pointer| {
             let mut ui = ui();
@@ -893,7 +1006,7 @@ mod tests {
         // The wheel over the box, away from the player, goes back
         shown(&mut chat, Pointer { at: [300.0, 300.0], wheel: 3.0, ..Pointer::default() });
         assert_eq!(shown(&mut chat, Pointer::default())[0], "PLAYER 1: line 26");
-        chat.said(0, "line 30", false);
+        chat.said("PLAYER 1", "line 30", false);
         assert_eq!(shown(&mut chat, Pointer::default())[0], "PLAYER 1: line 26");
         // Saying something goes back to the newest
         chat.typed('x');

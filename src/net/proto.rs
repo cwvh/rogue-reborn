@@ -18,12 +18,12 @@ use crate::sim::characters::REACTION_MOTIONS;
 use crate::sim::aim::{Aim, Pace};
 use crate::sim::peek::Peek;
 use crate::net::round::{Outcome, Phase, RoundState};
-use crate::sim::{Cause, Event, Input, MAX_PLAYERS, Side, Sim, Struck, Throw};
+use crate::sim::{Cause, Ending, Event, Input, MAX_PLAYERS, RoundStats, Side, Sim, Struck, Throw};
 
 type V3 = [f32; 3];
 
 /// Bumped whenever the messages change, so that a client and server that disagree notice
-pub const PROTOCOL: u8 = 15;
+pub const PROTOCOL: u8 = 16;
 
 const MAGIC: u16 = 0x5252;
 
@@ -103,8 +103,12 @@ pub struct Session {
 pub enum LobbyCommand {
     Side(Side),
     Ready(bool),
-    /// A line for everyone's chat, which may be said at any time (`chat_text`)
+    /// A line for everyone's chat (`chat_text`), in any phase but Live
     Say(String),
+    /// Done with the round's results (Debrief), once
+    Continue,
+    /// The host takes everyone from the results to the lobby, once they have continued
+    ToLobby,
     Start,
     Stop,
     TimeLimit(Option<u16>),
@@ -124,6 +128,30 @@ pub fn chat_text(text: &str) -> Option<String> {
     (!kept.is_empty()).then_some(kept)
 }
 
+/// The most characters a player's name has
+pub const NAME_LENGTH: usize = 24;
+
+/// The name a player gets: what they asked for, as chat would keep it, trimmed and cut to
+/// `NAME_LENGTH`, or "PLAYER n" if nothing is left. If a name in `taken` is the same, ignoring
+/// case, " 2", " 3" and so on follow, with the name cut to make room.
+pub fn player_name(asked: &str, slot: usize, taken: &[&str]) -> String {
+    let kept: String = asked.chars().filter(|c| matches!(c, ' '..='~' | '\u{a0}'..='\u{ff}')).collect();
+    let cut = |s: &str, n: usize| s.trim().chars().take(n).collect::<String>().trim_end().to_string();
+    let base = match cut(&kept, NAME_LENGTH) {
+        b if b.is_empty() => format!("PLAYER {}", slot + 1),
+        b => b,
+    };
+    let fold = |s: &str| s.chars().flat_map(char::to_lowercase).collect::<String>();
+    let free = |name: &str| !taken.iter().any(|t| fold(t) == fold(name));
+    if free(&base) {
+        return base;
+    }
+    (2..).map(|k| {
+        let suffix = format!(" {k}");
+        format!("{}{suffix}", cut(&base, NAME_LENGTH - suffix.len()))
+    }).find(|n| free(n)).unwrap_or(base)
+}
+
 /// What a client sends
 #[derive(Clone, Debug, PartialEq)]
 pub enum ToServer {
@@ -131,7 +159,7 @@ pub enum ToServer {
     /// stranger cannot speak for it. `build` says which version of the game it is.
     /// `side` is the one the player would like, in a team game. `key` makes them the host if
     /// it is the server's host key, and is 0 for none.
-    Connect { token: u32, build: String, side: Option<Side>, key: u64 },
+    Connect { token: u32, build: String, side: Option<Side>, key: u64, name: String },
     /// Player inputs starting at `first_seq`, ordered oldest to newest. `ack_snapshot` acknowledges
     /// the latest received snapshot tick. `view` is the server tick at which other players were
     /// shown when the newest input was sampled, in sixteenths of a tick. Zero means unknown. Lag
@@ -259,6 +287,59 @@ pub struct PlayerSnap {
     pub aim: Option<Aim>,
     /// Said ready in the lobby
     pub ready: bool,
+    /// Their name (`player_name`), which the server fills in
+    pub name: String,
+    /// Done with the round's results (Debrief)
+    pub continued: bool,
+}
+
+/// A player's line in a round's results
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResultRow {
+    pub slot: u8,
+    pub joined: u32,
+    pub name: String,
+    pub side: Option<Side>,
+    /// They left before the round was decided
+    pub left: bool,
+    pub end: Ending,
+    pub stats: RoundStats,
+    /// The row of the participant who killed them
+    pub killed_by: Option<u8>,
+}
+
+/// How a round went, made once when it is decided, from who played it (`Sim::round`)
+#[derive(Clone, Debug, PartialEq)]
+pub struct RoundResults {
+    pub number: u16,
+    pub outcome: Outcome,
+    /// The row of the last one standing, in Survival
+    pub winner: Option<u8>,
+    /// Whole seconds from being let go to the decision, 0 if they never were
+    pub played: u16,
+    pub rows: Vec<ResultRow>,
+}
+
+/// Round `number`'s results, from who played it, as the sim has them now that it is decided
+pub fn round_results(sim: &Sim, number: u16, outcome: Outcome) -> RoundResults {
+    let row_of = |who: crate::sim::Occupant| sim.round.iter().position(|p| p.who == who).map(|i| i as u8);
+    let rows = sim.round.iter().map(|p| ResultRow {
+        slot: p.who.slot as u8,
+        joined: p.who.joined,
+        name: sim.name_of(p.who),
+        side: p.side,
+        left: p.left,
+        end: p.end,
+        stats: p.stats,
+        killed_by: p.killed_by.and_then(row_of),
+    }).collect();
+    // The last one standing, as they were then, before anyone else can take their slot
+    let winner = match outcome {
+        Outcome::Survived(slot) => sim.round.iter().position(|p| p.who.slot == slot as usize && !p.left).map(|i| i as u8),
+        _ => None,
+    };
+    let played = sim.opened.map_or(0, |t| (sim.time - t).max(0.0).round().min(u16::MAX as f32) as u16);
+    RoundResults { number, outcome, winner, played, rows }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -303,6 +384,8 @@ pub struct Snapshot {
     /// Where the rounds are, and the session's settings
     pub round: RoundState,
     pub session: Session,
+    /// The last round's results, from its end until the lobby
+    pub results: Option<RoundResults>,
     /// Events, numbered in the order they happened
     pub events: Vec<(u32, Event)>,
 }
@@ -341,6 +424,8 @@ impl Snapshot {
             peek: p.peek,
             aim: mine.then_some(p.aim),
             ready: false,
+            name: String::new(),
+            continued: false,
         }).collect();
         Snapshot {
             tick,
@@ -355,6 +440,7 @@ impl Snapshot {
             broken: sim.broken_at.iter().enumerate().filter_map(|(i, t)| t.map(|t| (i as u16, t))).collect(),
             round: RoundState::default(),
             session: Session::default(),
+            results: None,
             events: Vec::new(),
         }
     }
@@ -435,9 +521,12 @@ impl Snapshot {
             npc.aiming = s.aiming;
         }
 
+        // Only the server sets grenades off, so who threw them is only drawn here
         sim.thrown = self.thrown.iter().map(|t| crate::sim::Thrown {
             grenade: Grenade { pos: t.pos, vel: [0.0; 3], fuse: crate::grenade::FUSE, spin: t.spin, at_rest: false },
             owner: t.owner as usize,
+            by: sim.occupant(t.owner as usize),
+            side: sim.players.get(t.owner as usize).and_then(|p| p.side),
         }).collect();
 
         for (i, &(open, opening)) in self.doors.iter().enumerate().take(sim.door_states.len()) {
@@ -529,9 +618,10 @@ fn write_event(w: &mut Writer, e: &Event) -> bool {
             w.v3(*start);
             w.v3(*end);
         }
-        Event::Chat { player, text, dead } => {
+        Event::Chat { player, name, text, dead } => {
             w.u8(8);
             w.u8(*player as u8);
+            w.string(name);
             w.string(text);
             w.bool(*dead);
         }
@@ -566,11 +656,15 @@ fn write_event(w: &mut Writer, e: &Event) -> bool {
             w.f32(*shake);
             w.f32(*veil);
         }
-        Event::Kill { killer, victim, cause } => {
+        Event::Kill { killer, victim, cause, killer_joined, victim_joined, killer_name, victim_name } => {
             w.u8(6);
             w.u8(killer.map_or(255, |k| k as u8));
             w.u8(*victim as u8);
             w.u8(match cause { Cause::Shot => 0, Cause::HeadShot => 1, Cause::Grenade => 2, Cause::Terrorist => 3 });
+            w.varint(*killer_joined);
+            w.varint(*victim_joined);
+            w.string(killer_name);
+            w.string(victim_name);
         }
     }
     true
@@ -591,9 +685,13 @@ fn read_event(r: &mut Reader) -> Result<Event> {
             killer: Some(r.u8()?).filter(|&k| k != 255).map(|k| k as usize),
             victim: r.u8()? as usize,
             cause: match r.u8()? { 0 => Cause::Shot, 1 => Cause::HeadShot, 2 => Cause::Grenade, 3 => Cause::Terrorist, c => bail!("no such cause of death as {c}") },
+            killer_joined: r.varint()?,
+            victim_joined: r.varint()?,
+            killer_name: r.string()?,
+            victim_name: r.string()?,
         },
         7 => Event::CharacterShot { npc: r.u16()? as usize, start: r.v3()?, end: r.v3()? },
-        8 => Event::Chat { player: r.u8()? as usize, text: r.string()?, dead: r.bool()? },
+        8 => Event::Chat { player: r.u8()? as usize, name: r.string()?, text: r.string()?, dead: r.bool()? },
         t => bail!("no such event as {t}"),
     })
 }
@@ -731,6 +829,8 @@ fn write_player(w: &mut Writer, p: &PlayerSnap) {
     write_peek(w, p.peek);
     w.varint(p.joined);
     w.bool(p.ready);
+    w.string(&p.name);
+    w.bool(p.continued);
     if detailed {
         w.f32(p.vel_y);
         w.u16(p.ammo as u16);
@@ -759,6 +859,7 @@ fn read_player(r: &mut Reader, slot: u8) -> Result<PlayerSnap> {
     let peek = read_peek(r)?;
     let joined = r.varint()?;
     let ready = r.bool()?;
+    let (name, continued) = (r.string()?, r.bool()?);
     let (mut vel_y, mut ammo, mut reserve, mut grenades_left, mut charge_from, mut message, mut target_hp) = (0.0, 0, 0, 0, None, None, None);
     if on(5) {
         (vel_y, ammo, reserve, grenades_left) = (r.f32()?, r.u16()? as u32, r.u16()? as u32, r.u8()? as u32);
@@ -768,7 +869,7 @@ fn read_player(r: &mut Reader, slot: u8) -> Result<PlayerSnap> {
     Ok(PlayerSnap {
         slot, joined, side: side_from(flags >> 6)?, pos, vel_y, on_ground: on(0), crouched: on(4), look, controlled: on(1), ammo, reserve, reload_until,
         flash_until, gun_trigger: on(2), kills, deaths, hp, respawn_at, hit, equipped_grenade: on(3), grenades_left, charge_from,
-        throw, message, target_hp, peek, aim, ready,
+        throw, message, target_hp, peek, aim, ready, name, continued,
     })
 }
 
@@ -809,6 +910,8 @@ fn write_player_delta(w: &mut Writer, p: &PlayerSnap, base: &PlayerSnap) {
         p.aim.map(|a| (a.pace, a.crouched, a.started, [a.angle, a.from, a.to, a.since, a.growth].map(bits))) != base.aim.map(|a| (a.pace, a.crouched, a.started, [a.angle, a.from, a.to, a.since, a.growth].map(bits))),
         p.joined != base.joined,
         p.ready != base.ready,
+        p.name != base.name,
+        p.continued != base.continued,
     ];
     w.varint(changed.iter().enumerate().fold(0, |acc, (n, &c)| acc | (c as u32) << n));
     if changed[0] { w.v3(p.pos); }
@@ -833,11 +936,13 @@ fn write_player_delta(w: &mut Writer, p: &PlayerSnap, base: &PlayerSnap) {
     if changed[19] { write_opt_aim(w, p.aim); }
     if changed[20] { w.varint(p.joined); }
     if changed[21] { w.bool(p.ready); }
+    if changed[22] { w.string(&p.name); }
+    if changed[23] { w.bool(p.continued); }
 }
 
 /// The player `base` was, changed as the mask in the message says
 fn read_player_delta(r: &mut Reader, mask: u32, base: &PlayerSnap) -> Result<PlayerSnap> {
-    ensure!(mask < 1 << 22, "no such parts of a player as {mask:#x}");
+    ensure!(mask < 1 << 24, "no such parts of a player as {mask:#x}");
     let on = |n: u32| mask >> n & 1 != 0;
     let mut p = base.clone();
     if on(0) { p.pos = r.v3()?; }
@@ -867,6 +972,8 @@ fn read_player_delta(r: &mut Reader, mask: u32, base: &PlayerSnap) -> Result<Pla
     if on(19) { p.aim = read_opt_aim(r)?; }
     if on(20) { p.joined = r.varint()?; }
     if on(21) { p.ready = r.bool()?; }
+    if on(22) { p.name = r.string()?; }
+    if on(23) { p.continued = r.bool()?; }
     Ok(p)
 }
 
@@ -1006,6 +1113,54 @@ fn write_state(w: &mut Writer, s: &Snapshot, base: Option<&Snapshot>) {
             write_session(w, &s.session);
         }
     }
+    // The results: 0 as before (none, with no snapshot before), 1 new ones, 2 none now
+    match (base.map(|b| &b.results), &s.results) {
+        (Some(b), now) if b == now => w.u8(0),
+        (None, None) => w.u8(0),
+        (_, Some(results)) => {
+            w.u8(1);
+            write_results(w, results);
+        }
+        (_, None) => w.u8(2),
+    }
+}
+
+pub(crate) fn write_results(w: &mut Writer, r: &RoundResults) {
+    w.u16(r.number);
+    w.u8(outcome_code(Some(r.outcome)).0);
+    w.u8(r.winner.unwrap_or(u8::MAX));
+    w.u16(r.played);
+    w.u8(r.rows.len() as u8);
+    for row in &r.rows {
+        w.u8(row.slot);
+        w.varint(row.joined);
+        w.string(&row.name);
+        w.u8(side_code(row.side) | (row.left as u8) << 2 | ((row.end == Ending::Killed) as u8) << 3);
+        for v in [row.stats.kills, row.stats.fired, row.stats.hits, row.stats.taken] {
+            w.varint(v);
+        }
+        w.u8(row.killed_by.unwrap_or(u8::MAX));
+    }
+}
+
+pub(crate) fn read_results(r: &mut Reader) -> Result<RoundResults> {
+    let (number, code, winner, played, n) = (r.u16()?, r.u8()?, r.u8()?, r.u16()?, r.u8()? as usize);
+    ensure!(n <= MAX_PLAYERS, "too many players in the results");
+    let mut rows = Vec::with_capacity(n);
+    for _ in 0..n {
+        let (slot, joined, name, flags) = (r.u8()?, r.varint()?, r.string()?, r.u8()?);
+        ensure!(flags < 1 << 4, "no such result flags as {flags:#x}");
+        let stats = RoundStats { kills: r.varint()?, fired: r.varint()?, hits: r.varint()?, taken: r.varint()? };
+        let killed_by = Some(r.u8()?).filter(|&k| k != u8::MAX);
+        let end = if flags >> 3 & 1 != 0 { Ending::Killed } else { Ending::Alive };
+        rows.push(ResultRow { slot, joined, name, side: side_from(flags & 3)?, left: flags >> 2 & 1 != 0, end, stats, killed_by });
+    }
+    // Every row named must be one of them
+    ensure!(rows.iter().all(|row| row.killed_by.is_none_or(|k| (k as usize) < n)), "a killer who is not in the results");
+    let winner = Some(winner).filter(|&w| w != u8::MAX);
+    ensure!(winner.is_none_or(|w| (w as usize) < n), "a winner who is not in the results");
+    let Some(outcome) = outcome_from(code, winner.map_or(0, |w| rows[w as usize].slot))? else { bail!("results with no outcome") };
+    Ok(RoundResults { number, outcome, winner, played, rows })
 }
 
 pub(crate) fn write_session(w: &mut Writer, s: &Session) {
@@ -1104,7 +1259,13 @@ fn read_state(r: &mut Reader, base: Option<&Snapshot>) -> Result<Snapshot> {
         (false, Some(b)) => b.session,
         (false, None) => bail!("a session unchanged from no snapshot"),
     };
-    Ok(Snapshot { tick, time, ack_seq, lobby_ack, culling, players, npcs, thrown, doors, broken, round, session, events: Vec::new() })
+    let results = match r.u8()? {
+        0 => base.and_then(|b| b.results.clone()),
+        1 => Some(read_results(r)?),
+        2 => None,
+        t => bail!("no such results tag as {t}"),
+    };
+    Ok(Snapshot { tick, time, ack_seq, lobby_ack, culling, players, npcs, thrown, doors, broken, round, session, results, events: Vec::new() })
 }
 
 pub(crate) fn write_setup(w: &mut Writer, s: &Setup) {
@@ -1211,12 +1372,13 @@ impl ToServer {
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
         match self {
-            ToServer::Connect { token, build, side, key } => {
+            ToServer::Connect { token, build, side, key, name } => {
                 header(&mut w, 0);
                 w.u32(*token);
                 w.string(build);
                 w.u8(side_code(*side));
                 w.u64(*key);
+                w.string(name);
             }
             ToServer::Input { token, ack_snapshot, first_seq, view, round, inputs } => {
                 header(&mut w, 1);
@@ -1249,6 +1411,8 @@ impl ToServer {
                     LobbyCommand::FriendlyFire(on) => { w.u8(5); w.bool(*on); }
                     LobbyCommand::BasePair(i) => { w.u8(6); w.u8(*i); }
                     LobbyCommand::Say(text) => { w.u8(7); w.string(text); }
+                    LobbyCommand::Continue => w.u8(8),
+                    LobbyCommand::ToLobby => w.u8(9),
                 }
             }
         }
@@ -1259,7 +1423,7 @@ impl ToServer {
         let mut r = Reader::new(bytes);
         let kind = check_header(&mut r)?;
         let msg = match kind {
-            0 => ToServer::Connect { token: r.u32()?, build: r.string()?, side: side_from(r.u8()?)?, key: r.u64()? },
+            0 => ToServer::Connect { token: r.u32()?, build: r.string()?, side: side_from(r.u8()?)?, key: r.u64()?, name: r.string()? },
             1 => {
                 let (token, ack_snapshot, first_seq, view, round) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?, r.u16()?);
                 let n = r.u8()? as usize;
@@ -1283,6 +1447,8 @@ impl ToServer {
                     5 => LobbyCommand::FriendlyFire(r.bool()?),
                     6 => LobbyCommand::BasePair(r.u8()?),
                     7 => LobbyCommand::Say(r.string()?),
+                    8 => LobbyCommand::Continue,
+                    9 => LobbyCommand::ToLobby,
                     c => bail!("no such lobby command as {c}"),
                 };
                 ToServer::Lobby { token, seq, generation, command }
@@ -1428,6 +1594,20 @@ mod tests {
             peek: Some(Peek { right: true, crouched: false, frame: 12.5, returning: true }),
             aim: Some(Aim { angle: 0.0, from: AIM_WIDEST, to: 0.0, since: 0.25, growth: 1.25, pace: Pace::Run, crouched: true, started: true, look: 0 }),
             ready: true,
+            name: format!("[RAINBOW] Jöhn {slot}"),
+            continued: true,
+        }
+    }
+
+    /// A round's results with a row who left and a killer, up to `rows` long
+    fn results(rows: usize) -> RoundResults {
+        RoundResults {
+            number: 7, outcome: Outcome::Won(Side::Gold), winner: None, played: 116,
+            rows: (0..rows).map(|i| ResultRow {
+                slot: i as u8, joined: 1000 + i as u32, name: format!("Pie4Foo of Pie's Tác{i:03}"), side: Some(if i % 2 == 0 { Side::Blue } else { Side::Gold }),
+                left: i == 2, end: if i % 3 == 0 { Ending::Killed } else { Ending::Alive },
+                stats: RoundStats { kills: i as u32, fired: 1000 + i as u32, hits: 300, taken: 7 }, killed_by: (i % 3 == 0).then_some(((i + 1) % rows) as u8),
+            }).collect(),
         }
     }
 
@@ -1445,6 +1625,7 @@ mod tests {
             broken: vec![(3, 10.5), (200, 11.0)],
             round: RoundState { phase: Phase::Results, number: 7, ends: Some(20.0), wins: [3, 2], last: Some(Outcome::Won(Side::Gold)) },
             session: Session { generation: 9, host: Some(3), time_limit: Some(240), friendly_fire: true, base_pair: 2 },
+            results: Some(results(4)),
             events: vec![
                 (10, Event::Sound { name: "C_GRFRAG.WAV".to_string(), at: Some([1.0, 2.0, 3.0]), gain: 1.0 }),
                 (11, Event::Shot { player: 2, start: [0.0; 3], end: [9.0, 8.0, 7.0], hit_character: true }),
@@ -1452,11 +1633,11 @@ mod tests {
                 (13, Event::Glass { pane: 4, at: [1.0; 3], dir: [0.0, 0.0, 1.0], seed: 5 }),
                 (14, Event::Blast { point: [1.0; 3], normal: [0.0, 1.0, 0.0], surface: Surface::Glass, on_surface: false, seed: 6 }),
                 (15, Event::PlayerBlast { player: 1, shake: 0.5, veil: 0.25 }),
-                (16, Event::Kill { killer: Some(0), victim: 1, cause: Cause::HeadShot }),
-                (17, Event::Kill { killer: None, victim: 1, cause: Cause::Grenade }),
-                (18, Event::Kill { killer: None, victim: 0, cause: Cause::Terrorist }),
+                (16, Event::Kill { killer: Some(0), victim: 1, cause: Cause::HeadShot, killer_joined: 5, victim_joined: 9, killer_name: "7ony".to_string(), victim_name: "Raithat".to_string() }),
+                (17, Event::Kill { killer: None, victim: 1, cause: Cause::Grenade, killer_joined: 0, victim_joined: 9, killer_name: String::new(), victim_name: "Raithat".to_string() }),
+                (18, Event::Kill { killer: None, victim: 0, cause: Cause::Terrorist, killer_joined: 0, victim_joined: 4, killer_name: String::new(), victim_name: "Villico".to_string() }),
                 (19, Event::CharacterShot { npc: 300, start: [1.0; 3], end: [2.0; 3] }),
-                (20, Event::Chat { player: 5, text: "on my way".to_string(), dead: true }),
+                (20, Event::Chat { player: 5, name: "BobbyBoyGaming".to_string(), text: "on my way".to_string(), dead: true }),
             ],
         }
     }
@@ -1464,7 +1645,7 @@ mod tests {
     #[test]
     fn every_message_survives_the_trip() {
         let messages = [
-            ToServer::Connect { token: 42, build: "abc1234".to_string(), side: Some(Side::Gold), key: 0x0123_4567_89ab_cdef },
+            ToServer::Connect { token: 42, build: "abc1234".to_string(), side: Some(Side::Gold), key: 0x0123_4567_89ab_cdef, name: "[RAINBOW] JOHN DOE".to_string() },
             ToServer::Input { token: 42, ack_snapshot: 897, first_seq: 5000, view: 14400, round: 3, inputs: (0..5).map(|i| {
                 let mut x = Input { forward: i % 2 == 0, fire: i > 2, run: true, ..Input::default() };
                 x.set_look(i as f32 * 10.0, -5.0);
@@ -1543,6 +1724,7 @@ mod tests {
     /// A snapshot of a full game: every player, and `npcs` characters
     fn crowded(npcs: usize) -> Snapshot {
         let mut snap = snapshot();
+        snap.results = None;
         snap.players = (0..MAX_PLAYERS as u8).map(|i| if i == 0 { player(0) } else { other(i) }).collect();
         snap.npcs = (0..npcs).map(|i| NpcSnap { pos: [i as f32; 3], yaw: 1.0, hp: 1.0, state: NpcState::Reacting { motion: "thwu_bb", start: 1.0 }, aiming: true, walking: true, gait: crate::sim::characters::Gait::Creep, stance: Some(crate::mission::Stance::Slouch) }).collect();
         snap
@@ -1604,6 +1786,75 @@ mod tests {
             let (tick, index, count, bytes) = part(d);
             assert!(parts.add(tick, index, count, bytes).is_none());
         }
+    }
+
+    #[test]
+    fn a_full_table_of_results_comes_through_with_a_full_game() {
+        let mut snap = crowded(40);
+        let mut table = results(MAX_PLAYERS);
+        // Every name as long as it may be, in letters that take two bytes each
+        for row in &mut table.rows {
+            row.name = "Ñ".repeat(NAME_LENGTH);
+        }
+        snap.results = Some(table);
+        let (bytes, _) = ToClient::Snapshot(snap.clone()).encode();
+        let datagrams = split(snap.tick, bytes.clone());
+        assert!(datagrams.iter().all(|d| d.len() <= MAX_PACKET));
+        let mut parts = Parts::default();
+        let whole = datagrams.iter().find_map(|d| match ToClient::decode(d).unwrap() {
+            ToClient::Part { tick, index, count, bytes } => parts.add(tick, index, count, bytes),
+            m => panic!("{m:?}"),
+        });
+        let ToClient::Snapshot(got) = ToClient::decode(&whole.unwrap()).unwrap() else { panic!() };
+        assert_eq!(got.results, snap.results);
+    }
+
+    #[test]
+    fn results_are_sent_once_cleared_when_gone_and_checked_as_read() {
+        let mut base = snapshot();
+        let mut next = base.clone();
+        next.tick += 2;
+        // Unchanged: nothing of them is sent, and they are as they were
+        let (same, _) = delta_trip(&base, &next);
+        assert_eq!(same.results, base.results);
+        let size = |s: &Snapshot, b: &Snapshot| ToClient::Snapshot(s.clone()).encode_against(Some(b)).0.len();
+        let without = { let mut n = next.clone(); n.results = None; n };
+        assert!(size(&next, &base) < size(&next, &without), "a table that has not changed is sent again");
+        // Gone: cleared, from a base and from none
+        let (cleared, _) = delta_trip(&base, &without);
+        assert_eq!(cleared.results, None);
+        let (bytes, _) = ToClient::Snapshot(without.clone()).encode();
+        let ToClient::Snapshot(full) = ToClient::decode(&bytes).unwrap() else { panic!() };
+        assert_eq!(full.results, None);
+        // A row that names a killer or winner beyond the table is refused
+        base.results = None;
+        for bad in [
+            RoundResults { rows: vec![ResultRow { killed_by: Some(4), ..results(1).rows[0].clone() }], ..results(1) },
+            RoundResults { outcome: Outcome::Survived(0), winner: Some(1), ..results(1) },
+        ] {
+            let mut w = Writer::new();
+            write_results(&mut w, &bad);
+            assert!(read_results(&mut Reader::new(&w.0)).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_name_is_cleaned_cut_and_made_unique() {
+        assert_eq!(player_name("  [RAINBOW] John Doe\u{7}  ", 0, &[]), "[RAINBOW] John Doe");
+        assert_eq!(player_name("", 2, &[]), "PLAYER 3");
+        assert_eq!(player_name("\u{1}\u{2603}", 2, &[]), "PLAYER 3");
+        assert_eq!(player_name(&"x".repeat(40), 0, &[]).len(), NAME_LENGTH);
+        // The same ignoring case, accents included, gets a number
+        assert_eq!(player_name("bot", 1, &["BOT"]), "bot 2");
+        assert_eq!(player_name("BOT", 1, &["BOT", "Bot 2"]), "BOT 3");
+        assert_eq!(player_name("ÉLAN", 1, &["élan"]), "ÉLAN 2");
+        // Cut to make room for it, and checked again
+        let long = "y".repeat(NAME_LENGTH);
+        let second = player_name(&long, 1, &[&long]);
+        assert_eq!(second, format!("{} 2", "y".repeat(NAME_LENGTH - 2)));
+        assert_eq!(player_name(&long, 1, &[&long, &second]), format!("{} 3", "y".repeat(NAME_LENGTH - 2)));
+        // A made-up name is no different
+        assert_eq!(player_name("", 2, &["player 3"]), "PLAYER 3 2");
     }
 
     fn delta_trip(base: &Snapshot, next: &Snapshot) -> (Snapshot, usize) {

@@ -82,7 +82,7 @@ fn slot(game: &Game, peer: usize) -> usize {
 
 fn kills(game: &Game, peer: usize) -> Vec<(Option<usize>, usize, Cause)> {
     game.peers[peer].events.iter().filter_map(|e| match *e {
-        Event::Kill { killer, victim, cause } => Some((killer, victim, cause)),
+        Event::Kill { killer, victim, cause, .. } => Some((killer, victim, cause)),
         _ => None,
     }).collect()
 }

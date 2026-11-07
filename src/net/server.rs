@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::net::link::{Addr, Link};
-use crate::net::proto::{LobbyCommand, Session, Setup, Snapshot, ToClient, ToServer, chat_text, split};
+use crate::net::proto::{LobbyCommand, RoundResults, Session, Setup, Snapshot, ToClient, ToServer, chat_text, player_name, round_results, split};
 use crate::net::record::{Change, ServerRecorder, ServerRecording};
 use crate::net::round::{Outcome, Phase, RoundState, judge, teams};
 use crate::sim::{Event, Input, Side, Sim, TICK};
@@ -64,8 +64,11 @@ pub const LOAD_TIMEOUT: f32 = 30.0;
 /// How long (seconds) everyone waits, loaded, before they are let go
 pub const RELEASE_AFTER: f32 = 2.0;
 
-/// How long (seconds) the results show before the lobby again
-pub const RESULTS: f32 = 8.0;
+/// How long (seconds) the round's end is seen in the level, before the results screen
+pub const RESULTS: f32 = 3.0;
+
+/// How long (seconds) the results screen waits for everyone to continue
+pub const DEBRIEF_WAIT: f32 = 30.0;
 
 /// A round's time limit (seconds) unless told otherwise: the original's 3:00
 pub const ROUND_TIME: f32 = 180.0;
@@ -132,6 +135,11 @@ struct Remote {
     ready: bool,
     /// The number of the latest lobby command taken, refused or not
     lobby_seq: u32,
+    /// The occupant's join number (`PlayerState::joined`), and their name (`player_name`)
+    joined: u32,
+    name: String,
+    /// Done with the round's results
+    continued: bool,
 }
 
 impl Remote {
@@ -249,6 +257,8 @@ pub struct Server {
     base_pair: u8,
     /// The session as last recorded
     recorded: Option<Session>,
+    /// The last round's results, from its end until the lobby
+    results: Option<RoundResults>,
 }
 
 impl Server {
@@ -262,6 +272,7 @@ impl Server {
             snapshot_every: SNAPSHOT_EVERY, lag_compensation: true, max_rewind: MAX_REWIND / TICK, snapshots_sent: 0, snapshot_bytes: 0, snapshots_split: 0, recorder: None,
             round: RoundState::default(), until: None, time_limit: Some(ROUND_TIME), auto_start: false, seats: Vec::new(), records: Vec::new(), news: Vec::new(), chat: Vec::new(),
             host_key: None, hosted: false, host_came: false, began: None, host_wait: HOST_WAIT, ended: None, generation: 0, base_pair, recorded: None,
+            results: None,
         }
     }
 
@@ -437,7 +448,7 @@ impl Server {
 
     fn receive(&mut self, now: f64, from: Addr, msg: ToServer, link: &mut impl Link) {
         match msg {
-            ToServer::Connect { token, build, side: wish, key } => {
+            ToServer::Connect { token, build, side: wish, key, name } => {
                 if let Some(r) = self.remotes.iter().find(|r| r.addr == from) {
                     // It did not hear us the first time
                     if r.token == token {
@@ -459,11 +470,17 @@ impl Server {
                 };
                 self.sim.players[slot].side = side;
                 self.spawned += 1;
+                // Their name, unlike any other here
+                let taken: Vec<&str> = self.remotes.iter().map(|r| r.name.as_str()).collect();
+                let name = player_name(&name, slot, &taken);
+                let who = self.sim.occupant(slot);
+                self.sim.names.push((who, name.clone()));
                 if let Some(rec) = self.recorder.as_mut() {
-                    rec.joined(slot, spawn, side);
+                    rec.joined(slot, spawn, side, &name);
                 }
+                self.say(format!("player {slot} is {name}"));
                 // Too late for the round under way: they wait for the next
-                if matches!(self.round.phase, Phase::Loading | Phase::Hold | Phase::Live | Phase::Results) {
+                if matches!(self.round.phase, Phase::Loading | Phase::Hold | Phase::Live | Phase::Results | Phase::Debrief) {
                     self.sim.sit_out(slot);
                     if let Some(rec) = self.recorder.as_mut() {
                         rec.changed(Change::SatOut { slot: slot as u8 });
@@ -478,7 +495,7 @@ impl Server {
                 self.remotes.push(Remote {
                     addr: from, token, slot, queue: BTreeMap::new(), next_seq: None, last_input: Input { run: true, ..Input::default() }, starved: 0, last_view: 0, low: usize::MAX, looked: 0,
                     applied_seq: 0, event_ack: self.next_event - 1, in_flight: VecDeque::new(), heard: now, acked: 0, sent: VecDeque::new(), round: 0,
-                    host, ready: false, lobby_seq: 0,
+                    host, ready: false, lobby_seq: 0, joined: who.joined, name, continued: false,
                 });
                 self.accept(link, from, token, slot);
             }
@@ -529,19 +546,36 @@ impl Server {
     fn lobby(&mut self, i: usize, generation: u32, command: LobbyCommand) -> bool {
         let (slot, host) = (self.remotes[i].slot, self.remotes[i].host);
         let lobby = self.round.phase == Phase::Lobby;
-        // Made for another lobby or countdown than this one. What is said is said whenever.
+        // Made for another lobby, countdown or results than these. What is said is said whenever.
         if generation != self.generation && !matches!(command, LobbyCommand::Say(_)) {
             return false;
         }
+        let debrief = self.round.phase == Phase::Debrief;
         match command {
+            // Not while a round is played: players use their voices then
+            LobbyCommand::Say(_) if self.round.phase == Phase::Live => false,
             LobbyCommand::Say(text) => match chat_text(&text) {
                 Some(text) => {
                     let dead = self.in_round() && self.sim.players[slot].respawn_at.is_some();
-                    self.chat.push(Event::Chat { player: slot, text, dead });
+                    let name = self.sim.name_of(self.sim.occupant(slot));
+                    self.chat.push(Event::Chat { player: slot, name, text, dead });
                     true
                 }
                 None => false,
             },
+            LobbyCommand::Continue => {
+                let first = debrief && !self.remotes[i].continued;
+                self.remotes[i].continued |= first;
+                first
+            }
+            LobbyCommand::ToLobby if host => {
+                let ready = debrief && self.remotes[i].continued;
+                if ready {
+                    self.say("the host took everyone to the lobby".to_string());
+                    self.set_phase(Phase::Lobby, None);
+                }
+                ready
+            }
             LobbyCommand::Side(side) => {
                 if !lobby || self.sim.bases.iter().any(Vec::is_empty) {
                     return false;
@@ -617,11 +651,18 @@ impl Server {
     /// is being played.
     fn set_phase(&mut self, phase: Phase, seconds: Option<f32>) {
         self.round.phase = phase;
-        // A new lobby or countdown: commands made for the last are stale
-        if matches!(phase, Phase::Lobby | Phase::Countdown) {
+        // A new lobby, countdown or results screen: commands made for the last are stale
+        if matches!(phase, Phase::Lobby | Phase::Countdown | Phase::Debrief) {
             match self.generation.checked_add(1) {
                 Some(g) => self.generation = g,
                 None => self.ended = Some("the session ran out of numbers".to_string()),
+            }
+        }
+        // The lobby has no results, and asks everyone to continue again next time
+        if phase == Phase::Lobby {
+            self.results = None;
+            for r in &mut self.remotes {
+                r.continued = false;
             }
         }
         self.until = seconds.map(|s| self.tick + (s / TICK).round() as u32);
@@ -692,6 +733,15 @@ impl Server {
             }
             Phase::Results => {
                 if self.timed_out() {
+                    self.set_phase(Phase::Debrief, Some(DEBRIEF_WAIT));
+                }
+            }
+            Phase::Debrief => {
+                // Waiting for those who played the round and are still here
+                let waited = |r: &Remote| self.sim.round.iter().any(|p| !p.left && p.who.slot == r.slot && p.who.joined == r.joined);
+                let done = self.remotes.iter().filter(|r| waited(r)).all(|r| r.continued);
+                if done || self.timed_out() {
+                    self.say(if done { "everyone has continued" } else { "not everyone continued in time" }.to_string());
                     self.set_phase(Phase::Lobby, None);
                 }
             }
@@ -727,6 +777,11 @@ impl Server {
         }
         self.say(format!("round {} is under way", self.round.number));
         self.set_phase(Phase::Live, self.time_limit);
+        // What players do counts from now
+        self.sim.open_round();
+        if let Some(rec) = self.recorder.as_mut() {
+            rec.changed(Change::Counting(true));
+        }
     }
 
     fn end_round(&mut self, outcome: Outcome, why: String) {
@@ -742,7 +797,20 @@ impl Server {
         };
         self.say(format!("round {}: {verdict}, since {why}", self.round.number));
         self.records.push(RoundRecord { number: self.round.number, outcome, why, seats: self.seats.clone() });
+        // Nothing counts from now, and the results are made once
+        self.sim.close_round();
+        let results = round_results(&self.sim, self.round.number, outcome);
+        if let Some(rec) = self.recorder.as_mut() {
+            rec.changed(Change::Counting(false));
+            rec.changed(Change::Results(results.clone()));
+        }
+        self.results = Some(results);
         self.set_phase(Phase::Results, Some(RESULTS));
+    }
+
+    /// The last round's results, while there are any
+    pub fn results(&self) -> Option<&RoundResults> {
+        self.results.as_ref()
     }
 
     fn accept(&self, link: &mut impl Link, to: Addr, token: u32, slot: usize) {
@@ -821,8 +889,11 @@ impl Server {
         snap.round = self.round;
         snap.session = self.session();
         snap.lobby_ack = r.lobby_seq;
+        snap.results = self.results.clone();
         for p in &mut snap.players {
             p.ready = self.remotes.iter().any(|q| q.slot == p.slot as usize && q.ready);
+            p.continued = self.remotes.iter().any(|q| q.slot == p.slot as usize && q.continued);
+            p.name = self.sim.name_of(crate::sim::Occupant { slot: p.slot as usize, joined: p.joined });
         }
         let stored = snap.clone();
         // The living in a round do not hear the dead

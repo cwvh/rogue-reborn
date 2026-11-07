@@ -84,6 +84,43 @@ pub enum Art {
     SideGold,
     /// The background, tiled
     Grid,
+    /// The results table: a player who left (green), the side totals' row, each player's health
+    /// at the end and its header, their four numbers and the headers' icons, and the last column
+    /// as the viewer saw the round (their side's box, a skull on whom they killed, a crosshair on
+    /// who killed them). Dark, lit, dark, lit, or for the headers up, lit, pressed and dark.
+    NameLeft,
+    NameTotals,
+    Healthy,
+    Killed,
+    HealthTotals,
+    StatBlue,
+    StatGold,
+    StatLeft,
+    StatTotals,
+    ShotBlue,
+    ShotGold,
+    ShotLeft,
+    ShotTotals,
+    YouKilled,
+    KilledYou,
+    HeadHealth,
+    HeadKills,
+    HeadHits,
+    HeadFired,
+    HeadTaken,
+    HeadShot,
+    /// The results' right side: the text box, the four rows of what was played, and the chat
+    ResultsText,
+    ResultsInfo,
+    ResultsChat,
+    /// The arm patches, the R6 emblem in each side's color
+    PatchBlue,
+    PatchGold,
+    /// The results' box for the player picked on the table, in their row's color: the patch's
+    /// box and two fields for the name and clan, clear inside
+    PickedBlue,
+    PickedGold,
+    PickedLeft,
     /// A button: up, lit, framed and dark
     Button,
     /// Unchecked, checked in gold, checked in blue, and dark
@@ -106,10 +143,13 @@ pub enum Art {
 }
 
 impl Art {
-    pub const ALL: [Art; 22] = [
+    pub const ALL: [Art; 51] = [
         Art::NameBlue, Art::NameGold, Art::NameNone, Art::PingBox, Art::HeadPing, Art::HeadReady, Art::HeadName, Art::SideBlue, Art::SideGold,
         Art::Grid, Art::Button, Art::CheckBox, Art::Ready, Art::NotReady, Art::Host, Art::Up, Art::Down, Art::Panel, Art::ChatBox, Art::ScrollUp,
-        Art::ScrollDown, Art::ScrollKnob,
+        Art::ScrollDown, Art::ScrollKnob, Art::NameLeft, Art::NameTotals, Art::Healthy, Art::Killed, Art::HealthTotals, Art::StatBlue,
+        Art::StatGold, Art::StatLeft, Art::StatTotals, Art::ShotBlue, Art::ShotGold, Art::ShotLeft, Art::ShotTotals, Art::YouKilled,
+        Art::KilledYou, Art::HeadHealth, Art::HeadKills, Art::HeadHits, Art::HeadFired, Art::HeadTaken, Art::HeadShot, Art::ResultsText,
+        Art::ResultsInfo, Art::ResultsChat, Art::PatchBlue, Art::PatchGold, Art::PickedBlue, Art::PickedGold, Art::PickedLeft,
     ];
 
     /// The color the art's clear pixels have
@@ -128,6 +168,36 @@ impl Art {
             Art::SideBlue => ("mps_blueteam_btn.rsb", 4),
             Art::SideGold => ("mps_goldteam_btn.rsb", 4),
             Art::Grid => ("PDA_grid_blue.rsb", 1),
+            Art::NameLeft => ("ss_name_g.rsb", 4),
+            Art::NameTotals => ("ss_name_team.rsb", 4),
+            Art::Healthy => ("ss_health_g.RSB", 4),
+            Art::Killed => ("ss_health_r.RSB", 4),
+            Art::HealthTotals => ("ss_health_team.rsb", 4),
+            Art::StatBlue => ("ss_stat_b.RSB", 4),
+            Art::StatGold => ("ss_stat_d.RSB", 4),
+            Art::StatLeft => ("ss_stat_g.RSB", 4),
+            Art::StatTotals => ("ss_stat_team.rsb", 4),
+            Art::ShotBlue => ("ss_shot_b1.rsb", 4),
+            Art::ShotGold => ("ss_shot_d1.rsb", 4),
+            Art::ShotLeft => ("ss_shot_g1.rsb", 4),
+            Art::ShotTotals => ("ss_shot_team.rsb", 4),
+            Art::YouKilled => ("ss_shot_x2.rsb", 4),
+            Art::KilledYou => ("ss_shot_x4.rsb", 4),
+            Art::HeadHealth => ("ss_sorthealth.rsb", 4),
+            Art::HeadKills => ("ss_sortkills.rsb", 4),
+            Art::HeadHits => ("ss_sorthitpercentage.rsb", 4),
+            Art::HeadFired => ("ss_sortroundsfired.rsb", 4),
+            Art::HeadTaken => ("ss_sortroundstaken.rsb", 4),
+            Art::HeadShot => ("ss_sortshot.rsb", 4),
+            Art::ResultsText => ("el_adv_objbg.rsb", 1),
+            Art::ResultsInfo => ("el_adv_infobg.rsb", 1),
+            Art::ResultsChat => ("el_adv_chatbg.rsb", 1),
+            // Beside the bitmaps, in data/armpatch
+            Art::PatchBlue => ("../armpatch/armpatch1.rsb", 1),
+            Art::PatchGold => ("../armpatch/armpatch2.rsb", 1),
+            Art::PickedBlue => ("ss_selected_b2.rsb", 1),
+            Art::PickedGold => ("ss_selected_d2.rsb", 1),
+            Art::PickedLeft => ("ss_selected_g2.rsb", 1),
             Art::Button => ("mp_team.RSB", 4),
             Art::CheckBox => ("mp_sc_checkbox2.rsb", 4),
             Art::Ready => ("ss_ready_g.RSB", 4),
@@ -207,8 +277,9 @@ impl Ui {
             eprintln!("{e:#}: using the dot font");
             Font::dots(height)
         });
-        // The original's session screen writes in the plain OCR-B 10, not the antialiased
-        Ui::new(font("OCRB10", 11), font("OCRB24_A", 26))
+        // The original's session and results screens write in the plain OCR-B 10, not the
+        // antialiased, and the results' banner in Impact 24
+        Ui::new(font("OCRB10", 11), font("IMPACT24_A", 26))
     }
 
     pub fn font(&self, id: FontId) -> &Font {
@@ -298,6 +369,26 @@ impl Ui {
         let f = self.font(font);
         let at = [rect.x + pad, (rect.y + (rect.h - f.height()) / 2.0).round()];
         self.text(text, font, at, color);
+    }
+
+    /// As much of `text` as fits in `width`, cut at the end. Only what is drawn is cut.
+    pub fn fit(&self, font: FontId, text: &str, width: f32) -> String {
+        let f = self.font(font);
+        let mut cut = text.to_string();
+        while f.width(&cut) > width && cut.pop().is_some() {}
+        cut
+    }
+
+    /// As `left`, cut to fit `pad` in from either side
+    pub fn left_clipped(&mut self, text: &str, font: FontId, rect: Rect, pad: f32, color: Color) {
+        let cut = self.fit(font, text, rect.w - 2.0 * pad);
+        self.left(&cut, font, rect, pad, color);
+    }
+
+    /// As `centered`, cut to fit `pad` in from either side
+    pub fn centered_clipped(&mut self, text: &str, font: FontId, rect: Rect, pad: f32, color: Color) {
+        let cut = self.fit(font, text, rect.w - 2.0 * pad);
+        self.centered(&cut, font, rect, color);
     }
 }
 

@@ -13,6 +13,8 @@ pub struct Args {
     pub connect: Option<String>,
     /// The side to ask for, in a team game
     pub side: Option<rogue_reborn::sim::Side>,
+    /// The name to ask for, joining a game; the server makes one up without it
+    pub name: Option<String>,
     /// Start a server for a Team Survival game and join it as the host: on --level (or --map,
     /// or --demo), on this port, with these settings to begin with
     pub host: bool,
@@ -123,6 +125,7 @@ pub fn parse_args() -> Args {
             "--list-levels" => args.list_levels = true,
             "--connect" => args.connect = it.next(),
             "--side" => args.side = it.next().and_then(|s| rogue_reborn::sim::Side::named(&s)),
+            "--name" => args.name = it.next(),
             "--host" => args.host = true,
             "--port" => args.port = it.next().and_then(|v| v.parse().ok()),
             "--round-time" => args.round_time = it.next(),

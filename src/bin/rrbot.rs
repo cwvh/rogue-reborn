@@ -28,6 +28,7 @@ fn usage(problem: &str) -> ! {
     eprintln!("usage: rrbot --connect HOST:PORT [--keys WASDFTL] [--seconds N] [--yaw DEGREES] [--turn DEGREES_PER_SECOND]");
     eprintln!("       rrbot --connect HOST:PORT --fight [--skill easy|normal|hard] [--seconds N, 0 for as long as the server runs] [--trace]");
     eprintln!("             [--side blue|gold]   (the side to ask for in a team game)");
+    eprintln!("             [--name NAME]        (the name to ask for; BOT, numbered, without one)");
     eprintln!("             [--sim-latency MS] [--sim-jitter MS] [--sim-loss PERCENT] [--quiet]");
     std::process::exit(if problem.is_empty() { 0 } else { 2 });
 }
@@ -37,12 +38,15 @@ fn main() {
     let (mut latency, mut jitter, mut loss, mut quiet) = (0.0f64, 0.0f64, 0.0f32, false);
     let (mut fight, mut skill, mut seconds_given, mut trace) = (false, Skill::normal(), false, false);
     let mut side = None;
+    // Bots are "BOT", and the server numbers them: "BOT 2", "BOT 3"
+    let mut name = "BOT".to_string();
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut value = |name: &str| it.next().unwrap_or_else(|| usage(&format!("{name} needs a value")));
         match arg.as_str() {
             "--connect" => connect = Some(value("--connect")),
             "--side" => side = Some(Side::named(&value("--side")).unwrap_or_else(|| usage("--side expects blue or gold"))),
+            "--name" => name = value("--name"),
             "--keys" => keys = value("--keys").to_ascii_uppercase(),
             "--seconds" => {
                 seconds = value("--seconds").parse().unwrap_or_else(|_| usage("--seconds expects a number"));
@@ -78,6 +82,7 @@ fn main() {
     let build = option_env!("GIT_HASH").unwrap_or("unknown");
     let mut client = Client::new(to_server, token, build);
     client.ask_side(side);
+    client.set_name(&name);
 
     // Join: ask until the server says yes or no
     let start = Instant::now();

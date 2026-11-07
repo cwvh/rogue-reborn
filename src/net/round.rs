@@ -17,16 +17,23 @@ pub enum Phase {
     /// Everyone has it: a moment before they are let go
     Hold,
     Live,
-    /// Who won, until the lobby again
+    /// Who won, seen in the level for a moment
     Results,
+    /// Everyone on the results screen, until they continue to the lobby
+    Debrief,
 }
 
 impl Phase {
-    /// Whether players are held where they are: in the lobby (whose screen hides the level),
-    /// and from the round's start until they are let go. After it, they move as they like, as
-    /// in the original.
+    /// Whether players are held where they are: behind the lobby and the results screen, which
+    /// hide the level, and from the round's start until they are let go. After the round, they
+    /// move as they like for a moment, as in the original.
     pub fn frozen(self) -> bool {
-        matches!(self, Phase::Lobby | Phase::Countdown | Phase::Loading | Phase::Hold)
+        matches!(self, Phase::Lobby | Phase::Countdown | Phase::Loading | Phase::Hold | Phase::Debrief)
+    }
+
+    /// Whether a screen is up instead of the level
+    pub fn screen(self) -> bool {
+        matches!(self, Phase::Lobby | Phase::Countdown | Phase::Debrief)
     }
 
     pub fn code(self) -> u8 {
@@ -34,7 +41,7 @@ impl Phase {
     }
 
     pub fn from_code(c: u8) -> Option<Phase> {
-        [Phase::Open, Phase::Lobby, Phase::Countdown, Phase::Loading, Phase::Hold, Phase::Live, Phase::Results].get(c as usize).copied()
+        [Phase::Open, Phase::Lobby, Phase::Countdown, Phase::Loading, Phase::Hold, Phase::Live, Phase::Results, Phase::Debrief].get(c as usize).copied()
     }
 }
 

@@ -268,6 +268,23 @@ pub fn draw_debug_text(win_w: i32, win_h: i32, lines: &[&str]) {
     }
 }
 
+/// A Latin-1 letter without its accent, as the dot font draws it (é is E): players' names may
+/// have them. Anything else is as it was.
+fn plain(ch: char) -> char {
+    match ch {
+        'À'..='Æ' | 'à'..='æ' => 'A',
+        'Ç' | 'ç' => 'C',
+        'È'..='Ë' | 'è'..='ë' => 'E',
+        'Ì'..='Ï' | 'ì'..='ï' => 'I',
+        'Ñ' | 'ñ' => 'N',
+        'Ò'..='Ö' | 'Ø' | 'ò'..='ö' | 'ø' => 'O',
+        'Ù'..='Ü' | 'ù'..='ü' => 'U',
+        'Ý' | 'ý' | 'ÿ' => 'Y',
+        'ß' => 'S',
+        c => c,
+    }
+}
+
 pub fn draw_glyph(ch: char, x: f32, y: f32, scale: f32) {
     // Return a 5x7 bitmap for supported glyphs (top row first, bit 4 = leftmost)
     fn glyph_bitmap(c: char) -> Option<[u8; 7]> {
@@ -320,7 +337,7 @@ pub fn draw_glyph(ch: char, x: f32, y: f32, scale: f32) {
         }
     }
 
-    let cu = ch.to_ascii_uppercase();
+    let cu = plain(ch).to_ascii_uppercase();
     if let Some(rows) = glyph_bitmap(cu) {
         let px = scale / 7.0; // pixel size based on 7 rows
         let py = px;

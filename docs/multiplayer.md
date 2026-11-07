@@ -401,8 +401,8 @@ not copy the look.
 The plan, to be settled.
 
 There is no warm-up in the level. Players wait in the lobby, a screen of its own as in the
-original. The server runs the session in phases: lobby, countdown, loading, live, results, then
-the lobby again.
+original. The server runs the session in phases: lobby, countdown, loading, live, results, the
+results screen (debrief), then the lobby again.
 
 - **The lobby.** Players pick their side and kit and say they are ready. The host sets the
   session and starts the countdown whenever they like. See "Lobby (done)"; kits are to come.
@@ -427,17 +427,18 @@ the lobby again.
   no result, no change to the scores, and everyone goes back to the lobby. The chat says why.
   The server keeps what happened: that the round was called off, why, and each side's players,
   those still there and those dropped. Then a win by abandonment can be judged later if need be.
-- **The results**, then back to the lobby, where players can change side and kit.
+- **The results**, a moment in the level and then the results screen, then back to the lobby,
+  where players can change side and kit. See "Names and results (done)".
 - **The snapshot** carries the phase, when it ends, the round's number, the scores, how the last
   round ended and each player's side.
 - **Friendly fire** is a server option, on by default. Competitive play kept it on, and it was
   rarely turned off.
 - **A dead player** watches their own side's players, through their eyes or from behind them
   in the third person. There is no free camera, so the dead cannot scout for their side.
-- **Chat** is one channel, with no side or team chat. In the lobby and the results, everyone
-  sees everything. During a round, the living see only what the living say, and the dead see
-  what both say. So the dead cannot call out where the enemy is. The original also had team
-  and all chat in a round; most players now talk over voice, so we leave those out.
+- **Chat** is one channel, with no side or team chat, on the lobby and the results screen.
+  There is none while a round is played: most players talk over voice, and team and all chat
+  in a round can come later. The server already keeps what the dead say from the living, for
+  when it does.
 - **A late joiner** waits in the lobby until the next round.
 - **A player who drops** mid-round counts as dead.
 - **Kits.** Each player picks their own. How is not settled; see below.
@@ -469,7 +470,8 @@ the lobby again.
 `rrsrv --teams --rounds` plays Team Survival, and `rrsrv --rounds` alone plays Survival: the
 last one standing wins. `--round-time SECONDS` sets the limit, 180 by default, or 0 for none.
 The server runs the phases (`net::round`, `Server::play_rounds`): lobby, countdown (5 s),
-loading (up to 30 s), hold (2 s), live, results (8 s), and the lobby again.
+loading (up to 30 s), hold (2 s), live, results (3 s), the results screen (up to 30 s), and the
+lobby again.
 
 - **The lobby** is a screen of its own (see "Lobby (done)"). Without a host, `--rounds` starts
   the countdown once there are two sides (or two players) to play, and stops it if one
@@ -502,8 +504,8 @@ loading (up to 30 s), hold (2 s), live, results (8 s), and the lobby again.
   lobby or countdown plays the next round.
 - **The session is locked** from the countdown on: sides, the time limit, friendly fire and
   the pair of bases can only change in the lobby. There are no kits yet.
-- **The results** show for 8 s, then the lobby. The original waited for each player to press
-  continue; that comes with the lobby screen.
+- **The results** are seen in the level for 3 s, then on their own screen until everyone has
+  continued (see "Names and results (done)").
 - **On screen** (`rr`): a line for the phase ("ROUND 2 STARTS IN 3", "GET READY", "GOLD
   WINS"), the round and scores, and the time left. Bodies stay down until the next round, which
   clears the marks on the walls.
@@ -520,7 +522,7 @@ one calls the round off, a late joiner waits, a player who leaves counts as dead
 is the same on every client, Survival without sides, and a match in rounds plays back the
 same. A new round puts back glass, doors and characters on rm19, and on a client.
 
-Still to do from the plan: kits, and the results waiting for players.
+Still to do from the plan: kits.
 
 ### Watching (done)
 
@@ -625,16 +627,63 @@ and `--max-players` (8 unless given), and passes them to an `rrsrv` it starts be
 
 Tests: `net::lobby_tests` plays the host, the commands over a bad network, stale commands, a
 change of bases on server and client, late joiners, the host leaving, a recorded match, and
-chat over a bad network and in a round. `lobby.rs` tests what each player sees, the clicks, the
-chat's lines, typing and scrolling, `ui` the controls and fonts, and `tests/host.rs` runs the
-real `rrsrv` for `rr --host`.
+chat over a bad network and refused in a round. `lobby.rs` tests what each player sees, the
+clicks, the chat's lines, typing and scrolling, `ui` the controls and fonts, and
+`tests/host.rs` runs the real `rrsrv` for `rr --host`.
+
+### Names and results (done)
+
+- **Names.** `rr --name NAME` and `rrbot --name NAME` ask for one with `Connect`. The server
+  keeps what the fonts can draw, trims it, cuts it to 24 characters, and adds " 2", " 3" and
+  so on to one another player has, ignoring case (`proto::player_name`). With none, a player
+  is "PLAYER n", and bots ask for "BOT". Each snapshot carries each player's name, and kill and
+  chat events carry the names as they were, so a line names the right player even after they
+  have left and someone else has their slot. Names show in the lobby, the chat, the kill feed,
+  the watching HUD and the results. A name too wide for its box is cut to fit; the HUD's dot
+  font draws accented letters plain. There is no clan field: players put a clan in the name,
+  as they did in the original.
+- **Who played a round** (`Sim::round`): everyone in the game when it began, known by slot and
+  join number, so that someone new in a slot is never taken for the one before. A player who
+  leaves stays in it, marked as gone.
+- **What they did** (`RoundStats`), counted from the moment players are let go until the round
+  is decided, and not after: bullets fired, hits (bullets that struck someone living they could
+  hurt), bullets taken, kills (teammates included, as the original counted them) and who killed
+  them. God mode still counts a hit. A grenade counts only its kills, credited to who threw it,
+  even if they have left and someone else has the slot.
+- **The table** (`RoundResults`) is made once, when the round is decided, and fixed. It goes to
+  every client in the snapshots until the lobby, and in the server's recording, which a replay
+  makes again and compares.
+- **The results screen** (`results.rs`), after the original's: the table on the left, each
+  side's players in turn, those who left in green after them, and each side's totals. Each row
+  has a light (green once the player has continued), how they ended (alive green, killed red;
+  wounded and incapacitated wait for the hurt rules), their name, kills, hit percentage, rounds
+  fired and rounds taken, and a last column for the picked player: a skull on whom they killed,
+  a crosshair on who killed them. The viewer is picked at first, and a click on any row picks
+  that player instead; their row is lit, and the box under the banner shows their name and
+  patch in their row's color (the original's `ss_selected_*2`). On the right: the banner
+  (MISSION SUCCESSFUL, FAILED or ABORTED, as it went for the viewer), the picked player's box,
+  what was played and how it ended, the mission's name from its file, its length, and the
+  chat.
+- **Continuing.** Each player clicks CONTINUE once. The host's then becomes TO LOBBY, which
+  takes everyone there. The lobby also comes when everyone who played the round and is still
+  here has continued, or after 30 s. Bots continue at once. Waiting for everyone is ours: the
+  original, as remembered, waited for the host or the time.
+
+Tests: `net::results_tests` plays names, a kill named after the killer left and their slot was
+taken, the wait with players leaving and joining, the host's two clicks, the time running out, a
+lone host with bots, a table with a player gone and their slot reused (with both recordings
+played back), and a round called off before it was played. The sim's tests count shots, hits,
+teammates, god mode and grenades, a grenade from a player who left among them. `results.rs`
+tests the banner, the table, the markers and the buttons.
 
 ### Open
 
 - **Picking a kit.** In the lobby, and by a flag until then: a primary and a secondary, ammo for
   each, and two items. A mission can rule kits out (the `.mis`'s "Filtered Kits"); what that
   means in multiplayer is not read yet.
-- **Names**, kicking, changing the map, and the results waiting for players.
+- **Kicking, changing the map**, and changing one's name in the lobby.
+- **Ping**, for the lobby's empty column; arm patches to choose; wounded and incapacitated on the
+  results, with the hurt rules.
 - **Typing in a round**, by a key as in the original, and the chat's lines on screen there.
 
 ## Better than the original

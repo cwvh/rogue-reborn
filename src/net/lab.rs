@@ -99,6 +99,8 @@ pub struct Peer {
     pub view: Option<Frame>,
     /// Over the internet rather than on the LAN
     pub remote: bool,
+    /// Continues from each round's results at once, as a bot does. Off, it waits to be told.
+    pub continues: bool,
     /// How fast this computer's clock runs, against true time (1 is true)
     pub clock: f64,
     /// While true time is in this span, the computer does nothing at all, as when the game is
@@ -275,7 +277,7 @@ impl Game {
         client.set_view_delay(self.tuning.view_delay);
         self.peers.push(Peer {
             client, link, sim: None, script: Box::new(script), bot: None, sees: None, ticks: 0, on: true, events: Vec::new(),
-            recorder: None, frames: Vec::new(), view: None, remote: false, clock: 1.0, frozen: None, ran: self.steps, shown: VecDeque::new(), told_shots: 0, told_deaths: 0, snapshots: 0,
+            recorder: None, frames: Vec::new(), view: None, remote: false, continues: true, clock: 1.0, frozen: None, ran: self.steps, shown: VecDeque::new(), told_shots: 0, told_deaths: 0, snapshots: 0,
         });
         self.peers.len() - 1
     }
@@ -400,6 +402,12 @@ impl Game {
             let news = p.client.tick(now, &mut p.link, sim, input);
             if p.bot.is_some() {
                 crate::net::bot::say_ready(&mut p.client);
+            }
+            if p.continues && p.client.may_continue() {
+                if let Some(rec) = p.recorder.as_mut() {
+                    rec.lobby(now, LobbyCommand::Continue);
+                }
+                p.client.lobby(LobbyCommand::Continue);
             }
             if let Some(rec) = p.recorder.as_mut() {
                 rec.ticked(now, input, &mut p.client, sim);
