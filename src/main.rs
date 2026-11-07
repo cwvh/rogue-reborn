@@ -1317,6 +1317,9 @@ fn main() {
                     if player == me {
                         tracer = Some((start, end, hit_character, game_time + 0.1));
                     }
+                    if let (Some((name, at)), Some(snd)) = (sim::shot_sound(&event, me), sound.as_mut()) {
+                        snd.play_at(name, at, listener_of(&camera), 1.0);
+                    }
                 }
                 // A character fired: its muzzle flashes, here as on the server
                 sim::Event::CharacterShot { npc, .. } => {

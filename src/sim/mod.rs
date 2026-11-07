@@ -217,6 +217,16 @@ fn voice(killed: bool, roll: u32) -> String {
     format!("English/{name}{}.wav", 1 + roll % n)
 }
 
+/// The sound a shot makes where it left, for the player in slot `me` to hear. Their own shots
+/// have none: the firing loop plays those. As the terrorists' shots do, each shot plays once,
+/// so full auto is the shot overlapping itself.
+pub fn shot_sound(event: &Event, me: usize) -> Option<(&'static str, V3)> {
+    match *event {
+        Event::Shot { player, start, .. } if player != me => Some((PLAYER_SHOT, start)),
+        _ => None,
+    }
+}
+
 /// An angle in degrees, in 65536ths of a turn (about 0.0055 degrees), wrapping around a full turn
 pub fn quantize(degrees: f32) -> u16 {
     ((degrees / 360.0).rem_euclid(1.0) * 65536.0).round() as u32 as u16
@@ -2368,6 +2378,20 @@ mod tests {
         let (a, b) = (&sim.players[0], &sim.players[1]);
         assert!(a.player.pos[2] > -350.0 + 300.0 && a.ammo == 30, "{:?} {}", a.player.pos, a.ammo);
         assert!(b.player.pos[2] == -350.0 && b.ammo < 30);
+    }
+
+    #[test]
+    fn another_players_shots_are_heard_where_they_left_and_ones_own_are_not() {
+        let mut sim = demo();
+        sim.add_player([200.0, 0.0, -350.0]).unwrap();
+        let events: Vec<Event> = (0..30).flat_map(|_| sim.tick(&[holding(), Input { fire: true, ..holding() }], TICK)).collect();
+        let shots: Vec<V3> = events.iter().filter_map(|e| match e { Event::Shot { start, .. } => Some(*start), _ => None }).collect();
+        assert!(shots.len() >= 5, "{} shots", shots.len());
+        // Each shot is heard once by the other player, from where it left
+        let heard: Vec<(&str, V3)> = events.iter().filter_map(|e| shot_sound(e, 0)).collect();
+        assert_eq!(heard, shots.iter().map(|&s| (PLAYER_SHOT, s)).collect::<Vec<_>>());
+        // The shooter hears their own through the firing loop instead
+        assert!(events.iter().all(|e| shot_sound(e, 1).is_none()));
     }
 
     #[test]
