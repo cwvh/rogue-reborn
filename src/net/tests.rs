@@ -5,7 +5,7 @@ use crate::net::client::Status;
 use crate::net::lab::{Game, Peer, demo_setup, spawn, team_setup};
 use crate::net::link::Conditions;
 use crate::net::proto::Setup;
-use crate::net::record::{ClientRecording, ServerRecording};
+use crate::net::record::{Change, ClientRecording, ServerRecording};
 use crate::sim::{self, Event, Input, MAX_PLAYERS, Side, TICK};
 
 fn setup() -> Setup {
@@ -279,7 +279,7 @@ fn a_match_recorded_by_the_server_plays_back_the_same() {
     let size = rec.to_bytes().len() as f32 / rec.seconds();
     assert!(size < 1500.0, "{size:.0} bytes a second for four players");
     // Players came and went, and shots were judged against the past
-    let changes: usize = rec.ticks.iter().map(|t| t.changes.len()).sum();
+    let changes: usize = rec.ticks.iter().map(|t| t.changes.iter().filter(|c| !matches!(c, Change::Session(_))).count()).sum();
     assert_eq!(changes, 5, "four joins and one leave");
     assert!(rec.ticks.iter().any(|t| t.rewind.iter().any(|&r| r > 5.0)));
     let sim = back.replay().unwrap();

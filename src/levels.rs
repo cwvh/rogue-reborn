@@ -127,6 +127,19 @@ pub fn find_bases(map_path: &Path) -> Vec<BasePair> {
     Vec::new()
 }
 
+/// The game's text for one of its string IDs (`ZONE_CSL_GROUP_1_DESC` is "Upper Floors"), from
+/// its English string table
+pub fn game_text(id: &str) -> Option<String> {
+    let bytes = std::fs::read("data/text/interface/english/r6_string_table.txt").ok()?;
+    // Latin-1, as the game's fonts are
+    let text: String = bytes.iter().map(|&b| b as char).collect();
+    text.lines().find_map(|line| {
+        let (key, rest) = line.trim().split_once(char::is_whitespace)?;
+        let rest = rest.trim().strip_prefix('"')?;
+        (key == id).then(|| rest[..rest.find('"').unwrap_or(rest.len())].to_string())
+    })
+}
+
 // Pick an index in 0..n; random unless a seed is given (splitmix64)
 pub fn pick_index(n: usize, seed: Option<u64>) -> usize {
     let seed = seed.unwrap_or_else(|| {
@@ -207,6 +220,15 @@ mod tests {
         assert_eq!(p.blue, Base { name: "ZONE_KDBL_TOP".to_string(), corners: [[32613.9, 33447.0, 30400.8], [32950.6, 33457.0, 30088.4]] });
         assert_eq!(p.gold.name, "ZONE_KDBL_BACK");
         assert_eq!(pairs[3].gold.corners[1], [33109.8, 33457.0, 32342.5]);
+    }
+
+    #[test]
+    fn a_pair_of_bases_is_named_from_the_games_text() {
+        if !Path::new("data/text").exists() {
+            return;
+        }
+        assert_eq!(game_text("ZONE_CSL_GROUP_1_DESC").as_deref(), Some("Upper Floors"));
+        assert_eq!(game_text("ZONE_NO_SUCH_THING"), None);
     }
 
     #[test]

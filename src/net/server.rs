@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::net::link::{Addr, Link};
-use crate::net::proto::{Setup, Snapshot, ToClient, ToServer, split};
+use crate::net::proto::{LobbyCommand, Session, Setup, Snapshot, ToClient, ToServer, chat_text, split};
 use crate::net::record::{Change, ServerRecorder, ServerRecording};
 use crate::net::round::{Outcome, Phase, RoundState, judge, teams};
 use crate::sim::{Event, Input, Side, Sim, TICK};
@@ -70,6 +70,13 @@ pub const RESULTS: f32 = 8.0;
 /// A round's time limit (seconds) unless told otherwise: the original's 3:00
 pub const ROUND_TIME: f32 = 180.0;
 
+/// How long (seconds) a hosted game waits for its host to join before it ends
+pub const HOST_WAIT: f64 = 30.0;
+
+/// What a message in parts is numbered when it is an `Accept`, so that its parts are not
+/// taken for a snapshot's
+const ACCEPT_PARTS: u32 = u32::MAX;
+
 /// A player in a round, as the server keeps it
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Seat {
@@ -119,6 +126,12 @@ struct Remote {
     sent: VecDeque<Snapshot>,
     /// The round the client's game is in (`ToServer::Input::round`)
     round: u16,
+    /// Joined with the host key
+    host: bool,
+    /// Said ready in the lobby
+    ready: bool,
+    /// The number of the latest lobby command taken, refused or not
+    lobby_seq: u32,
 }
 
 impl Remote {
@@ -217,6 +230,25 @@ pub struct Server {
     pub records: Vec<RoundRecord>,
     /// Lines for the server's log from the rounds
     news: Vec<Event>,
+    /// What players have said since the last tick, to go out with the next one's events
+    chat: Vec<Event>,
+    /// The key that makes whoever joins with it the host, if there is one. A hosted game is
+    /// the host's: it ends without them.
+    host_key: Option<u64>,
+    hosted: bool,
+    /// Whether the host has joined yet, and when (seconds) the server began
+    host_came: bool,
+    began: Option<f64>,
+    /// How long (seconds) a hosted game waits for its host (`HOST_WAIT`)
+    host_wait: f64,
+    /// Why the game is over, once it is
+    ended: Option<String>,
+    /// Counts the times the phase has entered Lobby or Countdown (`Session::generation`)
+    generation: u32,
+    /// Which of the setup's base pairs the sides start from
+    base_pair: u8,
+    /// The session as last recorded
+    recorded: Option<Session>,
 }
 
 impl Server {
@@ -224,10 +256,40 @@ impl Server {
         assert!(!spawns.is_empty(), "players need somewhere to start");
         let mut sim = sim;
         sim.spawns = spawns.clone();
+        let base_pair = setup.base_pairs.iter().position(|p| p.bases == setup.bases).unwrap_or(0) as u8;
         Server {
             sim, setup, build: build.to_string(), spawns, spawned: 0, remotes: Vec::new(), tick: 0, next_tick_at: None, events: VecDeque::new(), next_event: 1,
             snapshot_every: SNAPSHOT_EVERY, lag_compensation: true, max_rewind: MAX_REWIND / TICK, snapshots_sent: 0, snapshot_bytes: 0, snapshots_split: 0, recorder: None,
-            round: RoundState::default(), until: None, time_limit: Some(ROUND_TIME), auto_start: false, seats: Vec::new(), records: Vec::new(), news: Vec::new(),
+            round: RoundState::default(), until: None, time_limit: Some(ROUND_TIME), auto_start: false, seats: Vec::new(), records: Vec::new(), news: Vec::new(), chat: Vec::new(),
+            host_key: None, hosted: false, host_came: false, began: None, host_wait: HOST_WAIT, ended: None, generation: 0, base_pair, recorded: None,
+        }
+    }
+
+    /// Whoever joins with `key` is the host, unless it is 0. With `hosted`, the game is theirs:
+    /// it ends when they leave, or if they have not come `HOST_WAIT` seconds after it began.
+    pub fn set_host_key(&mut self, key: u64, hosted: bool) {
+        self.host_key = (key != 0).then_some(key);
+        self.hosted = hosted && key != 0;
+    }
+
+    /// Wait this long (seconds) for the host of a hosted game, not `HOST_WAIT`
+    pub fn set_host_wait(&mut self, seconds: f64) {
+        self.host_wait = seconds;
+    }
+
+    /// Why the game is over, once it is: the server has sent everyone away
+    pub fn ended(&self) -> Option<&str> {
+        self.ended.as_deref()
+    }
+
+    /// The session's settings, as every snapshot says
+    pub fn session(&self) -> Session {
+        Session {
+            generation: self.generation,
+            host: self.remotes.iter().find(|r| r.host).map(|r| r.slot as u8),
+            time_limit: self.time_limit.map(|t| t.round().clamp(1.0, u16::MAX as f32) as u16),
+            friendly_fire: self.sim.friendly_fire,
+            base_pair: self.base_pair,
         }
     }
 
@@ -263,11 +325,30 @@ impl Server {
     /// Turn friendly fire on or off, only in the lobby as `set_time_limit`
     pub fn set_friendly_fire(&mut self, on: bool) -> bool {
         let open = matches!(self.round.phase, Phase::Open | Phase::Lobby);
-        if open {
+        if open && self.sim.friendly_fire != on {
             self.setup.friendly_fire = on;
             self.sim.friendly_fire = on;
+            if let Some(rec) = self.recorder.as_mut() {
+                rec.changed(Change::FriendlyFire(on));
+            }
         }
         open
+    }
+
+    /// Start the sides from pair `i` of the setup's base pairs, from the next round. Only in the
+    /// lobby, as `set_time_limit`.
+    pub fn set_base_pair(&mut self, i: u8) -> bool {
+        let open = matches!(self.round.phase, Phase::Open | Phase::Lobby);
+        let Some(pair) = self.setup.base_pairs.get(i as usize).filter(|_| open) else { return false };
+        if i != self.base_pair {
+            self.setup.bases = pair.bases.clone();
+            self.sim.bases = pair.bases.clone();
+            self.base_pair = i;
+            if let Some(rec) = self.recorder.as_mut() {
+                rec.changed(Change::Bases(i));
+            }
+        }
+        true
     }
 
     /// Start the countdown to the next round, from the lobby
@@ -329,6 +410,10 @@ impl Server {
     /// Everything that has arrived is dealt with, and the game runs for as many ticks as `now`
     /// has brought. Returns what happened in them, for the server's own log.
     pub fn update(&mut self, now: f64, link: &mut impl Link) -> Vec<Event> {
+        if self.ended.is_some() {
+            return std::mem::take(&mut self.news);
+        }
+        self.began.get_or_insert(now);
         while let Some((from, bytes)) = link.recv() {
             if let Ok(msg) = ToServer::decode(&bytes) {
                 self.receive(now, from, msg, link);
@@ -352,7 +437,7 @@ impl Server {
 
     fn receive(&mut self, now: f64, from: Addr, msg: ToServer, link: &mut impl Link) {
         match msg {
-            ToServer::Connect { token, build, side: wish } => {
+            ToServer::Connect { token, build, side: wish, key } => {
                 if let Some(r) = self.remotes.iter().find(|r| r.addr == from) {
                     // It did not hear us the first time
                     if r.token == token {
@@ -384,11 +469,31 @@ impl Server {
                         rec.changed(Change::SatOut { slot: slot as u8 });
                     }
                 }
+                // One host at a time, and never without a key
+                let host = self.host_key.is_some_and(|k| k == key) && !self.remotes.iter().any(|r| r.host);
+                if host {
+                    self.host_came = true;
+                    self.say(format!("player {slot} is the host"));
+                }
                 self.remotes.push(Remote {
                     addr: from, token, slot, queue: BTreeMap::new(), next_seq: None, last_input: Input { run: true, ..Input::default() }, starved: 0, last_view: 0, low: usize::MAX, looked: 0,
                     applied_seq: 0, event_ack: self.next_event - 1, in_flight: VecDeque::new(), heard: now, acked: 0, sent: VecDeque::new(), round: 0,
+                    host, ready: false, lobby_seq: 0,
                 });
                 self.accept(link, from, token, slot);
+            }
+            ToServer::Lobby { token, seq, generation, command } => {
+                let Some(i) = self.remotes.iter().position(|r| r.addr == from && r.token == token) else { return };
+                self.remotes[i].heard = now;
+                // Each is taken once, in order: the next after the last, and no other
+                if self.remotes[i].lobby_seq.checked_add(1) != Some(seq) {
+                    return;
+                }
+                self.remotes[i].lobby_seq = seq;
+                let slot = self.remotes[i].slot;
+                let took = self.lobby(i, generation, command.clone());
+                let refused = if took { "" } else { ", refused" };
+                self.say(format!("player {slot} asked for {command:?}{refused}"));
             }
             ToServer::Input { token, ack_snapshot, first_seq, view, round, inputs } => {
                 let Some(r) = self.remotes.iter_mut().find(|r| r.addr == from && r.token == token) else { return };
@@ -418,6 +523,65 @@ impl Server {
                 }
             }
         }
+    }
+
+    /// Do what a player asks for in the lobby, if they may. Says whether it was done.
+    fn lobby(&mut self, i: usize, generation: u32, command: LobbyCommand) -> bool {
+        let (slot, host) = (self.remotes[i].slot, self.remotes[i].host);
+        let lobby = self.round.phase == Phase::Lobby;
+        // Made for another lobby or countdown than this one. What is said is said whenever.
+        if generation != self.generation && !matches!(command, LobbyCommand::Say(_)) {
+            return false;
+        }
+        match command {
+            LobbyCommand::Say(text) => match chat_text(&text) {
+                Some(text) => {
+                    let dead = self.in_round() && self.sim.players[slot].respawn_at.is_some();
+                    self.chat.push(Event::Chat { player: slot, text, dead });
+                    true
+                }
+                None => false,
+            },
+            LobbyCommand::Side(side) => {
+                if !lobby || self.sim.bases.iter().any(Vec::is_empty) {
+                    return false;
+                }
+                if self.sim.players[slot].side != Some(side) {
+                    self.sim.players[slot].side = Some(side);
+                    self.remotes[i].ready = false;
+                    if let Some(rec) = self.recorder.as_mut() {
+                        rec.changed(Change::Side { slot: slot as u8, side: Some(side) });
+                    }
+                }
+                true
+            }
+            LobbyCommand::Ready(on) => {
+                if lobby {
+                    self.remotes[i].ready = on;
+                }
+                lobby
+            }
+            LobbyCommand::Start if host => lobby && teams(&self.sim, false).len() >= 2 && self.start_countdown(),
+            LobbyCommand::Stop if host => self.stop_countdown(),
+            LobbyCommand::TimeLimit(t) if host => lobby && self.set_time_limit(t.map(f32::from)),
+            LobbyCommand::FriendlyFire(on) if host => lobby && self.set_friendly_fire(on),
+            LobbyCommand::BasePair(n) if host => lobby && self.set_base_pair(n),
+            _ => false,
+        }
+    }
+
+    /// Whether a round is being played, from its loading to its end
+    fn in_round(&self) -> bool {
+        matches!(self.round.phase, Phase::Loading | Phase::Hold | Phase::Live)
+    }
+
+    /// The game is over: everyone is sent away, with why (`ended`)
+    fn end(&mut self, why: &str, link: &mut impl Link) {
+        for r in std::mem::take(&mut self.remotes) {
+            link.send(r.addr, &ToClient::Goodbye { token: r.token, reason: why.to_string() }.encode().0);
+            self.drop_player(r.slot);
+        }
+        self.ended = Some(why.to_string());
     }
 
     /// The side a player joining a team game goes on: the one they asked for, unless it has
@@ -453,6 +617,13 @@ impl Server {
     /// is being played.
     fn set_phase(&mut self, phase: Phase, seconds: Option<f32>) {
         self.round.phase = phase;
+        // A new lobby or countdown: commands made for the last are stale
+        if matches!(phase, Phase::Lobby | Phase::Countdown) {
+            match self.generation.checked_add(1) {
+                Some(g) => self.generation = g,
+                None => self.ended = Some("the session ran out of numbers".to_string()),
+            }
+        }
         self.until = seconds.map(|s| self.tick + (s / TICK).round() as u32);
         self.round.ends = seconds.map(|s| self.sim.time + s);
         if self.sim.frozen != phase.frozen() {
@@ -493,7 +664,7 @@ impl Server {
                     let slow: Vec<usize> = (0..self.remotes.len()).rev().filter(|&i| seated(&self.remotes[i], &self.seats) && self.remotes[i].round != number).collect();
                     for i in slow {
                         let r = self.remotes.remove(i);
-                        link.send(r.addr, &ToClient::Goodbye { token: r.token }.encode().0);
+                        link.send(r.addr, &ToClient::Goodbye { token: r.token, reason: "you took too long to load the round".to_string() }.encode().0);
                         self.say(format!("player {} took too long to load and was dropped", r.slot));
                         self.drop_player(r.slot);
                     }
@@ -536,6 +707,10 @@ impl Server {
             rec.changed(Change::Round { seed });
         }
         self.seats = self.sim.players.iter().enumerate().filter(|(_, p)| p.active).map(|(slot, p)| Seat { slot, side: p.side, present: true }).collect();
+        // Each round asks again
+        for r in &mut self.remotes {
+            r.ready = false;
+        }
         self.say(format!("round {} is loading", self.round.number));
         self.set_phase(Phase::Loading, Some(LOAD_TIMEOUT));
     }
@@ -572,7 +747,10 @@ impl Server {
 
     fn accept(&self, link: &mut impl Link, to: Addr, token: u32, slot: usize) {
         let msg = ToClient::Accept { token, slot: slot as u8, tick: self.tick, setup: self.setup.clone() };
-        link.send(to, &msg.encode().0);
+        // A level with many pairs of bases can make it too big for one datagram
+        for d in split(ACCEPT_PARTS, msg.encode().0) {
+            link.send(to, &d);
+        }
     }
 
     /// One tick of the game
@@ -588,7 +766,8 @@ impl Server {
         }
         self.sim.rewind = rewind.clone();
         let fired_before = self.sim.fired.as_ref().map_or(0, Vec::len);
-        let events = self.sim.tick(&inputs, TICK);
+        let mut events = self.sim.tick(&inputs, TICK);
+        events.append(&mut self.chat);
         if let Some(fired) = self.sim.fired.as_mut() {
             for f in &mut fired[fired_before..] {
                 // The input the client sent for this tick, though it may never have come
@@ -614,6 +793,19 @@ impl Server {
             self.drop_player(r.slot);
         }
         self.run_rounds(link);
+        // A hosted game is over when its host has gone, or never came
+        if self.hosted && self.ended.is_none() {
+            if self.host_came && !self.remotes.iter().any(|r| r.host) {
+                self.end("the host left", link);
+            } else if !self.host_came && self.began.is_some_and(|t| now - t > self.host_wait) {
+                self.end("the host never came", link);
+            }
+        }
+        let session = self.session();
+        if let Some(rec) = self.recorder.as_mut().filter(|_| self.recorded != Some(session)) {
+            rec.changed(Change::Session(session));
+            self.recorded = Some(session);
+        }
 
         if self.tick % self.snapshot_every == 0 {
             for i in 0..self.remotes.len() {
@@ -627,8 +819,18 @@ impl Server {
         let r = &self.remotes[i];
         let mut snap = Snapshot::capture(&self.sim, self.tick, r.slot, r.applied_seq);
         snap.round = self.round;
+        snap.session = self.session();
+        snap.lobby_ack = r.lobby_seq;
+        for p in &mut snap.players {
+            p.ready = self.remotes.iter().any(|q| q.slot == p.slot as usize && q.ready);
+        }
         let stored = snap.clone();
-        snap.events = self.events.iter().filter(|(_, id, _)| *id > r.event_ack).map(|(_, id, e)| (*id, e.clone())).collect();
+        // The living in a round do not hear the dead
+        let deaf = self.in_round() && self.sim.players[r.slot].respawn_at.is_none();
+        snap.events = self.events.iter()
+            .filter(|(_, id, e)| *id > r.event_ack && !(deaf && matches!(e, Event::Chat { dead: true, .. })))
+            .map(|(_, id, e)| (*id, e.clone()))
+            .collect();
         let ids: Vec<u32> = snap.events.iter().map(|(id, _)| *id).collect();
         // What the client is known to have is what this one is told as the difference from,
         // if it is of the same round: a new round puts back what only ever changes one way

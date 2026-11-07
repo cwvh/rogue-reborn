@@ -15,7 +15,7 @@
 use std::net::ToSocketAddrs;
 use std::time::{Duration, Instant};
 
-use rogue_reborn::net::bot::{Bot, Skill};
+use rogue_reborn::net::bot::{Bot, Skill, say_ready};
 use rogue_reborn::net::client::{Client, Status};
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
 use rogue_reborn::net::setup::build_sim;
@@ -138,6 +138,7 @@ fn main() {
             };
             let before = client.snapshots;
             let news = client.tick(now, &mut link, &mut sim, input);
+            say_ready(&mut client);
             // A fighter says at once who killed whom, as it may never get to the end
             if fight && !quiet {
                 for e in &news {

@@ -13,6 +13,14 @@ pub struct Args {
     pub connect: Option<String>,
     /// The side to ask for, in a team game
     pub side: Option<rogue_reborn::sim::Side>,
+    /// Start a server for a Team Survival game and join it as the host: on --level (or --map,
+    /// or --demo), on this port, with these settings to begin with
+    pub host: bool,
+    pub port: Option<u16>,
+    pub round_time: Option<String>,
+    pub base_pair: Option<String>,
+    pub no_friendly_fire: bool,
+    pub max_players: Option<String>,
     /// Make the connection to the server worse, to see how the game copes: milliseconds each
     /// way, milliseconds of jitter, and the share of datagrams lost (0 to 1)
     pub sim_latency: f64,
@@ -115,6 +123,12 @@ pub fn parse_args() -> Args {
             "--list-levels" => args.list_levels = true,
             "--connect" => args.connect = it.next(),
             "--side" => args.side = it.next().and_then(|s| rogue_reborn::sim::Side::named(&s)),
+            "--host" => args.host = true,
+            "--port" => args.port = it.next().and_then(|v| v.parse().ok()),
+            "--round-time" => args.round_time = it.next(),
+            "--base-pair" => args.base_pair = it.next(),
+            "--no-friendly-fire" => args.no_friendly_fire = true,
+            "--max-players" => args.max_players = it.next(),
             "--sim-latency" => args.sim_latency = it.next().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 1000.0,
             "--sim-jitter" => args.sim_jitter = it.next().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 1000.0,
             "--sim-loss" => args.sim_loss = it.next().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0) / 100.0,

@@ -4,6 +4,7 @@
 pub mod animation;
 pub mod bot;
 pub mod client;
+pub mod host;
 pub mod lab;
 pub mod link;
 pub mod meter;
@@ -16,6 +17,8 @@ pub mod watch;
 
 #[cfg(test)]
 mod fairness;
+#[cfg(test)]
+mod lobby_tests;
 #[cfg(test)]
 mod round_tests;
 #[cfg(test)]

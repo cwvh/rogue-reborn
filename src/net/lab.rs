@@ -20,7 +20,7 @@ use std::collections::VecDeque;
 use crate::net::bot::{Bot, Skill};
 use crate::net::client::{Client, Frame};
 use crate::net::link::{Conditions, FakeLink, FakeNet};
-use crate::net::proto::Setup;
+use crate::net::proto::{BasePairSetup, LobbyCommand, Setup};
 use crate::net::record::ClientRecorder;
 use crate::net::server::Server;
 use crate::net::setup::build_sim;
@@ -48,15 +48,20 @@ pub fn demo_setup() -> Setup {
         respawn: true,
         bases: [Vec::new(), Vec::new()],
         uniforms: crate::net::proto::UNIFORMS.map(String::from),
+        base_pairs: Vec::new(),
         doors_open: None,
         mission: None,
         npcs: Vec::new(),
     }
 }
 
-/// The box room set up for a team game: Blue starts along the south wall, Gold along the north
+/// The box room set up for a team game: Blue starts along the south wall, Gold along the north.
+/// The host can swap them.
 pub fn team_setup() -> Setup {
-    Setup { pvp: true, bases: crate::demo::bases().map(|b| b.starts().to_vec()), ..demo_setup() }
+    let bases = crate::demo::bases().map(|b| b.starts().to_vec());
+    let swapped = [bases[1].clone(), bases[0].clone()];
+    let base_pairs = vec![BasePairSetup { name: "SOUTH_NORTH".to_string(), bases: bases.clone() }, BasePairSetup { name: "NORTH_SOUTH".to_string(), bases: swapped }];
+    Setup { pvp: true, bases, base_pairs, ..demo_setup() }
 }
 
 /// Where player `i` starts in the box room: in rows of eight along the south wall
@@ -324,6 +329,16 @@ impl Game {
         self.peers[peer].remote = conditions.latency > 0.005;
     }
 
+    /// A player clicks in the lobby, which their recording keeps if they make one
+    pub fn lobby(&mut self, peer: usize, command: LobbyCommand) {
+        let now = self.steps as f64 * TICK as f64;
+        let p = &mut self.peers[peer];
+        if let Some(rec) = p.recorder.as_mut() {
+            rec.lobby(now, command.clone());
+        }
+        p.client.lobby(command);
+    }
+
     /// Everyone's computer runs as many ticks as its clock has come to, usually one, then the
     /// server looks at what has come in
     pub fn step(&mut self) {
@@ -383,6 +398,9 @@ impl Game {
             };
             p.ticks += 1;
             let news = p.client.tick(now, &mut p.link, sim, input);
+            if p.bot.is_some() {
+                crate::net::bot::say_ready(&mut p.client);
+            }
             if let Some(rec) = p.recorder.as_mut() {
                 rec.ticked(now, input, &mut p.client, sim);
             }

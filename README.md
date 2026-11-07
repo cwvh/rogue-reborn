@@ -171,9 +171,15 @@ who dies comes back after 3.7 seconds at the spawn point farthest from the other
 ### Team games and rounds
 
 ```
-rrsrv --level citystreet_large --teams --rounds
-rr --connect 127.0.0.1:27960 --side blue --first-person --textured
+rr --host --level citystreet_large --first-person --textured
+rr --connect HOST:27960 --side blue --first-person --textured
 ```
+
+`rr --host` starts a Team Survival server and joins it as the host. Between rounds everyone
+waits in the lobby, laid out after the original's session screen. Players pick a side and say
+ready there, and the host sets the round length, friendly fire and the bases, and starts each
+round. Closing the host's window ends the game. A dedicated server, `rrsrv --level
+citystreet_large --teams --rounds`, starts each round by itself instead.
 
 - `--teams` puts players on two sides, Blue and Gold, starting from a pair of the level's bases
   (`--base-pair N`, or one the seed picks). `--side blue|gold` on `rr` and `rrbot` asks for a
@@ -181,10 +187,10 @@ rr --connect 127.0.0.1:27960 --side blue --first-person --textured
   Desert 1 Medium, as ladder play had it.
 - Friendly fire is on, as in competitive play. `--no-friendly-fire` turns it off.
 - `--rounds` plays in rounds with one life each: Team Survival with `--teams`, last one standing
-  without. A round starts with a 5 second countdown once both sides have someone. Everyone is
-  put back in their base and held for 2 seconds, then let go. The round lasts 3 minutes
-  (`--round-time SECONDS`, 0 for no limit). It ends when one side is left, or in a draw when the
-  time runs out or no one is left. Then 8 seconds of results, and the next countdown.
+  without. A round starts with a 5 second countdown, from the host or once both sides have
+  someone. Everyone is put back in their base and held for 2 seconds, then let go. The round
+  lasts 3 minutes (`--round-time SECONDS`, 0 for no limit). It ends when one side is left, or in
+  a draw when the time runs out or no one is left. Then 8 seconds of results, and the lobby.
 - A team game has no terrorists.
 
 ### How it stays fair

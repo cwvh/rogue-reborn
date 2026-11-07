@@ -90,16 +90,16 @@ fn kills(game: &Game, peer: usize) -> Vec<(Option<usize>, usize, Cause)> {
 #[test]
 fn a_round_is_won_by_the_last_side_standing_and_everyone_sees_it() {
     let mut game = in_rounds(face_off());
-    // Blue holds the trigger throughout. In the lobby players are free, so Gold is hurt
-    // already, and the round starts them over.
+    // Blue holds the trigger throughout. In the lobby and the countdown everyone is held, so
+    // no shot is fired and Gold is unhurt.
     let blue = join(&mut game, Side::Blue, shooter(Side::Blue, |_| true));
     let gold = join(&mut game, Side::Gold, idle(Side::Gold));
     game.run(1.0);
     assert_eq!(game.server.round().phase, Phase::Lobby);
-    assert!(game.server.sim.players[slot(&game, gold)].hp < PLAYER_HP);
     assert!(game.server.start_countdown());
     assert!(run_until(&mut game, Phase::Hold, 10.0));
     assert_eq!(game.server.sim.players[slot(&game, gold)].hp, PLAYER_HP);
+    assert!(!game.peers[gold].events.iter().any(|e| matches!(e, Event::Shot { .. })), "a shot before the round");
     assert!(run_until(&mut game, Phase::Results, 20.0));
     assert_eq!(game.server.round().last, Some(Outcome::Won(Side::Blue)));
     assert_eq!(game.server.round().wins, [1, 0]);
@@ -218,7 +218,6 @@ fn no_one_moves_or_looks_around_until_everyone_has_loaded_and_two_more_seconds_p
     assert_eq!((game.server_pos(b), game.server.sim.players[b].look), (pos, look), "Blue moved before being let go");
     // Their own screen held them too, looking where they were when the hold began
     assert_eq!(game.me(blue), pos);
-    assert_ne!(look, (0, 0));
     assert_eq!(game.sim_of(blue).players[b].look, look);
     assert!(run_until(&mut game, Phase::Live, 0.5));
     game.run(0.5);
@@ -241,7 +240,7 @@ fn a_player_who_takes_too_long_to_load_is_dropped_and_the_round_goes_on() {
     let waited = (game.steps - start) as f32 * TICK;
     assert!(waited >= LOAD_TIMEOUT + RELEASE_AFTER - 0.1, "{waited} s");
     game.run(0.5);
-    assert_eq!(game.peers[slow].client.status, Status::Lost);
+    assert_eq!(game.peers[slow].client.status, Status::SentAway("you took too long to load the round".to_string()));
     assert_eq!(game.server.players(), 2);
     assert!(!game.server.sim.players[s].active);
 }

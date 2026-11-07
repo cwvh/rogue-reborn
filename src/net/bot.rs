@@ -6,7 +6,9 @@
 //!
 //! `rrbot --fight` plays one over a real network.
 
-use crate::net::client::{Frame, Seen};
+use crate::net::client::{Client, Frame, Seen};
+use crate::net::proto::LobbyCommand;
+use crate::net::round::Phase;
 use crate::sim::{Input, Sim, TICK};
 
 type V3 = [f32; 3];
@@ -37,6 +39,14 @@ const BORED_DROP: f32 = 1500.0;
 const DOOR_SIGHT: f32 = 600.0;
 const DOOR_PRESS: f32 = 170.0;
 const DOOR_AGAIN: f32 = 30.0;
+
+/// A bot is always ready: it says so in each lobby, so that a host need not wait for it
+pub fn say_ready(client: &mut Client) {
+    let ready = client.ready.contains(&client.slot());
+    if client.round.phase == Phase::Lobby && !ready && client.lobby_waiting().next().is_none() {
+        client.lobby(LobbyCommand::Ready(true));
+    }
+}
 
 /// How well a bot plays
 #[derive(Clone, Copy, Debug, PartialEq)]

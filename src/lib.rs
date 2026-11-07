@@ -31,3 +31,5 @@ pub mod levels;
 pub mod mission;
 pub mod kit;
 pub mod gfcm;
+pub mod ui;
+pub mod lobby;

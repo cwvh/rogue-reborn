@@ -6,15 +6,21 @@ mod hud;
 mod opengl;
 mod player;
 mod textures;
+mod ui_gl;
 
 use std::path::{Path, PathBuf};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 use std::rc::Rc;
 use std::net::ToSocketAddrs;
 use rogue_reborn::{map, rsb, actor, combat, crp, demo, grenade, blastlight, concussion, recording, skeleton, sim, sound, weapon, ambience, glass};
 use rogue_reborn::net::client::{Client, Seen, Status};
+use rogue_reborn::net::host::{HostedServer, STARTUP, new_key};
+use rogue_reborn::net::proto::LobbyCommand;
+use rogue_reborn::lobby::{self, Chat, Gate, LobbyView};
+use rogue_reborn::ui::{Canvas, Pointer, Ui};
+use crate::ui_gl::UiGl;
 use rogue_reborn::net::animation::Doing;
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
 use rogue_reborn::recording::{Playback, Recorder, Recording};
@@ -149,6 +155,39 @@ fn main() {
         args.walk = None;
         Playback::new(rec)
     });
+    // Hosting: a server of our own for a Team Survival game, which we join as its host. A key
+    // in RR_HOST_KEY makes us the host of a server started with it.
+    let mut hosted: Option<HostedServer> = None;
+    let mut key = std::env::var("RR_HOST_KEY").ok().and_then(|k| k.trim().parse::<u64>().ok()).unwrap_or(0);
+    if args.host {
+        key = new_key();
+        let port = args.port.unwrap_or(27960);
+        let mut server_args: Vec<String> = ["--teams", "--rounds", "--port", &port.to_string()].map(String::from).to_vec();
+        match (&args.map, &args.level) {
+            _ if args.demo => server_args.push("--demo".to_string()),
+            (Some(map), _) => server_args.extend(["--map".to_string(), map.display().to_string()]),
+            (None, level) => server_args.extend(["--level".to_string(), level.clone().unwrap_or_else(|| "citystreet_large".to_string())]),
+        }
+        let max_players = Some(args.max_players.clone().unwrap_or_else(|| "8".to_string()));
+        for (flag, value) in [("--seed", args.seed.map(|s| s.to_string())), ("--round-time", args.round_time.clone()), ("--base-pair", args.base_pair.clone()), ("--max-players", max_players)] {
+            if let Some(v) = value {
+                server_args.extend([flag.to_string(), v]);
+            }
+        }
+        if args.no_friendly_fire {
+            server_args.push("--no-friendly-fire".to_string());
+        }
+        // rrsrv is beside rr
+        let exe = std::env::current_exe().map(|e| e.with_file_name(format!("rrsrv{}", std::env::consts::EXE_SUFFIX)));
+        match exe.map_err(anyhow::Error::from).and_then(|exe| HostedServer::start(&exe, &server_args, key, STARTUP)) {
+            Ok(server) => hosted = Some(server),
+            Err(e) => {
+                eprintln!("could not host: {e:#}");
+                std::process::exit(1);
+            }
+        }
+        args.connect = Some(format!("127.0.0.1:{port}"));
+    }
     // Joining a server: the game is set up as it says, so ask it before anything is loaded
     let net_clock = Instant::now();
     let mut net: Option<(Client, Impaired<UdpLink>)> = None;
@@ -169,6 +208,7 @@ fn main() {
         let token = (std::process::id() ^ 0x5bd1e995).wrapping_mul(2654435761);
         let mut client = Client::new(to_server, token, option_env!("GIT_HASH").unwrap_or("unknown"));
         client.ask_side(args.side);
+        client.set_key(key);
         if args.record.is_some() {
             client.start_tape();
             net_recorder = Some(ClientRecorder::new(option_env!("GIT_HASH").unwrap_or("unknown"), token));
@@ -186,10 +226,12 @@ fn main() {
             match &client.status {
                 Status::Refused(why) => {
                     eprintln!("the server refused us: {why}");
+                    drop(hosted.take());
                     std::process::exit(1);
                 }
                 _ if now > 10.0 => {
                     eprintln!("no answer from {address}");
+                    drop(hosted.take());
                     std::process::exit(1);
                 }
                 _ => {}
@@ -273,6 +315,7 @@ fn main() {
     window.set_framebuffer_size_polling(true);
     window.set_scroll_polling(true);
     window.set_mouse_button_polling(true);
+    window.set_char_polling(true);
     gl::load_with(|s| window.get_proc_address(s) as *const _);
 
     // OpenGL setup
@@ -646,11 +689,26 @@ fn main() {
     let mut last_cursor_pos = None;
     let mut recent_log: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     window.set_cursor_mode(CursorMode::Disabled);
+    // The lobby between rounds (see lobby.rs), drawn over everything with the original's art.
+    // While it shows, the keys and mouse are its, and the pointer is free.
+    let mut ui = Ui::load(Path::new("data/font"));
+    let ui_gl = UiGl::load(&ui, Path::new("data/bitmap"));
+    let mut gate: Gate<Key> = Gate::default();
+    let mut pointer_down = false;
+    // The chat, for the whole game, what has been typed for it to say, and the wheel turned
+    // over the lobby since the last frame
+    let mut chat = Chat::default();
+    let mut typed: Vec<LobbyCommand> = Vec::new();
+    let mut wheel = 0.0f32;
+    let level_name = joined.as_ref().map(|s| Path::new(&s.map).file_stem().map_or(s.map.clone(), |n| n.to_string_lossy().into_owned())).unwrap_or_default();
+    let pair_names: Vec<String> = joined.as_ref().map(|s| s.base_pairs.iter().map(|p| rogue_reborn::levels::game_text(&p.name).unwrap_or_else(|| p.name.clone())).collect()).unwrap_or_default();
+    let uniform_names: [String; 2] = joined.as_ref().map(|s| s.uniforms.clone().map(|u| lobby::uniform_name(&u))).unwrap_or_default();
+    // Hosting, the server we joined must name us its host, or it is someone else's
+    let mut host_checked = hosted.is_none();
 
     let mut render_time = Instant::now();
     let mut last_step = Instant::now();
 
-    let mut keys = HashSet::new();
     let mut textures = HashMap::new();
     let mut textured = args.textured;
     let mut first_person = args.first_person;
@@ -754,12 +812,35 @@ fn main() {
     while !window.should_close() {
         glfw.poll_events();
 
+        // Between rounds the lobby shows. Whatever was held when it comes or goes is let go.
+        let showing = net.as_ref().is_some_and(|(c, _)| c.status == Status::Connected && matches!(c.round.phase, Phase::Lobby | Phase::Countdown));
+        if gate.show(showing) {
+            (trigger, walk_held, pointer_down, wheel) = (false, false, false, 0.0);
+            (use_pressed, reload_pressed, gun_pressed, grenade_pressed, culling_pressed) = (false, false, false, false, false);
+            // The first movement after it does not turn the view
+            last_cursor_pos = None;
+            window.set_cursor_mode(if showing { CursorMode::Normal } else { CursorMode::Disabled });
+        }
+
         for (_, event) in glfw::flush_messages(&events) {
             match event {
                 WindowEvent::Key(key, _, action, _) => {
                     match (key, action) {
+                        // In the lobby, Escape clears the chat's line first
                         (Key::Escape, Action::Press) => {
-                            window.set_should_close(true)
+                            if !(gate.showing() && chat.clear()) {
+                                window.set_should_close(true)
+                            }
+                        }
+                        // The lobby's keys type on the chat's line, and only the keys for
+                        // dumps go through to the game
+                        (k, action) if gate.showing() && !matches!(k, Key::F2 | Key::F3 | Key::F4) => {
+                            match (k, action) {
+                                (Key::Enter | Key::KpEnter, Action::Press) => typed.extend(chat.send()),
+                                (Key::Backspace, Action::Press | Action::Repeat) => chat.erase(),
+                                (_, Action::Release) => gate.release(k),
+                                _ => {}
+                            }
                         }
                         (Key::T, Action::Press) => {
                             textured = !textured;
@@ -840,14 +921,17 @@ fn main() {
                             first_person = !first_person;
                         }
                         (k, Action::Press) => {
-                            keys.insert(k);
+                            gate.press(k);
                         }
                         (k, Action::Release) => {
-                            keys.remove(&k);
+                            gate.release(k);
                         }
                         _ => {}
                     }
                 }
+                WindowEvent::Char(c) if gate.showing() => chat.typed(c),
+                WindowEvent::Scroll(_, y) if gate.showing() => wheel += y as f32,
+                WindowEvent::CursorPos(..) if gate.showing() => {}
                 WindowEvent::CursorPos(xpos, ypos) => {
                     // A scripted run (--walk) or a replay is not steered by a real mouse
                     if let (Some((last_x, last_y)), None, false) = (last_cursor_pos, args.walk, playback.is_some()) {
@@ -862,6 +946,11 @@ fn main() {
                 WindowEvent::FramebufferSize(width, height) => {
                     unsafe { glViewport(0, 0, width, height); }
                 }
+                // In the lobby, the main button clicks on it
+                WindowEvent::MouseButton(glfw::MouseButton::Button1, action, _) if gate.showing() => {
+                    pointer_down = action != Action::Release;
+                }
+                WindowEvent::MouseButton(_, _, _) if gate.showing() => {}
                 // Watching, the buttons go to the next teammate and back, on a press
                 WindowEvent::MouseButton(glfw::MouseButton::Button1, action, _) => {
                     trigger = action != Action::Release;
@@ -913,7 +1002,7 @@ fn main() {
             // C crouches for the whole run; K switches stance at frame 30, to see the change
             crouch_wanted = held.contains('C') != (held.contains('K') && frames_drawn >= 30);
             for (ch, key) in [('W', Key::W), ('A', Key::A), ('S', Key::S), ('D', Key::D)] {
-                if frames_drawn < n && held.contains(ch) { keys.insert(key); } else { keys.remove(&key); }
+                gate.set(key, frames_drawn < n && held.contains(ch));
             }
             if frames_drawn % 10 == 0 {
                 println!("frame {frames_drawn:4} crouch_wanted={crouch_wanted} crouched={} feet=({:.1}, {:.1}, {:.1}) on_ground={} movement={movement:?} anim_frame={player_frame:.1}",
@@ -930,7 +1019,7 @@ fn main() {
         // Free-fly: WASD moves the view (hold LeftShift to move faster)
         if !first_person && playback.is_none() {
             let mut speed = base_speed;
-            if keys.contains(&Key::LeftShift) {
+            if gate.held(Key::LeftShift) {
                 speed *= 5.0;
             }
             let right = camera.get_right();
@@ -938,19 +1027,19 @@ fn main() {
             let fwd_flat = [-yaw_rad.sin(), 0.0, -yaw_rad.cos()];
             // Desired horizontal displacement for this frame, in camera space
             let mut mv = [0.0f32; 2];
-            if keys.contains(&Key::W) {
+            if gate.held(Key::W) {
                 mv[0] += fwd_flat[0] * speed;
                 mv[1] += fwd_flat[2] * speed;
             }
-            if keys.contains(&Key::S) {
+            if gate.held(Key::S) {
                 mv[0] -= fwd_flat[0] * speed;
                 mv[1] -= fwd_flat[2] * speed;
             }
-            if keys.contains(&Key::A) {
+            if gate.held(Key::A) {
                 mv[0] -= (right[0] * speed) / 2.0;
                 mv[1] -= (right[2] * speed) / 2.0;
             }
-            if keys.contains(&Key::D) {
+            if gate.held(Key::D) {
                 mv[0] += (right[0] * speed) / 2.0;
                 mv[1] += (right[2] * speed) / 2.0;
             }
@@ -967,14 +1056,14 @@ fn main() {
 
         // The game runs in fixed ticks, however fast the frames come
         let mut input = sim::Input {
-            forward: keys.contains(&Key::W),
-            back: keys.contains(&Key::S),
-            left: keys.contains(&Key::A),
-            right: keys.contains(&Key::D),
+            forward: gate.held(Key::W),
+            back: gate.held(Key::S),
+            left: gate.held(Key::A),
+            right: gate.held(Key::D),
             run: !walk_held,
             crouch: crouch_wanted,
-            peek_left: keys.contains(&Key::Q),
-            peek_right: keys.contains(&Key::E),
+            peek_left: gate.held(Key::Q),
+            peek_right: gate.held(Key::E),
             fire: trigger,
             use_key: use_pressed,
             reload: reload_pressed,
@@ -1056,9 +1145,23 @@ fn main() {
             client.view(now)
         });
         if let Some((client, _)) = &net {
-            if client.status != Status::Connected {
-                eprintln!("the connection to the server was lost: {:?}", client.status);
-                window.set_should_close(true);
+            match &client.status {
+                Status::Connected => {}
+                Status::SentAway(why) => {
+                    eprintln!("the server ended the game for us: {why}");
+                    window.set_should_close(true);
+                }
+                _ => {
+                    eprintln!("the connection to the server was lost: {:?}", client.status);
+                    window.set_should_close(true);
+                }
+            }
+            if !host_checked && client.snapshots > 0 {
+                host_checked = true;
+                if client.session.host != Some(me as u8) {
+                    eprintln!("the server on that port is not the one we started: someone else is its host");
+                    window.set_should_close(true);
+                }
             }
         }
 
@@ -1301,6 +1404,16 @@ fn main() {
                     if victim == me {
                         killed_by = Some(killer);
                     }
+                }
+                // Said in the lobby or the round: in the chat, and in the feed for a while
+                sim::Event::Chat { player, text, dead } => {
+                    let line = format!("{}: {text}", lobby::speaker(player, dead));
+                    println!("{line}");
+                    feed.push((game_time + 8.0, line, [0.95, 0.78, 0.2]));
+                    if feed.len() > 5 {
+                        feed.remove(0);
+                    }
+                    chat.said(player, &text, dead);
                 }
             }
         }
@@ -2403,6 +2516,35 @@ fn main() {
             debug_lines.push(&demo_text);
         }
         draw_debug_text(w, h, &debug_lines);
+
+        // The lobby, over the whole window, and the chat, which notes what happens all game
+        // long. What is clicked and said is sent with the next tick.
+        if let Some((client, _)) = net.as_mut().filter(|(c, _)| c.status == Status::Connected && c.snapshots > 0) {
+            let players: Vec<(usize, Option<sim::Side>)> = sim.players.iter().enumerate().filter(|(_, p)| p.active).map(|(i, p)| (i, p.side)).collect();
+            let ready = client.ready.clone();
+            let view = LobbyView {
+                round: client.round, time: game_time, session: client.session, me, players: &players, ready: &ready, level: &level_name,
+                base_pairs: &pair_names, uniforms: [&uniform_names[0], &uniform_names[1]],
+            };
+            chat.watch(&view);
+            let mut commands = std::mem::take(&mut typed);
+            if gate.showing() {
+                let (fw, fh) = window.get_framebuffer_size();
+                let (ww, wh) = window.get_size();
+                let (cx, cy) = window.get_cursor_pos();
+                let at = Canvas::fit([fw as f32, fh as f32]).pointer([cx, cy], [ww, wh], [fw, fh]);
+                ui.begin(Pointer { at, down: pointer_down, wheel: std::mem::take(&mut wheel) }, client.session.generation);
+                commands.extend(lobby::lobby(&mut ui, &view, &mut chat));
+                let draws = ui.finish();
+                ui_gl.draw(&ui, &draws, [fw, fh]);
+            }
+            for command in commands {
+                if let Some(rec) = net_recorder.as_mut() {
+                    rec.lobby(net_clock.elapsed().as_secs_f64(), command.clone());
+                }
+                client.lobby(command);
+            }
+        }
 
         // F2: a screenshot and a text log of where the player is and what they see
         if (dump_requested && (!args.dump || frames_drawn >= 2)) || clip.is_some() {

@@ -12,7 +12,7 @@ use crate::collision::Player;
 use crate::net::animation::TELEPORT;
 use crate::net::link::{Addr, Link};
 use crate::net::meter::Meter;
-use crate::net::proto::{INPUTS_PER_PACKET, Parts, Setup, Snapshot, ToClient, ToServer};
+use crate::net::proto::{INPUTS_PER_PACKET, LobbyCommand, Parts, Session, Setup, Snapshot, ToClient, ToServer};
 use crate::net::round::RoundState;
 use crate::sim::peek::Peek;
 use crate::sim::{Event, Input, Side, Sim, TICK};
@@ -65,6 +65,12 @@ const RETRY: f64 = 0.25;
 /// A server that has said nothing for this long (seconds) is lost
 const TIMEOUT: f64 = 5.0;
 
+/// How often (seconds) a lobby command is sent again until the server has it
+const LOBBY_RESEND: f64 = 0.1;
+
+/// The most lobby commands waiting to be sent. A click beyond them is dropped.
+const LOBBY_QUEUE: usize = 16;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
     /// Waiting for the server to let us in
@@ -72,8 +78,10 @@ pub enum Status {
     Connected,
     /// The server said no, and why
     Refused(String),
-    /// The server went quiet, or sent us away
+    /// The server went quiet
     Lost,
+    /// The server sent us away, and why
+    SentAway(String),
 }
 
 pub struct Client {
@@ -130,6 +138,16 @@ pub struct Client {
     pub loading: bool,
     /// The round the server is told the client has
     have: u16,
+    /// The session's settings, and the players who have said ready, as of the newest snapshot
+    pub session: Session,
+    pub ready: Vec<usize>,
+    /// Makes us the host, if it is the server's key
+    key: u64,
+    /// Lobby commands not yet taken by the server, oldest first, with their numbers and the
+    /// generation each was made in. Only the oldest is sent.
+    lobby: VecDeque<(u32, u32, LobbyCommand)>,
+    lobby_seq: u32,
+    lobby_sent: f64,
 }
 
 impl Client {
@@ -143,7 +161,39 @@ impl Client {
             round: RoundState::default(),
             loading: false,
             have: 0,
+            session: Session::default(),
+            ready: Vec::new(),
+            key: 0,
+            lobby: VecDeque::new(),
+            lobby_seq: 0,
+            lobby_sent: f64::NEG_INFINITY,
         }
+    }
+
+    /// Join with this host key (see `ToServer::Connect`)
+    pub fn set_key(&mut self, key: u64) {
+        self.key = key;
+    }
+
+    /// Ask the server for this in the lobby. It goes after any still waiting, made for the
+    /// lobby the client is in now.
+    pub fn lobby(&mut self, command: LobbyCommand) {
+        if self.lobby.len() >= LOBBY_QUEUE {
+            return;
+        }
+        // Four billion clicks: there is no number left to give it
+        let Some(seq) = self.lobby_seq.checked_add(1) else {
+            self.status = Status::SentAway("too many lobby commands".to_string());
+            return;
+        };
+        self.lobby_seq = seq;
+        self.lobby.push_back((seq, self.session.generation, command));
+        self.lobby_sent = f64::NEG_INFINITY;
+    }
+
+    /// Lobby commands the server has not taken yet, oldest first
+    pub fn lobby_waiting(&self) -> impl Iterator<Item = &LobbyCommand> {
+        self.lobby.iter().map(|(_, _, c)| c)
     }
 
     /// How the game was set up, once the server has said
@@ -190,7 +240,7 @@ impl Client {
     pub fn connect(&mut self, now: f64, link: &mut impl Link) -> Option<&Setup> {
         if self.status == Status::Connecting && now - self.asked >= RETRY {
             self.asked = now;
-            link.send(self.server, &ToServer::Connect { token: self.token, build: self.build.clone(), side: self.wish }.encode());
+            link.send(self.server, &ToServer::Connect { token: self.token, build: self.build.clone(), side: self.wish, key: self.key }.encode());
         }
         self.listen(now, link);
         if self.status == Status::Connected { self.setup.as_ref() } else { None }
@@ -233,8 +283,8 @@ impl Client {
                 ToClient::Refuse { token, reason } if token == self.token => {
                     self.status = Status::Refused(reason);
                 }
-                ToClient::Goodbye { token } if token == self.token => {
-                    self.status = Status::Lost;
+                ToClient::Goodbye { token, reason } if token == self.token => {
+                    self.status = Status::SentAway(reason);
                 }
                 ToClient::Snapshot(mut s) if self.status == Status::Connected => {
                     self.heard = now;
@@ -278,8 +328,14 @@ impl Client {
             self.last_snapshot = snap.tick;
             self.snapshots += 1;
             self.round = snap.round;
+            self.session = snap.session;
+            self.ready = snap.players.iter().filter(|p| p.ready).map(|p| p.slot as usize).collect();
             if !self.loading {
                 self.have = snap.round.number;
+            }
+            while self.lobby.front().is_some_and(|&(seq, _, _)| seq <= snap.lobby_ack) {
+                self.lobby.pop_front();
+                self.lobby_sent = f64::NEG_INFINITY;
             }
             self.remember(now, &snap);
             self.reconcile(sim, &snap);
@@ -315,6 +371,10 @@ impl Client {
         let bytes = msg.encode();
         self.meter.sent(now, seq, bytes.len());
         link.send(self.server, &bytes);
+        if let Some((seq, generation, command)) = self.lobby.front().filter(|_| now - self.lobby_sent >= LOBBY_RESEND) {
+            self.lobby_sent = now;
+            link.send(self.server, &ToServer::Lobby { token: self.token, seq: *seq, generation: *generation, command: command.clone() }.encode());
+        }
         events
     }
 

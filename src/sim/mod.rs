@@ -331,6 +331,10 @@ pub enum Event {
     PlayerBlast { player: usize, shake: f32, veil: f32 },
     /// A player died: who killed them (none if they did it to themselves) and how
     Kill { killer: Option<usize>, victim: usize, cause: Cause },
+    /// A player said something. The server makes these, never the game itself. `dead` if they
+    /// were dead in a round, when only the dead hear them, so that they cannot call out to the
+    /// living.
+    Chat { player: usize, text: String, dead: bool },
 }
 
 /// FNV-1a, a simple hash that gives the same answer on every machine
@@ -476,6 +480,8 @@ pub struct Sim {
     pub friendly_fire: bool,
     /// Where each side's players start in a team game, Blue's and Gold's (`levels::Base::starts`)
     pub bases: [Vec<V3>; 2],
+    /// The pairs of bases the host can choose `bases` from (`Setup::base_pairs`)
+    pub base_pairs: Vec<[Vec<V3>; 2]>,
     /// Whether the dead come back after `RESPAWN_SECONDS`. In rounds they wait for the next.
     pub respawn: bool,
     /// No one moves, looks around, fires or changes weapons: before a round, and after it
@@ -553,6 +559,7 @@ impl Sim {
             pvp: false,
             friendly_fire: true,
             bases: [Vec::new(), Vec::new()],
+            base_pairs: Vec::new(),
             respawn: true,
             frozen: false,
             start: None,
@@ -2574,7 +2581,7 @@ mod tests {
         let setup = crate::net::proto::Setup {
             map: "data/map/m00/citystreet_large.map".to_string(), model: "data/character/team_hrt/blue_M_a.CRP".to_string(), idle: "up_none_cyc".to_string(),
             magazine: 30, ammo: 30, reserve: 900, grenades: 3, speed_scale: 1.0, seed: 99, culling: true, pvp: true,
-            friendly_fire: true, respawn: true, bases: [Vec::new(), Vec::new()], uniforms: crate::net::proto::UNIFORMS.map(String::from), doors_open: None, mission: None, npcs: Vec::new(),
+            friendly_fire: true, respawn: true, bases: [Vec::new(), Vec::new()], uniforms: crate::net::proto::UNIFORMS.map(String::from), base_pairs: Vec::new(), doors_open: None, mission: None, npcs: Vec::new(),
         };
         let Ok(base) = crate::net::setup::build_sim(&setup) else { return };
         drop(base);

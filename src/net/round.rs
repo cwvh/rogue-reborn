@@ -22,10 +22,11 @@ pub enum Phase {
 }
 
 impl Phase {
-    /// Whether players are held where they are: from the round's start until they are let go.
-    /// Before and after, they move as they like, as in the original.
+    /// Whether players are held where they are: in the lobby (whose screen hides the level),
+    /// and from the round's start until they are let go. After it, they move as they like, as
+    /// in the original.
     pub fn frozen(self) -> bool {
-        matches!(self, Phase::Loading | Phase::Hold)
+        matches!(self, Phase::Lobby | Phase::Countdown | Phase::Loading | Phase::Hold)
     }
 
     pub fn code(self) -> u8 {

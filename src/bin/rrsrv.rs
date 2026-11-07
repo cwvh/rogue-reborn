@@ -10,6 +10,10 @@
 //!   rrsrv --level rm11 --record match.rrs  record the match, to play back later
 //!   rrsrv --check match.rrs                play back a match, or a player's recording, and
 //!                                          say whether it comes out the same
+//!
+//! With `RR_HOST_KEY` set to a number, whoever joins with it is the host, who starts each round
+//! from the lobby (`rr --host` does this). It is read from the environment so that it never
+//! shows in a list of processes.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -17,7 +21,7 @@ use std::time::{Duration, Instant};
 use rogue_reborn::collision::{CollisionWorld, Params};
 use rogue_reborn::levels::{BasePair, find_bases, find_level, find_mission_spawns, pick_index};
 use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
-use rogue_reborn::net::proto::{NpcSetup, Setup, UNIFORMS};
+use rogue_reborn::net::proto::{BasePairSetup, NpcSetup, Setup, UNIFORMS};
 use rogue_reborn::net::record::{Change, ClientRecording, ServerRecording};
 use rogue_reborn::net::server::{ROUND_TIME, Server};
 use rogue_reborn::net::setup::build_sim;
@@ -60,6 +64,12 @@ struct Args {
     /// this long (seconds), or with no limit
     rounds: bool,
     round_time: Option<f32>,
+    /// With a host, start the rounds anyway as if there were none
+    auto_start: bool,
+    /// The game is the host's, started for them by `rr --host`: it ends when they leave, or if
+    /// they have not come in this long (seconds)
+    hosted: bool,
+    host_wait: Option<f64>,
     /// Record the match to this file
     record: Option<PathBuf>,
     /// Play back a recording instead of serving
@@ -71,7 +81,7 @@ fn parse_args() -> Args {
         port: 27960, demo: false, map: None, level: None, npcs: demo::MAX_NPCS, max_players: 4, seed: 0x5eed,
         model: PathBuf::from("data/character/team_hrt/blue_M_a.CRP"), no_models: false, grenades: 3, duration: None, quiet: false, no_pvp: false, no_lag_compensation: false,
         snapshot_rate: 60.0, sim_latency: 0.0, sim_jitter: 0.0, sim_loss: 0.0, record: None, check: None, teams: false, base_pair: None, no_friendly_fire: false,
-        rounds: false, round_time: Some(ROUND_TIME),
+        rounds: false, round_time: Some(ROUND_TIME), auto_start: false, hosted: false, host_wait: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -101,6 +111,9 @@ fn parse_args() -> Args {
             "--no-friendly-fire" => a.no_friendly_fire = true,
             "--rounds" => a.rounds = true,
             "--round-time" => a.round_time = Some(value("--round-time").parse::<f32>().unwrap_or_else(|_| usage("--round-time expects seconds"))).filter(|&s| s > 0.0),
+            "--auto-start" => a.auto_start = true,
+            "--hosted" => a.hosted = true,
+            "--host-wait" => a.host_wait = Some(value("--host-wait").parse().unwrap_or_else(|_| usage("--host-wait expects seconds"))),
             "--check" => a.check = Some(PathBuf::from(value("--check"))),
             "--help" | "-h" => usage(""),
             other => usage(&format!("unknown option {other}")),
@@ -117,6 +130,7 @@ fn usage(problem: &str) -> ! {
     eprintln!("             [--model FILE] [--no-models] [--grenades N] [--duration SECONDS] [--quiet] [--snapshot-rate HZ] [--no-pvp] [--no-lag-compensation]");
     eprintln!("             [--sim-latency MS] [--sim-jitter MS] [--sim-loss PERCENT]   (to make the connection worse)");
     eprintln!("             [--teams [--base-pair N] [--no-friendly-fire]] [--rounds [--round-time SECONDS, 0 for none]] [--record FILE]");
+    eprintln!("             [--auto-start] [--hosted [--host-wait SECONDS]]   (with RR_HOST_KEY: start rounds without the host, or end the game without them)");
     eprintln!("       rrsrv --check FILE");
     std::process::exit(if problem.is_empty() { 0 } else { 2 });
 }
@@ -214,29 +228,31 @@ fn main() {
             (mine.iter().map(feet).collect(), rest.to_vec())
         }
     };
-    // In a team game, the pair of bases the sides start from
-    let bases = if !args.teams {
-        [Vec::new(), Vec::new()]
+    // In a team game, the pairs of bases the host can choose from, and the one the sides start
+    // from
+    let (bases, base_pairs) = if !args.teams {
+        ([Vec::new(), Vec::new()], Vec::new())
     } else {
-        let (name, pair) = match &level_path {
-            None => ("the box room's".to_string(), demo::bases()),
-            Some(p) => {
-                let pairs = find_bases(p);
-                if pairs.is_empty() {
-                    eprintln!("rrsrv: the level has no bases for a team game");
-                    std::process::exit(2);
-                }
-                let i = match args.base_pair {
-                    Some(n) if (1..=pairs.len()).contains(&n) => n - 1,
-                    Some(n) => usage(&format!("the level has {} pairs of bases, not {n}", pairs.len())),
-                    None => pick_index(pairs.len(), Some(args.seed)),
-                };
-                let BasePair { name, blue, gold } = pairs[i].clone();
-                (name, [blue, gold])
+        let pairs = match &level_path {
+            None => {
+                let [blue, gold] = demo::bases();
+                vec![BasePair { name: "Box Room".to_string(), blue, gold }]
             }
+            Some(p) => find_bases(p),
         };
-        println!("teams start from {name} bases: Blue at {}, Gold at {}", pair[0].name, pair[1].name);
-        pair.map(|b| b.starts().iter().map(feet).collect())
+        if pairs.is_empty() {
+            eprintln!("rrsrv: the level has no bases for a team game");
+            std::process::exit(2);
+        }
+        let i = match args.base_pair {
+            Some(n) if (1..=pairs.len()).contains(&n) => n - 1,
+            Some(n) => usage(&format!("the level has {} pairs of bases, not {n}", pairs.len())),
+            None => pick_index(pairs.len(), Some(args.seed)),
+        };
+        let BasePair { name, blue, gold } = &pairs[i];
+        println!("teams start from {name} bases: Blue at {}, Gold at {}", blue.name, gold.name);
+        let all: Vec<BasePairSetup> = pairs.iter().map(|p| BasePairSetup { name: p.name.clone(), bases: [&p.blue, &p.gold].map(|b| b.starts().iter().map(feet).collect()) }).collect();
+        (all[i].bases.clone(), all)
     };
     if player_spawns.is_empty() {
         eprintln!("rrsrv: the level has nowhere for players to start");
@@ -278,6 +294,7 @@ fn main() {
         respawn: !args.rounds,
         bases,
         uniforms: UNIFORMS.map(String::from),
+        base_pairs,
         doors_open: None,
         mission: mission_file.map(|m| m.display().to_string()),
         npcs: npcs.iter().zip(&faces).map(|(n, f)| NpcSetup {
@@ -297,10 +314,23 @@ fn main() {
     let mut server = Server::new(sim, setup, build, player_spawns);
     server.set_snapshot_rate(args.snapshot_rate);
     server.set_lag_compensation(!args.no_lag_compensation);
+    // The host's key, which only a number other than 0 is
+    let key = std::env::var("RR_HOST_KEY").ok().map(|k| k.trim().parse::<u64>().unwrap_or_else(|_| usage("RR_HOST_KEY must be a number")));
+    let key = key.filter(|&k| k != 0);
+    if args.hosted && key.is_none() {
+        usage("--hosted needs RR_HOST_KEY, the host's key");
+    }
+    if let Some(key) = key {
+        server.set_host_key(key, args.hosted);
+        if let Some(wait) = args.host_wait {
+            server.set_host_wait(wait);
+        }
+        println!("waiting for the host{}", if args.hosted { ", without whom the game ends" } else { "" });
+    }
     if args.rounds {
         server.play_rounds();
         server.set_time_limit(args.round_time);
-        server.set_auto_start(true);
+        server.set_auto_start(key.is_none() || args.auto_start);
     }
     if args.record.is_some() {
         server.record();
@@ -335,6 +365,10 @@ fn main() {
             println!("t={now:.2} {players} player{} connected", if players == 1 { "" } else { "s" });
         }
         if args.duration.is_some_and(|d| now >= d) {
+            break;
+        }
+        if let Some(why) = server.ended() {
+            println!("t={now:.2} the game is over: {why}");
             break;
         }
         if let Some(path) = args.record.as_ref().filter(|_| now - written >= WRITE_EVERY) {

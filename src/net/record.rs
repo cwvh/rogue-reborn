@@ -19,15 +19,15 @@ use anyhow::{Context, Result, bail, ensure};
 use crate::bytes::{Before, Reader, Writer};
 use crate::net::client::{Client, Frame};
 use crate::net::link::{Addr, Link};
-use crate::net::proto::{Setup, read_setup, side_code, side_from, write_setup};
+use crate::net::proto::{LobbyCommand, Session, Setup, ToServer, read_session, read_setup, side_code, side_from, write_session, write_setup};
 use crate::net::setup::build_sim;
 use crate::recording::{CHECK_EVERY, Desync};
 use crate::sim::{Input, Side, Sim, TICK};
 
 type V3 = [f32; 3];
 
-const SERVER_MAGIC: &[u8; 8] = b"RRSERV\0\x03";
-const CLIENT_MAGIC: &[u8; 8] = b"RRCLNT\0\x03";
+const SERVER_MAGIC: &[u8; 8] = b"RRSERV\0\x04";
+const CLIENT_MAGIC: &[u8; 8] = b"RRCLNT\0\x04";
 
 /// A change in who plays, between two ticks
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -40,6 +40,14 @@ pub enum Change {
     Frozen(bool),
     /// A player joined too late for the round (`Sim::sit_out`)
     SatOut { slot: u8 },
+    /// A player changed side in the lobby
+    Side { slot: u8, side: Option<Side> },
+    FriendlyFire(bool),
+    /// The sides start from this pair of bases (`Sim::base_pairs`)
+    Bases(u8),
+    /// The session's settings changed. The sim needs nothing from it: it is kept to show the
+    /// lobby.
+    Session(Session),
 }
 
 /// One tick of the server's game
@@ -86,6 +94,13 @@ impl ServerRecording {
                 Change::Round { seed } => sim.new_round(seed),
                 Change::Frozen(on) => sim.frozen = on,
                 Change::SatOut { slot } => sim.sit_out(slot as usize),
+                Change::Side { slot, side } => sim.players[slot as usize].side = side,
+                Change::FriendlyFire(on) => sim.friendly_fire = on,
+                Change::Bases(i) => {
+                    let Some(pair) = sim.base_pairs.get(i as usize) else { bail!("tick {n} starts from bases {i}, which the level lacks") };
+                    sim.bases = pair.clone();
+                }
+                Change::Session(_) => {}
             }
         }
         sim.rewind = t.rewind.clone();
@@ -146,6 +161,23 @@ impl ServerRecording {
                         w.u8(4);
                         w.u8(slot);
                     }
+                    Change::Side { slot, side } => {
+                        w.u8(5);
+                        w.u8(slot);
+                        w.u8(side_code(side));
+                    }
+                    Change::FriendlyFire(on) => {
+                        w.u8(6);
+                        w.bool(on);
+                    }
+                    Change::Bases(i) => {
+                        w.u8(7);
+                        w.u8(i);
+                    }
+                    Change::Session(s) => {
+                        w.u8(8);
+                        write_session(&mut w, &s);
+                    }
                 }
             }
             let n = t.inputs.len();
@@ -188,6 +220,10 @@ impl ServerRecording {
                     2 => Change::Round { seed: r.u64()? },
                     3 => Change::Frozen(r.bool()?),
                     4 => Change::SatOut { slot: r.u8()? },
+                    5 => Change::Side { slot: r.u8()?, side: side_from(r.u8()?)? },
+                    6 => Change::FriendlyFire(r.bool()?),
+                    7 => Change::Bases(r.u8()?),
+                    8 => Change::Session(read_session(&mut r)?),
                     k => bail!("no such change as {k}"),
                 });
             }
@@ -258,7 +294,9 @@ impl ServerRecorder {
     pub fn recording(&self, sim: &Sim) -> ServerRecording {
         let mut rec = self.rec.clone();
         let ticks = rec.ticks.len() as u32;
-        if ticks % CHECK_EVERY != 0 {
+        // Changes made since the last tick (players held for the lobby, say) are in the game
+        // but not yet in the recording, so the game is no longer as of that tick
+        if ticks % CHECK_EVERY != 0 && self.changes.is_empty() {
             rec.checks.push((ticks, sim.checksum()));
         }
         rec
@@ -266,7 +304,7 @@ impl ServerRecorder {
 }
 
 /// What a client was doing when datagrams came
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Call {
     /// Asking to join (`Client::connect`)
     Connect,
@@ -274,6 +312,8 @@ pub enum Call {
     Tick(Input),
     /// Drawing a frame (`Client::view`)
     View,
+    /// A click in the lobby (`Client::lobby`)
+    Lobby(LobbyCommand),
 }
 
 /// One call into the client, at a time, with the datagrams it read
@@ -328,7 +368,7 @@ impl ClientRecording {
         let mut checks = self.checks.iter().peekable();
         for step in &self.steps {
             link.incoming = step.received.iter().cloned().collect();
-            match step.call {
+            match &step.call {
                 Call::Connect => {
                     if let Some(setup) = client.connect(step.now, &mut link).cloned() {
                         if sim.is_none() {
@@ -342,7 +382,7 @@ impl ClientRecording {
                 }
                 Call::Tick(input) => {
                     let Some(sim) = sim.as_mut() else { bail!("a tick before the server let the player in") };
-                    client.tick(step.now, &mut link, sim, input);
+                    client.tick(step.now, &mut link, sim, *input);
                     ticks += 1;
                     check(&mut checks, ticks, sim)?;
                 }
@@ -352,6 +392,7 @@ impl ClientRecording {
                         viewed(step.now, &frame, sim, client.slot());
                     }
                 }
+                Call::Lobby(command) => client.lobby(command.clone()),
             }
         }
         sim.context("the server never let the player in")
@@ -374,13 +415,19 @@ impl ClientRecording {
         w.u32(self.steps.len() as u32);
         let mut before = Before::default();
         for step in &self.steps {
-            match step.call {
+            match &step.call {
                 Call::Connect => w.u8(0),
                 Call::Tick(input) => {
                     w.u8(1);
-                    w.input(&input, &mut before);
+                    w.input(input, &mut before);
                 }
                 Call::View => w.u8(2),
+                Call::Lobby(command) => {
+                    w.u8(3);
+                    let msg = ToServer::Lobby { token: 0, seq: 0, generation: 0, command: command.clone() }.encode();
+                    w.varint(msg.len() as u32);
+                    w.0.extend_from_slice(&msg);
+                }
             }
             w.u64(step.now.to_bits());
             w.varint(step.received.len() as u32);
@@ -410,6 +457,11 @@ impl ClientRecording {
                 0 => Call::Connect,
                 1 => Call::Tick(r.input(&mut before)?),
                 2 => Call::View,
+                3 => {
+                    let len = r.varint()? as usize;
+                    let ToServer::Lobby { command, .. } = ToServer::decode(r.take(len)?)? else { bail!("a lobby call that is not one") };
+                    Call::Lobby(command)
+                }
                 k => bail!("no such call as {k}"),
             };
             let now = f64::from_bits(r.u64()?);
@@ -471,6 +523,11 @@ impl ClientRecorder {
     /// After `Client::view` at `now`
     pub fn viewed(&mut self, now: f64) {
         self.rec.steps.push(Step { now, call: Call::View, received: Vec::new() });
+    }
+
+    /// After `Client::lobby` at `now`
+    pub fn lobby(&mut self, now: f64, command: LobbyCommand) {
+        self.rec.steps.push(Step { now, call: Call::Lobby(command), received: Vec::new() });
     }
 
     /// The player marks this moment, to find it later

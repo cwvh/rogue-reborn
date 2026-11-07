@@ -405,8 +405,7 @@ original. The server runs the session in phases: lobby, countdown, loading, live
 the lobby again.
 
 - **The lobby.** Players pick their side and kit and say they are ready. The host sets the
-  session and starts the countdown whenever they like. Until the lobby screen exists, these come
-  from flags on the server and client, with a line of text for the phase and countdown.
+  session and starts the countdown whenever they like. See "Lobby (done)"; kits are to come.
 - **The countdown**, 5 seconds, announced in the chat each second. The session is locked from
   its start: the host can stop the countdown, but cannot change the session while it runs.
   Players may have picked their kit for the map and settings they saw, so a change slipped in
@@ -472,16 +471,15 @@ last one standing wins. `--round-time SECONDS` sets the limit, 180 by default, o
 The server runs the phases (`net::round`, `Server::play_rounds`): lobby, countdown (5 s),
 loading (up to 30 s), hold (2 s), live, results (8 s), and the lobby again.
 
-- **The lobby is the level for now.** Until the lobby screen exists, players wait in the level,
-  free to move. `--rounds` starts the countdown once there are two sides (or two players) to
-  play, and stops it if one empties. The server can also start and stop it (`start_countdown`,
-  `stop_countdown`), as the host will.
-- **Held** (`Sim::frozen`) while a round loads and for the 2 s after: no one moves, looks
-  around, fires or changes weapons. The server ignores their input, and their own screen holds
-  them too. Before then, in the lobby and the countdown, and once a round is decided, players
-  move as they like, as in the original as remembered. Holding everyone the moment a round was
-  won felt wrong while the dead were still falling. A death after the round is decided does
-  not change the result.
+- **The lobby** is a screen of its own (see "Lobby (done)"). Without a host, `--rounds` starts
+  the countdown once there are two sides (or two players) to play, and stops it if one
+  empties. With one, the host starts it.
+- **Held** (`Sim::frozen`) in the lobby and the countdown, while a round loads, and for the 2 s
+  after: no one moves, looks around, fires or changes weapons. The server ignores their input,
+  and their own screen holds them too. Once a round is decided, players move as they like, as
+  in the original as remembered. Holding everyone the moment a round was won felt wrong while
+  the dead were still falling. A death after the round is decided does not change the
+  result.
 - **A new round is reset in place** (`Sim::new_round`), not built again from a new setup. The
   server puts back the doors, panes and characters as they were at the start, clears the
   grenades, and puts every player fresh in their base's places in turn. Sides and scores stay.
@@ -502,8 +500,8 @@ loading (up to 30 s), hold (2 s), live, results (8 s), and the lobby again.
   are at once.
 - **A late joiner** waits out the round, as the dead do (`Sim::sit_out`). One who joins in the
   lobby or countdown plays the next round.
-- **The session is locked** from the countdown on: the time limit and friendly fire can only
-  change in the lobby. Sides cannot change once joined yet, and there are no kits yet.
+- **The session is locked** from the countdown on: sides, the time limit, friendly fire and
+  the pair of bases can only change in the lobby. There are no kits yet.
 - **The results** show for 8 s, then the lobby. The original waited for each player to press
   continue; that comes with the lobby screen.
 - **On screen** (`rr`): a line for the phase ("ROUND 2 STARTS IN 3", "GET READY", "GOLD
@@ -522,8 +520,7 @@ one calls the round off, a late joiner waits, a player who leaves counts as dead
 is the same on every client, Survival without sides, and a match in rounds plays back the
 same. A new round puts back glass, doors and characters on rm19, and on a client.
 
-Still to do from the plan: picking and changing a side in the lobby, kits, and the results
-waiting for players.
+Still to do from the plan: kits, and the results waiting for players.
 
 ### Watching (done)
 
@@ -560,12 +557,85 @@ place, look and stance, and a dead player's input does nothing on the server.
   floor it is in no room. Before this the whole level was drawn while dead. The player's own third person uses the same camera behind, and so no longer
   goes into walls either.
 
+### Lobby (done)
+
+`rr --host` starts a Team Survival game and joins it as the host. It takes `--level` (or
+`--map` or `--demo`), `--port`, `--round-time`, `--base-pair`, `--seed`, `--no-friendly-fire`
+and `--max-players` (8 unless given), and passes them to an `rrsrv` it starts beside itself
+(`net::host`). `scripts/team-test.sh --host` does the same with seven bots.
+
+- **The screen** (`lobby.rs`) shows in the lobby and the countdown, in place of the level. It
+  is laid out after the original's session screen, with its fonts and art (`ui`), on a 640 x
+  480 canvas scaled into the window, in the plain OCR-B 10 it uses. On the left are the
+  players by side, the player's own lit. Each has a box for their ping, empty until the server
+  sends it, and a light: green when ready, red when not, a screen for the host. Under them,
+  BLUE and GOLD change side. In the middle, in the original's boxes, are the player's own name
+  and kit (fixed for now), then the rules, map, insertions (the pair of bases), length and the
+  two uniforms, and on the right friendly fire. The host's arrows step a choice: up to a longer
+  round or the next pair of bases, down to a shorter one or the one before. The lengths stop at
+  either end; the pairs go round. Below is the chat. Across the bottom is whom the game waits
+  for. READY is bottom left, and the host's START or STOP bottom right.
+- **The chat** is a log a line at a time, as in IRC: what each player says, as "PLAYER 3:
+  hello", and what happens. A player types on the line under it in the lobby and the
+  countdown, Enter says it, and Escape clears the line (and leaves the game when it is empty).
+  The wheel or the arrows scroll it back; saying something goes back to the newest. The
+  client notes what happens by watching its snapshots: players joining, leaving and changing
+  side, the host's changes, the result of each round, and the countdown in the original's
+  words ("--- Preparing to begin mission ---", "Starting mission in 5 seconds", "--- Away we go
+  ---" or "--- Start suspended ---"). What is said in a round shows in the feed for a while too.
+- **Saying something** (`LobbyCommand::Say`) goes as a lobby command, so it comes once and in
+  order, and in any phase and whatever its lobby. The server keeps what the fonts can draw (up
+  to 120 characters of printable Latin-1, `chat_text`), drops a line with nothing left, and
+  sends it to everyone with the next tick's events (`Event::Chat`). In a round, what the dead
+  say goes only to the dead, marked as theirs, so they cannot call out to the living. Typing in
+  a round is still to come.
+- **Who may do what.** Anyone picks a side and says ready, in the lobby. Ready is only
+  information, as in the original: the host can start with players not ready, but not with a
+  side empty. The host changes the length, friendly fire and the pair of bases in the lobby,
+  and stops the countdown while it runs. A side change clears that player's ready, and a new
+  round clears everyone's. Bots say ready in every lobby.
+- **The host** is whoever joins with the server's key (`RR_HOST_KEY`, read from the
+  environment so that it never shows in a list of processes). A key of 0 is none. Only one at
+  a time is host, and a player who takes the host's slot later is not. `rr --host` makes the
+  key from the OS's random source. Another player can host a dedicated server's lobby with
+  `RR_HOST_KEY=... rr --connect`. A server with a key does not start rounds by itself, unless
+  `--auto-start` says to.
+- **The host's game ends without them.** `rrsrv --hosted` ends the game when the host leaves,
+  goes quiet for 5 s, or has not come 30 s after it began, and tells everyone why
+  (`ToClient::Goodbye` has a reason now). So a crash of `rr` leaves nothing running for long.
+  `rr` also ends its `rrsrv` when it quits. A dedicated server with a key runs on, and the next
+  player with the key is host.
+- **Commands** (`ToServer::Lobby`): side, ready, a line of chat, start, stop, length, friendly
+  fire and pair of bases. They go one at a time, oldest first, sent every 100 ms until the
+  snapshot's `lobby_ack` reaches them. The server takes each number once, the next after the
+  last, and no other. Each carries the lobby it was made in (`Session::generation`, counting
+  the times the phase has entered the lobby or the countdown), so a late one from another lobby
+  or countdown is refused, except a line of chat. A refused command is acknowledged and does
+  nothing.
+- **The session** (`Session`: generation, host, length, friendly fire, pair of bases) rides in
+  every snapshot, sent only when it changes, and each player's ready with them. Clients take
+  friendly fire and the bases from it as each snapshot arrives. The setup carries every pair of
+  bases with its name, so an `Accept` for a level with many is sent in parts.
+- **While it shows**, the mouse is a pointer and the keys type in the chat, but for F2 to F4.
+  The game gets none of them. Whatever is held as it comes or goes is let go, and counts only
+  once pressed again, so the click on Start fires nothing. The level still loads before the
+  window opens: this is not a loading screen.
+- **Recordings** keep each side change, change of friendly fire or bases, and the session, so a
+  match changed in the lobby plays back the same. A player's recording keeps their clicks.
+
+Tests: `net::lobby_tests` plays the host, the commands over a bad network, stale commands, a
+change of bases on server and client, late joiners, the host leaving, a recorded match, and
+chat over a bad network and in a round. `lobby.rs` tests what each player sees, the clicks, the
+chat's lines, typing and scrolling, `ui` the controls and fonts, and `tests/host.rs` runs the
+real `rrsrv` for `rr --host`.
+
 ### Open
 
 - **Picking a kit.** In the lobby, and by a flag until then: a primary and a secondary, ammo for
   each, and two items. A mission can rule kits out (the `.mis`'s "Filtered Kits"); what that
   means in multiplayer is not read yet.
-- **The lobby's design.** To be worked out from the original's session screen.
+- **Names**, kicking, changing the map, and the results waiting for players.
+- **Typing in a round**, by a key as in the original, and the chat's lines on screen there.
 
 ## Better than the original
 

@@ -52,6 +52,7 @@ pub fn build_sim(setup: &Setup) -> Result<Sim> {
     sim.friendly_fire = setup.friendly_fire;
     sim.respawn = setup.respawn;
     sim.bases = setup.bases.clone();
+    sim.base_pairs = setup.base_pairs.iter().map(|p| p.bases.clone()).collect();
     if let Some(open) = setup.doors_open {
         sim.set_doors_open(open);
     }
@@ -72,7 +73,7 @@ mod tests {
         let setup = Setup {
             map: map.to_string(), model: "data/character/team_hrt/blue_M_a.CRP".to_string(), idle: "up_none_cyc".to_string(),
             magazine: 30, ammo: 30, reserve: 900, grenades: 3, speed_scale: 1.0, seed: 99, culling: true, pvp: true,
-            friendly_fire: true, respawn: true, bases: [Vec::new(), Vec::new()], uniforms: crate::net::proto::UNIFORMS.map(String::from), doors_open: None, mission: Some(mission.display().to_string()), npcs: Vec::new(),
+            friendly_fire: true, respawn: true, bases: [Vec::new(), Vec::new()], uniforms: crate::net::proto::UNIFORMS.map(String::from), base_pairs: Vec::new(), doors_open: None, mission: Some(mission.display().to_string()), npcs: Vec::new(),
         };
         let (server, client) = (build_sim(&setup).unwrap(), build_sim(&setup).unwrap());
         // The most terrorists on any level at medium
@@ -91,7 +92,7 @@ mod tests {
         let setup = Setup {
             map: map.to_string(), model: "data/character/team_hrt/blue_M_a.CRP".to_string(), idle: "up_none_cyc".to_string(),
             magazine: 30, ammo: 30, reserve: 900, grenades: 3, speed_scale: 1.0, seed: 99, culling: true, pvp: true,
-            friendly_fire: true, respawn: false, bases: [Vec::new(), Vec::new()], uniforms: crate::net::proto::UNIFORMS.map(String::from), doors_open: None, mission: Some(mission.display().to_string()), npcs: Vec::new(),
+            friendly_fire: true, respawn: false, bases: [Vec::new(), Vec::new()], uniforms: crate::net::proto::UNIFORMS.map(String::from), base_pairs: Vec::new(), doors_open: None, mission: Some(mission.display().to_string()), npcs: Vec::new(),
         };
         let mut sim = build_sim(&setup).unwrap();
         assert!(!sim.panes.is_empty() && !sim.doors.is_empty());
