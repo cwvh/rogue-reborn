@@ -115,6 +115,12 @@ impl Ambience {
         (self.rng >> 40) as f32 / (1u64 << 24) as f32
     }
 
+    // Dropping an audio player stops its sound
+    pub fn silence(&mut self) {
+        self.playing.clear();
+        self.next_spot.clear();
+    }
+
     /// Advance by `dt` seconds with the player in the rooms named `rooms`
     pub fn update(&mut self, snd: &mut Sound, rooms: &[&str], listener: Listener, now: f32, dt: f32) {
         for i in 0..self.def.loops.len() {
@@ -178,6 +184,14 @@ impl Ambience {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn silence_clears_spot_timers() {
+        let mut amb = Ambience::new(Definition::default());
+        amb.next_spot.insert(0, 12.0);
+        amb.silence();
+        assert!(amb.next_spot.is_empty() && amb.playing.is_empty());
+    }
 
     #[test]
     fn parses_loops_and_spots() {

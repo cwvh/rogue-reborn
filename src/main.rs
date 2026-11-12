@@ -1502,7 +1502,9 @@ fn main() {
         // then stops with a closing crack
         let firing = sim.firing(me);
         if let Some(snd) = sound.as_mut() {
-            if firing && firing_sound.is_none() {
+            if gate.showing() {
+                firing_sound = None;
+            } else if firing && firing_sound.is_none() {
                 firing_sound = snd.play_loop("C_SB5KB.WAV", 1.0);
             } else if !firing && firing_sound.take().is_some() {
                 snd.play("C_SB5KR.WAV", 1.0);
@@ -1517,7 +1519,11 @@ fn main() {
                 .filter(|r| r.contains(feet, 50.0))
                 .map(|r| r.section_name.as_str())
                 .collect();
-            amb.update(snd, &rooms, listener, game_time, step_dt);
+            if gate.showing() {
+                amb.silence();
+            } else {
+                amb.update(snd, &rooms, listener, game_time, step_dt);
+            }
         }
 
         let current_rooms: Vec<&str> = sim.players[me].current_room.map(|i| level.rooms.rooms[i].section_name.as_str()).into_iter().collect();
