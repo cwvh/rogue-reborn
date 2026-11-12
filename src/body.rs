@@ -159,7 +159,6 @@ impl PlayerMotions {
         }
     }
 
-    /// Whether the legs walk or run: a flinch or a peek takes the whole body instead
     pub fn moving(&self, movement: Movement, peek: Option<Peek>, flinch: bool) -> bool {
         let peeking = !flinch && peek.is_some_and(|k| self.peek(k.right, k.crouched).is_some());
         !peeking && matches!(movement, Movement::Walk | Movement::Run | Movement::Back | Movement::StrafeLeft | Movement::StrafeRight | Movement::WalkLeft | Movement::WalkRight)
@@ -186,7 +185,7 @@ pub struct Doing<'a> {
     pub reloading: Option<Reloading>,
     /// The gun is firing, which the arms show whatever the legs do
     pub firing: bool,
-    /// A wound's flinch and how far through it, which takes the whole body while it plays
+    /// A wound's flinch motion and its frame. The original cuts it short when the player moves.
     pub flinch: Option<(&'a Motion, f32)>,
     pub peek: Option<Peek>,
     /// How far the hips are turned toward a side step, in radians (see `movement::hip_turn`)
@@ -223,9 +222,13 @@ pub fn pose(motions: &PlayerMotions, skel: &Skeleton, d: &Doing) -> Option<Pose>
     let arms_only = kneeling || (changing.is_some() && movement != Movement::Idle);
     // A motion that loops on its own clock, whatever the body's frame
     let looping = |m: &Motion| (clock * 30.0) % m.frames.max(1) as f32;
-    let (mot, at) = match (flinch, changing, shuffle, movement, reload) {
+    // Walking, a flinch plays on the upper body only. On the whole body it would slide.
+    let layered = flinch.filter(|_| moving);
+    let whole = flinch.filter(|_| !moving);
+    let (mot, at) = match (whole, changing, shuffle, movement, reload) {
         (Some(f), ..) => f,
         _ if peeking.is_some() => peeking.map(|(m, f, _)| (m, f))?,
+        _ if layered.is_some() => (motions.get(movement, crouched)?, frame),
         (None, Some(change), ..) => change,
         (None, None, Some(s), ..) => s,
         (None, None, None, Movement::Reload, Some(shown)) => shown,
@@ -238,21 +241,21 @@ pub fn pose(motions: &PlayerMotions, skel: &Skeleton, d: &Doing) -> Option<Pose>
     let (root, mut rots) = mot.sample(at.min(mot.frames.saturating_sub(1) as f32));
     // A reload keeps the arms busy, so they fire only outside one, and a flinch the same
     let aiming = (firing || movement == Movement::Fire) && reload.is_none() && flinch.is_none();
-    // Moving, kneeling or stepping round: the legs from the motion, and the upper body reloads,
-    // fires (the fire motion looping at its own pace), throws or keeps the gun hold
+    // The legs come from the motion, and the upper body is layered over them.
     let shuffling = flinch.is_none() && peeking.is_none() && shuffle.is_some();
-    if flinch.is_none() && peeking.is_none() && (moving || arms_only || shuffling) {
+    if whole.is_none() && peeking.is_none() && (moving || arms_only || shuffling) {
         let fire = motions.get(Movement::Fire, crouched).filter(|_| aiming).map(|m| (m, looping(m)));
         let throw = motions.get(Movement::Throw, crouched).filter(|_| (arms_only || shuffling) && movement == Movement::Throw).map(|m| (m, at));
-        let upper = reload.or(fire).or(throw).or_else(|| motions.get(Movement::Idle, crouched).map(|hold| (hold, 0.0)));
+        let flinched = layered.map(|(m, f)| (m, f.min(m.frames.saturating_sub(1) as f32)));
+        let upper = flinched.or(reload).or(fire).or(throw).or_else(|| motions.get(Movement::Idle, crouched).map(|hold| (hold, 0.0)));
         if let Some((upper, upper_at)) = upper {
             let (_, hold_rots) = upper.sample(upper_at);
-            // The hips of a crouched move pitch well forward of the kneeling hold's, so crouched
-            // the chest keeps the way it faces in the hold, not its turn from the hips (which
-            // would point the gun at the floor)
+            // The hips of a crouched move pitch well forward of the kneeling hold's. Crouched,
+            // the chest keeps its facing from the hold, or the gun would point at the floor.
+            // A layered flinch gets the same chest correction.
             let hips = skel.bones.iter().find(|b| b.name == "Hips").map(|b| b.anim_index);
             let (from, to) = match hips.and_then(|h| Some((*hold_rots.get(h)?, *rots.get(h)?))) {
-                Some((held, under)) if crouched || changing.is_some() => (held, under),
+                Some((held, under)) if crouched || changing.is_some() || layered.is_some() => (held, under),
                 _ => ([0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]),
             };
             let undo = [-to[0], -to[1], -to[2], to[3]];
@@ -279,11 +282,11 @@ pub fn pose(motions: &PlayerMotions, skel: &Skeleton, d: &Doing) -> Option<Pose>
             }
         }
     }
-    // Going forward or back and to the side, the hips turn toward the way the body goes, about
-    // the upright, and the chest turns back as far so the upper body keeps facing the aim. A
-    // flinch takes the whole body as it is.
+    // Going forward or back and to the side, the hips turn toward the way the body goes. The
+    // chest turns back as far so the upper body keeps facing the aim. A flinch on the whole
+    // body is left as it is.
     let bone = |name: &str| skel.bones.iter().find(|b| b.name == name).map(|b| b.anim_index);
-    if let (None, Some(h), Some(c)) = (flinch, bone("Hips"), bone("Chest")) {
+    if let (None, Some(h), Some(c)) = (whole, bone("Hips"), bone("Chest")) {
         if let (Some(&hips), Some(&chest)) = (rots.get(h), rots.get(c)) {
             let inverse = |q: [f32; 4]| [-q[0], -q[1], -q[2], q[3]];
             let q = [0.0, (hip_turn / 2.0).sin(), 0.0, (hip_turn / 2.0).cos()];
@@ -292,4 +295,53 @@ pub fn pose(motions: &PlayerMotions, skel: &Skeleton, d: &Doing) -> Option<Pose>
         }
     }
     Some(Pose { root, rotations: rots, aiming, peeking: peeking.map(|p| p.2), shuffling })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sim::characters::Characters;
+    use std::path::Path;
+
+    fn doing<'a>(movement: Movement, frame: f32, flinch: Option<(&'a Motion, f32)>) -> Doing<'a> {
+        Doing { movement, frame, crouched: false, reloading: None, firing: false, flinch, peek: None, hip_turn: 0.0, changing: None, shuffle: None, clock: 0.0 }
+    }
+
+    fn same(a: [f32; 4], b: [f32; 4]) -> bool {
+        a.iter().zip(&b).map(|(x, y)| x * y).sum::<f32>().abs() > 0.9999
+    }
+
+    #[test]
+    fn a_wound_flinches_the_upper_body_of_a_walking_player_and_the_whole_body_of_one_standing() {
+        let Some(chars) = Characters::load(Path::new("data/character/team_hrt/blue_M_a.CRP"), "up_none_cyc") else { return };
+        let (Some(rig), Some(flinch), Some(walk)) = (chars.rig.as_ref(), chars.motions.get("thwu_bf"), chars.player.get(Movement::Walk, false)) else { return };
+        let skel = &rig.skeleton;
+        let bone = |name: &str| skel.bones.iter().find(|b| b.name == name).unwrap().anim_index;
+        let (frame, at) = (7.0, 12.0);
+        let (_, flinched) = flinch.sample(at);
+        let (_, walked) = walk.sample(frame);
+
+        let walking = super::pose(&chars.player, skel, &doing(Movement::Walk, frame, Some((flinch, at)))).unwrap();
+        assert!(!walking.aiming);
+        for b in &skel.bones {
+            let (got, flinch_rot, walk_rot) = (walking.rotations[b.anim_index], flinched[b.anim_index], walked[b.anim_index]);
+            match b.name.as_str() {
+                "Chest" => {}
+                n if is_upper_body(n) => assert_eq!(got, flinch_rot, "{n}"),
+                n => assert_eq!(got, walk_rot, "{n}"),
+            }
+        }
+        // The chest keeps the flinch's facing. Its rotation is relative to the hips, so compare it
+        // with them applied.
+        let (h, c) = (bone("Hips"), bone("Chest"));
+        let facing = |hips: [f32; 4], chest: [f32; 4]| quat_mul(hips, chest);
+        assert!(same(facing(walking.rotations[h], walking.rotations[c]), facing(flinched[h], flinched[c])));
+        assert_ne!(walked[h], flinched[h], "the flinch and the walk should not share hips for this to test anything");
+
+        let standing = super::pose(&chars.player, skel, &doing(Movement::Idle, 0.0, Some((flinch, at)))).unwrap();
+        assert_eq!(standing.rotations, flinched);
+
+        let healthy = super::pose(&chars.player, skel, &doing(Movement::Walk, frame, None)).unwrap();
+        assert_eq!(healthy.rotations[bone("LeftUpLeg")], walked[bone("LeftUpLeg")]);
+    }
 }

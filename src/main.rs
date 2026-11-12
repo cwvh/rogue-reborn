@@ -1932,9 +1932,10 @@ fn main() {
             // follow its progress, on the beats of its sound. `firing` says the gun is firing,
             // which the arms show whatever the legs do. `crouched` kneels the body for what is
             // done in place, and a change of stance plays crouching down or standing up. `flinch`
-            // is a wound's flinch, its frame and when it began, which takes the whole body while
-            // it plays. `hip_turn` is how far the hips would turn toward a side step (see
-            // `movement::hip_turn`). `peek` takes the whole body, as a flinch does, while it lasts.
+            // is a wound's flinch, its frame and when it began. It takes the whole body standing
+            // in place and the upper body walking. `hip_turn` is how far the hips would turn
+            // toward a side step (see `movement::hip_turn`). `peek` takes the whole body while it
+            // lasts.
             // `body` is what the drawing remembers of this body from frame to frame.
             let draw_body = |chars: &Characters, side: Option<sim::Side>, movement: Movement, frame: f32, feet: [f32; 3], yaw_deg: f32, scale: [f32; 3],
                              face: Option<u32>, hand: Option<&Option<WeaponDraw>>, grenade: bool, flash: bool, reloading: Option<Reloading>,
