@@ -594,7 +594,7 @@ impl super::Sim {
     /// sees the players it can, turns toward the one it is after, and fires when its spread lets
     /// it; it stops to flinch and reloads when its magazine is empty. Hearing something makes it
     /// alert, and it turns toward it with its weapon up.
-    pub(super) fn terrorists(&mut self, dt: f32, noises: &[(V3, f32, Noise)], ev: &mut Vec<super::Event>) {
+    pub fn terrorists(&mut self, dt: f32, noises: &[(V3, f32, Noise)], ev: &mut Vec<super::Event>) {
         // Where they can walk, worked out the first time any of them is about
         if self.nav.is_none() && self.npcs.iter().any(|n| n.mind.is_some()) {
             // From where they stand, where players come in, and where they are
@@ -695,7 +695,7 @@ impl super::Sim {
                 mind.speed = None;
                 let feet = [npc.pos[0], npc.floor, npc.pos[2]];
                 let there = self.visibility.player_rooms(&self.level, at, None);
-                mind.path = self.nav.as_ref().and_then(|g| g.path(&self.world, feet, &rooms, at, &there, &self.blocked_portals)).unwrap_or_default();
+                mind.path = self.nav.as_ref().and_then(|g| g.investigate(&self.world, feet, &rooms, at, &there, &self.blocked_portals)).unwrap_or_default();
                 if !mind.path.is_empty() {
                     ev.push(super::Event::Log(format!("t={now:.2} character {i} goes to see at ({:.0}, {:.0}, {:.0}), {} legs, {gait:?}", at[0], at[1], at[2], mind.path.len())));
                 }
@@ -902,7 +902,9 @@ impl super::Sim {
                     searches -= 1;
                     let feet = [npc.pos[0], npc.floor, npc.pos[2]];
                     let there = self.visibility.player_rooms(&self.level, to, None);
-                    match self.nav.as_ref().and_then(|g| g.path(&self.world, feet, &rooms, to, &there, &self.blocked_portals)) {
+                    let floor = super::nav::Grid::floor(&self.world, to, &there);
+                    let there = floor.map(|to| self.world.floor_rooms(to)).unwrap_or(there);
+                    match floor.and_then(|to| self.nav.as_ref()?.path(&self.world, feet, &rooms, to, &there, &self.blocked_portals)) {
                         Some(path) => {
                             mind.path = path;
                             mind.errand = Some(mind.step);
@@ -1061,7 +1063,7 @@ impl super::Sim {
     }
 
     /// Makes a team as aware as `level`, as one of it passes on what it knows (0x61e530)
-    pub(super) fn make_aware(&mut self, team: usize, level: u8) {
+    pub fn make_aware(&mut self, team: usize, level: u8) {
         let now = self.time;
         for m in self.npcs.iter_mut().filter(|n| !n.health.is_dead()).filter_map(|n| n.mind.as_mut()).filter(|m| m.team == team) {
             m.aware(level, now);
@@ -1500,6 +1502,40 @@ mod tests {
         assert!(walked && !n.walking, "still walking at {:?}", n.pos);
         assert!((n.pos[0] - 200.0).abs() <= 30.0 + 1.0 && (n.pos[2] - 300.0).abs() < 1.0, "{:?}", n.pos);
         assert_eq!(n.stance, Some(Stance::Stand));
+    }
+
+    #[test]
+    fn a_wall_sound_still_gets_an_investigation_on_the_same_floor() {
+        let mut sim = standoff([0.0, 0.0, 300.0], 0.0);
+        let orders = Orders { plan: Plan { roe: Roe::Investigate, ..Plan::default() }, ..Orders::default() };
+        let mind = sim.npcs[0].mind.take().unwrap().with_orders(0, Rc::new(orders));
+        sim.npcs[0].mind = Some(mind);
+        sim.noises.push(([499.0, 50.0, 300.0], 1000.0, Noise::Sound));
+        for _ in 0..240 { wait(&mut sim, crate::sim::TICK); }
+        let n = &sim.npcs[0];
+        assert!(n.pos[0] > 400.0, "{:?}", n.pos);
+        assert_eq!(n.floor, 0.0);
+        assert!(sim.world.wall_clearance(&crate::collision::Player::new([n.pos[0], n.floor, n.pos[2]])) >= -0.5);
+    }
+
+    #[test]
+    fn a_terrorist_investigates_through_a_broken_low_window() {
+        if !std::path::Path::new("data/map/rm06/rm06.map").exists() { return; }
+        let setup = crate::net::proto::Setup { map: "data/map/rm06/rm06.map".to_string(), ..crate::net::lab::demo_setup() };
+        let mut sim = crate::net::setup::build_sim(&setup).unwrap();
+        let from = [33220.0, 32767.0, 31460.0];
+        let orders = Orders { plan: Plan { roe: Roe::Investigate, ..Plan::default() }, ..Orders::default() };
+        sim.npcs.push(crate::sim::characters::Npc { pos: from, floor: from[1], yaw: 0.0,
+            stance: Some(Stance::Stand), mind: Some(mind(Alertness::Alert).with_orders(0, Rc::new(orders))), ..Default::default() });
+        let pane = sim.panes.iter().position(|p| p.name == "15_glass02").unwrap();
+        sim.broken_at[pane] = Some(0.0);
+        sim.world.switch_off("15_glass02");
+        sim.noises.push(([33220.0, 32817.0, 31620.0], 1000.0, Noise::Sound));
+        for _ in 0..600 {
+            sim.tick(&[], crate::sim::TICK);
+            if sim.npcs[0].pos[2] >= 31580.0 { break; }
+        }
+        assert!(sim.npcs[0].pos[2] >= 31580.0, "{:?}", sim.npcs[0].pos);
     }
 
     #[test]

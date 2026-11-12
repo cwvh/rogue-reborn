@@ -17,7 +17,7 @@
 
 use std::collections::VecDeque;
 
-use crate::net::bot::{Bot, Skill};
+use crate::net::bot::{Bot, Perception, PerceptionStats, Skill};
 use crate::net::client::{Client, Frame};
 use crate::net::link::{Conditions, FakeLink, FakeNet};
 use crate::net::proto::{BasePairSetup, LobbyCommand, Setup};
@@ -25,6 +25,8 @@ use crate::net::record::ClientRecorder;
 use crate::net::server::Server;
 use crate::net::setup::build_sim;
 use crate::sim::{Event, Input, MAX_PLAYERS, Side, Sim, TICK};
+
+pub mod navigation;
 
 type V3 = [f32; 3];
 
@@ -115,6 +117,7 @@ pub struct Peer {
     told_shots: usize,
     told_deaths: usize,
     snapshots: u32,
+    navigation_life: Option<crate::net::tactics::Life>,
 }
 
 /// What a player's screen showed as they sent an input
@@ -238,6 +241,8 @@ pub struct Game {
     /// Measuring, when on
     pub lab: Option<Lab>,
     pub tuning: Tuning,
+    pub navigation: Option<crate::net::tactics::Navigation>,
+    map: String,
 }
 
 impl Game {
@@ -253,8 +258,9 @@ impl Game {
         let net = FakeNet::new(11, conditions);
         let server_link = net.endpoint();
         let sim = build_sim(&setup).unwrap();
+        let map = setup.map.clone();
         let server = Server::new(sim, setup, BUILD, spawns);
-        Game { net, server, server_link, peers: Vec::new(), steps: 0, lab: None, tuning: Tuning::default() }
+        Game { net, server, server_link, peers: Vec::new(), steps: 0, lab: None, tuning: Tuning::default(), navigation: None, map }
     }
 
     /// Play with these settings, for players who join from now on
@@ -277,7 +283,7 @@ impl Game {
         client.set_view_delay(self.tuning.view_delay);
         self.peers.push(Peer {
             client, link, sim: None, script: Box::new(script), bot: None, sees: None, ticks: 0, on: true, events: Vec::new(),
-            recorder: None, frames: Vec::new(), view: None, remote: false, continues: true, clock: 1.0, frozen: None, ran: self.steps, shown: VecDeque::new(), told_shots: 0, told_deaths: 0, snapshots: 0,
+            recorder: None, frames: Vec::new(), view: None, remote: false, continues: true, clock: 1.0, frozen: None, ran: self.steps, shown: VecDeque::new(), told_shots: 0, told_deaths: 0, snapshots: 0, navigation_life: None,
         });
         self.peers.len() - 1
     }
@@ -287,8 +293,20 @@ impl Game {
     }
 
     pub fn join_bot(&mut self, skill: Skill, seed: u64) -> usize {
+        self.join_bot_with(skill, seed, crate::net::bot::Behavior::Navigate)
+    }
+
+    pub fn join_bot_with(&mut self, skill: Skill, seed: u64, behavior: crate::net::bot::Behavior) -> usize {
         let peer = self.join(|_| Input::default());
-        self.peers[peer].bot = Some(Bot::new(skill, seed));
+        let mut bot = Bot::new(skill, seed);
+        bot.behavior = behavior;
+        if behavior != crate::net::bot::Behavior::Legacy {
+            let nav = self.navigation.get_or_insert_with(|| crate::net::tactics::Navigation::for_map(&self.server.sim, &self.map, None));
+            // One search slot per navigating bot, up to four. A slot holds about 8 MiB on rm08.
+            let navigating = 1 + self.peers.iter().filter(|p| p.bot.as_ref().is_some_and(|b| b.behavior != crate::net::bot::Behavior::Legacy)).count();
+            nav.search_slots(navigating.min(4));
+        }
+        self.peers[peer].bot = Some(bot);
         peer
     }
 
@@ -357,7 +375,7 @@ impl Game {
             let ticks = due.saturating_sub(p.ran).min(CATCH_UP);
             p.ran = due;
             for _ in 0..ticks {
-                Game::tick_peer(p, own, &mut self.lab);
+                Game::tick_peer(p, own, &mut self.lab, &mut self.navigation);
             }
         }
         let happened = self.server.update(now, &mut self.server_link);
@@ -367,7 +385,7 @@ impl Game {
     }
 
     /// One tick of a player's computer, at `now` by its clock
-    fn tick_peer(p: &mut Peer, now: f64, lab: &mut Option<Lab>) {
+    fn tick_peer(p: &mut Peer, now: f64, lab: &mut Option<Lab>, navigation: &mut Option<crate::net::tactics::Navigation>) {
         {
             if p.sim.is_none() {
                 let setup = p.client.connect(now, &mut p.link).cloned();
@@ -393,8 +411,13 @@ impl Game {
                 rec.viewed(now);
                 p.frames.push(view.clone());
             }
+            if p.client.snapshots != 0 && p.bot.as_ref().is_some_and(|b| b.behavior != crate::net::bot::Behavior::Legacy)
+                && let Some(nav) = navigation.as_mut() {
+                nav.prepare_start(sim, slot, p.client.round, &mut p.navigation_life);
+            }
             let input = match (p.bot.as_mut(), p.sees.as_mut(), &view) {
-                (Some(bot), _, Some(view)) => bot.think(sim, slot, view),
+                (Some(bot), _, Some(view)) => if p.client.snapshots == 0 { Input::default() }
+                    else { bot.think(sim, navigation.as_ref(), slot, view, p.client.round) },
                 (_, Some(sees), Some(view)) => sees(sim, slot, view, p.ticks),
                 _ => (p.script)(p.ticks),
             };
@@ -524,6 +547,7 @@ pub struct Fight {
     pub meters: Vec<(bool, crate::net::meter::Figures)>,
     /// Bytes a second the server sent, all clients together
     pub upload: f32,
+    pub perception: [PerceptionStats; 2],
 }
 
 /// The box room for measuring: players hurt each other, and do not run out of rounds
@@ -538,12 +562,24 @@ pub fn fight(lan: usize, remote: usize, far: Conditions, seconds: f32) -> Fight 
 
 /// `fight`, with these settings
 pub fn fight_with(tuning: Tuning, lan: usize, remote: usize, far: Conditions, seconds: f32) -> Fight {
+    fight_run(tuning, lan, remote, far, seconds, None)
+}
+
+/// Compare perception changes without changing the fairness experiment's fixed workload.
+pub fn fight_perception(tuning: Tuning, lan: usize, remote: usize, far: Conditions, seconds: f32, perception: Perception) -> Fight {
+    fight_run(tuning, lan, remote, far, seconds, Some(perception))
+}
+
+fn fight_run(tuning: Tuning, lan: usize, remote: usize, far: Conditions, seconds: f32, perception: Option<Perception>) -> Fight {
     let mut game = Game::with_setup(Conditions::lan(), lab_setup());
     game.tune(tuning);
     game.measure();
     let skills = [Skill::hard(), Skill::normal(), Skill::easy()];
     for i in 0..lan + remote {
-        let p = game.join_bot(skills[i % 3], 100 + i as u64);
+        let p = game.join(|_| Input::default());
+        let mut bot = Bot::fairness_baseline(skills[i % 3], 100 + i as u64);
+        if let Some(perception) = perception { bot.measure_perception(perception); }
+        game.peers[p].bot = Some(bot);
         if i >= lan {
             game.connect_over(p, far);
         }
@@ -551,7 +587,17 @@ pub fn fight_with(tuning: Tuning, lan: usize, remote: usize, far: Conditions, se
     game.run(seconds);
     let mut lab = game.lab.take().unwrap();
     let (mut lan, mut far) = (Tally::default(), Tally::default());
+    let mut perception = [PerceptionStats::default(), PerceptionStats::default()];
     for p in &game.peers {
+        if let Some(stats) = p.bot.as_ref().and_then(|b| b.perception_stats.as_ref()) {
+            let sum = &mut perception[usize::from(p.remote)];
+            sum.frame_rejects += stats.frame_rejects;
+            sum.dead_rejects += stats.dead_rejects;
+            sum.identity_rejects += stats.identity_rejects;
+            sum.live_rejects += stats.live_rejects;
+            sum.room_rejects += stats.room_rejects;
+            sum.world_rejects += stats.world_rejects;
+        }
         let t = lab.tally(p.client.slot());
         (t.frames, t.starved) = (p.client.frames, p.client.starved);
         let t = t.clone();
@@ -559,7 +605,7 @@ pub fn fight_with(tuning: Tuning, lan: usize, remote: usize, far: Conditions, se
     }
     let meters = game.peers.iter().map(|p| (p.remote, p.client.meter.figures())).collect();
     let upload = game.server.snapshot_bytes as f32 / seconds;
-    Fight { lan, remote: far, meters, upload }
+    Fight { lan, remote: far, meters, upload, perception }
 }
 
 /// Where the corner is in `peek`: a player at a smaller x is out of sight of the one holding

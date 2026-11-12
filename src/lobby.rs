@@ -91,7 +91,7 @@ pub fn name(slot: usize) -> String {
     format!("PLAYER {}", slot + 1)
 }
 
-pub(crate) fn side_name(side: Side) -> &'static str {
+pub fn side_name(side: Side) -> &'static str {
     match side {
         Side::Blue => "Blue",
         Side::Gold => "Gold",
@@ -126,21 +126,21 @@ fn step_length(now: Option<u16>, up: bool) -> Option<Option<u16>> {
 }
 
 // The screen's colors, after the original's
-pub(crate) const BACK: Color = [0.01, 0.02, 0.04, 1.0];
-pub(crate) const LABEL: Color = [0.04, 0.16, 0.24, 1.0];
-pub(crate) const LABEL_EDGE: Color = [0.16, 0.42, 0.55, 1.0];
-pub(crate) const LABEL_TEXT: Color = [0.3, 0.75, 0.92, 1.0];
-pub(crate) const FIELD: Color = [0.01, 0.02, 0.03, 1.0];
-pub(crate) const FIELD_EDGE: Color = [0.85, 0.67, 0.15, 1.0];
-pub(crate) const FIELD_TEXT: Color = [1.0, 1.0, 1.0, 1.0];
-pub(crate) const HEADER: Color = [0.08, 0.3, 0.5, 1.0];
-pub(crate) const GOLD_TEXT: Color = [0.95, 0.78, 0.2, 1.0];
-pub(crate) const DIM_TEXT: Color = [0.45, 0.5, 0.52, 1.0];
+pub const BACK: Color = [0.01, 0.02, 0.04, 1.0];
+pub const LABEL: Color = [0.04, 0.16, 0.24, 1.0];
+const LABEL_EDGE: Color = [0.16, 0.42, 0.55, 1.0];
+pub const LABEL_TEXT: Color = [0.3, 0.75, 0.92, 1.0];
+pub const FIELD: Color = [0.01, 0.02, 0.03, 1.0];
+pub const FIELD_EDGE: Color = [0.85, 0.67, 0.15, 1.0];
+pub const FIELD_TEXT: Color = [1.0, 1.0, 1.0, 1.0];
+const HEADER: Color = [0.08, 0.3, 0.5, 1.0];
+const GOLD_TEXT: Color = [0.95, 0.78, 0.2, 1.0];
+pub const DIM_TEXT: Color = [0.45, 0.5, 0.52, 1.0];
 /// The chat's lines for what happens, quieter than what players say
-pub(crate) const NEWS_TEXT: Color = [0.42, 0.56, 0.64, 1.0];
-pub(crate) const WHITE: Color = [1.0, 1.0, 1.0, 1.0];
-pub(crate) const BLUE_BAR: Color = [0.15, 0.4, 0.7, 1.0];
-pub(crate) const GOLD_BAR: Color = [0.75, 0.6, 0.15, 1.0];
+const NEWS_TEXT: Color = [0.42, 0.56, 0.64, 1.0];
+pub const WHITE: Color = [1.0, 1.0, 1.0, 1.0];
+pub const BLUE_BAR: Color = [0.15, 0.4, 0.7, 1.0];
+pub const GOLD_BAR: Color = [0.75, 0.6, 0.15, 1.0];
 
 // Where things are, on the 640 x 480 canvas
 /// The player list: a header level with NAME, then a row each from level with SPECIALTY. A
@@ -171,7 +171,7 @@ pub const TYPING: Rect = Rect::new(201.0, 381.0, 388.0, 16.0);
 pub const SCROLL_UP: Rect = Rect::new(598.0, 285.0, 16.0, 14.0);
 pub const SCROLL_DOWN: Rect = Rect::new(598.0, 355.0, 16.0, 14.0);
 /// What the player can do now, across the bottom
-pub(crate) const STATUS: Rect = Rect::new(25.0, 401.0, 590.0, 13.0);
+pub const STATUS: Rect = Rect::new(25.0, 401.0, 590.0, 13.0);
 pub const READY: Rect = Rect::new(30.0, 428.0, 110.0, 26.0);
 pub const START: Rect = Rect::new(497.0, 428.0, 110.0, 26.0);
 
@@ -356,7 +356,7 @@ pub fn lobby(ui: &mut Ui, v: &LobbyView, chat: &mut Chat) -> Vec<LobbyCommand> {
 }
 
 /// The art's state for how a control looks: up, lit, pressed and dark
-pub(crate) fn state(look: Look) -> usize {
+fn state(look: Look) -> usize {
     match look {
         Look::Normal => 0,
         Look::Hover => 1,
@@ -366,7 +366,7 @@ pub(crate) fn state(look: Look) -> usize {
 }
 
 /// A button with its label, lit while `on`
-pub(crate) fn button(ui: &mut Ui, rect: Rect, look: Look, on: bool, text: &str) {
+pub fn button(ui: &mut Ui, rect: Rect, look: Look, on: bool, text: &str) {
     let state = match look {
         Look::Normal if on => 1,
         _ => state(look),

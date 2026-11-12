@@ -163,6 +163,24 @@ pub const THROW_RELEASE: f32 = 0.35;
 /// How far away the door being opened or closed can be
 const DOOR_REACH: f32 = 220.0;
 
+/// The door a use press selects, with eye and look direction in map space.
+pub fn door_target(eye: V3, look: V3, doors: &[Door], states: &[DoorState]) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (i, d) in doors.iter().enumerate() {
+        // A press can aim at the doorway or the leaf wherever it has moved.
+        for c in [d.center(0.0), d.center(states[i].open)] {
+            let to = [c[0] - eye[0], c[1] - eye[1], c[2] - eye[2]];
+            let dist = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
+            if dist > DOOR_REACH || dist < 1.0 { continue; }
+            let facing = (to[0] * look[0] + to[1] * look[1] + to[2] * look[2]) / dist;
+            if facing < 0.5 { continue; }
+            let score = dist * (2.0 - facing);
+            if best.is_none_or(|(_, s)| score < s) { best = Some((i, score)); }
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
 /// The most players in a game
 pub const MAX_PLAYERS: usize = 16;
 
@@ -915,6 +933,14 @@ impl Sim {
     /// and of those the line passes through, and unbroken glass. For a camera, which must not
     /// end up in or behind a wall, whatever rooms are solid around the players.
     pub fn line_reach(&self, a: V3, b: V3) -> f32 {
+        self.sight_reach(a, b, true)
+    }
+
+    pub fn bot_sight_reach(&self, a: V3, b: V3) -> f32 {
+        self.sight_reach(a, b, false)
+    }
+
+    fn sight_reach(&self, a: V3, b: V3, glass: bool) -> f32 {
         let length = dist3(a, b);
         if length < 1e-3 {
             return length;
@@ -923,6 +949,9 @@ impl Sim {
         let (mut rooms, room) = self.view_rooms(a, None);
         rooms.extend(self.visibility.player_rooms(&self.level, a, room));
         rooms.extend(self.rooms_crossing(a, b));
+        if !glass {
+            return self.world.sight_hit_in(a, dir, length, &rooms).map_or(length, |h| h.dist);
+        }
         let wall = self.world.bullet_hit_in(a, dir, length, &rooms).map_or(length, |h| h.dist);
         let glass = self.panes.iter().enumerate()
             .filter(|(i, _)| self.broken_at[*i].is_none())
@@ -1330,29 +1359,8 @@ impl Sim {
     fn use_door(&mut self, slot: usize, forward_cam: V3, ev: &mut Vec<Event>) {
         let eye = self.eye(slot);
         let look = [forward_cam[0], forward_cam[1], -forward_cam[2]];
-        let mut best: Option<(usize, f32)> = None;
-        for (i, d) in self.doors.iter().enumerate() {
-            // Aim at the doorway, or at the leaf wherever it has gone (a door swung open
-            // to the side is still the one in front of you)
-            for c in [d.center(0.0), d.center(self.door_states[i].open)] {
-                let to = [c[0] - eye[0], c[1] - eye[1], c[2] - eye[2]];
-                let dist = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
-                if dist > DOOR_REACH || dist < 1.0 {
-                    continue;
-                }
-                // Within 60 degrees of where they are looking
-                let facing = (to[0] * look[0] + to[1] * look[1] + to[2] * look[2]) / dist;
-                if facing < 0.5 {
-                    continue;
-                }
-                let score = dist * (2.0 - facing);
-                if best.is_none_or(|(_, s)| score < s) {
-                    best = Some((i, score));
-                }
-            }
-        }
-        match best {
-            Some((i, _)) => {
+        match door_target(eye, look, &self.doors, &self.door_states) {
+            Some(i) => {
                 self.door_states[i].opening = !self.door_states[i].opening;
                 let opening = self.door_states[i].opening;
                 let sound_name = if opening { &self.doors[i].open_sound } else { &self.doors[i].close_sound };

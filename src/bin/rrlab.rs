@@ -12,7 +12,7 @@ fn usage(problem: &str) -> ! {
     if !problem.is_empty() {
         eprintln!("rrlab: {problem}");
     }
-    eprintln!("usage: rrlab [--seconds N] [--tune]");
+    eprintln!("usage: rrlab [--seconds N] [--tune] [--navigation MAP --bot-seed N --trace] [--perception-check]");
     std::process::exit(if problem.is_empty() { 0 } else { 2 });
 }
 
@@ -96,18 +96,50 @@ fn tune(seconds: f32) {
 
 fn main() {
     let mut seconds = 30.0f32;
+    let mut navigation = None;
+    let mut seed = 42u64;
+    let mut tuning = false;
+    let mut trace = false;
+    let mut perception = false;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--tune" => {
-                tune(seconds);
-                return;
-            }
+            "--tune" => tuning = true,
+            "--trace" => trace = true,
+            "--perception-check" => perception = true,
+            "--navigation" => navigation = Some(it.next().unwrap_or_else(|| usage("--navigation expects a map file"))),
+            "--bot-seed" => seed = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage("--bot-seed expects an integer")),
             "--seconds" => seconds = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage("--seconds expects a number")),
             "--help" | "-h" => usage(""),
             other => usage(&format!("unknown option {other}")),
         }
     }
+    if !seconds.is_finite() || seconds <= 0.0 { usage("--seconds must be positive and finite"); }
+    if perception {
+        println!("Wi-Fi fairness workload: 4 LAN, 2 Wi-Fi, 40 seconds, identical movement/skills/seeds.");
+        println!("perception LAN_shots remote_shots remote_agreement LAN_agreement");
+        use rogue_reborn::net::bot::Perception::{Historical, Frame, Sight, Current};
+        for perception in [Historical, Frame, Sight, Current] {
+            let f = rogue_reborn::net::lab::fight_perception(Tuning::default(), 4, 2, Conditions::wifi(), 40.0, perception);
+            println!("{perception:?} {} {} {:.6} {:.6}", f.lan.shots, f.remote.shots, f.remote.agreement(), f.lan.agreement());
+            println!("  rejected candidates (LAN, remote): {:?}", f.perception);
+        }
+        return;
+    }
+    if let Some(path) = navigation {
+        println!("Movement comparison: {path}, {seconds:.0}s, seeds {seed}/{}; two LAN opponents, damage and grenades disabled.", seed.wrapping_add(1));
+        println!("Coverage and blocked time are per-player means. Contacts count acquisition starts.");
+        println!("policy    patches rooms first_contact contacts blocked_s loop_s moving_window_s search_max_ms wait_s grid_ms nav_MiB search_MiB wall_ms");
+        println!("nav_MiB is the bots' grid with its search workspaces; search_MiB is the workspaces alone.");
+        for r in rogue_reborn::net::lab::navigation::compare(std::path::Path::new(&path), seconds, seed, trace)
+            .unwrap_or_else(|e| usage(&e)) {
+            let contact = r.first_contact.map_or("none".to_string(), |s| format!("{s:.2}"));
+            println!("{:?} {:.1} {:.1} {contact} {} {:.2} {:.2} {:.2} {:.3} {:.2} {:.1} {:.2} {:.2} {:.0}", r.behavior, r.patches, r.rooms,
+                r.contacts, r.blocked, r.circling, r.moving_windows, r.search_ms, r.waiting, r.build_ms, r.bytes as f64 / 1048576.0, r.search_bytes as f64 / 1048576.0, r.elapsed_ms);
+        }
+        return;
+    }
+    if tuning { tune(seconds); return; }
 
     println!("Fights: bots in the box room, everyone for themselves, {seconds:.0} s each. A ping is a");
     println!("round trip. Wi-Fi is 60 ms with everything lost for a fifth of a second every five");

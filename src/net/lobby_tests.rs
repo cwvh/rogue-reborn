@@ -53,6 +53,55 @@ fn ready(game: &Game, peer: usize) -> bool {
     game.peers[peer].client.ready.contains(&slot(game, peer))
 }
 
+fn loading_host(game: &mut Game) -> usize {
+    let peer = game.join_on(Side::Blue, |_| Input::default());
+    game.peers[peer].client.set_key(KEY);
+    game.peers[peer].on = false;
+    for _ in 0..60 {
+        let now = game.steps as f64 * TICK as f64;
+        let p = &mut game.peers[peer];
+        if p.client.connect(now, &mut p.link).is_some() { return peer; }
+        game.step();
+    }
+    panic!("host did not connect");
+}
+
+#[test]
+fn an_initial_load_can_be_silent_for_six_seconds() {
+    let mut game = hosted(true);
+    let host = loading_host(&mut game);
+    game.run(6.0);
+    assert_eq!(game.server.ended(), None);
+    assert_eq!(game.server.players(), 1);
+    game.peers[host].on = true;
+    game.run(1.0);
+    assert!(game.peers[host].client.snapshots > 0);
+    assert_eq!(game.server.ended(), None);
+    game.peers[host].on = false;
+    game.run(6.0);
+    assert_eq!(game.server.ended(), Some("the host left"));
+}
+
+#[test]
+fn an_initial_load_expires_with_or_without_keepalives() {
+    for keepalive in [false, true] {
+        let mut game = hosted(true);
+        let host = loading_host(&mut game);
+        for seq in 1..30 {
+            if keepalive {
+                send(&mut game, host, seq, 0, LobbyCommand::Ready(true));
+                let empty = ToServer::Input { token: 1000 + host as u32, ack_snapshot: 0, first_seq: seq, view: 0, round: 0, inputs: Vec::new() }.encode();
+                let to = game.server_link.addr();
+                game.peers[host].link.send(to, &empty);
+            }
+            game.run(1.0);
+        }
+        assert_eq!(game.server.ended(), None);
+        game.run(2.0);
+        assert_eq!(game.server.ended(), Some("the host left"));
+    }
+}
+
 #[test]
 fn the_host_starts_and_stops_the_countdown_and_no_one_else_can() {
     let mut game = hosted(false);

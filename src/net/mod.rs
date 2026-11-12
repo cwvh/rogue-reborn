@@ -13,6 +13,7 @@ pub mod record;
 pub mod round;
 pub mod server;
 pub mod setup;
+pub mod tactics;
 pub mod watch;
 
 #[cfg(test)]

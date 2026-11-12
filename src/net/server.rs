@@ -123,6 +123,7 @@ struct Remote {
     /// Snapshots sent and not confirmed yet: the tick, and the last event in each
     in_flight: VecDeque<(u32, u32)>,
     heard: f64,
+    accepted: f64,
     /// The tick of the latest snapshot the client says it has
     acked: u32,
     /// The latest snapshots sent, without their events: what a later one can be the difference from
@@ -494,7 +495,7 @@ impl Server {
                 }
                 self.remotes.push(Remote {
                     addr: from, token, slot, queue: BTreeMap::new(), next_seq: None, last_input: Input { run: true, ..Input::default() }, starved: 0, last_view: 0, low: usize::MAX, looked: 0,
-                    applied_seq: 0, event_ack: self.next_event - 1, in_flight: VecDeque::new(), heard: now, acked: 0, sent: VecDeque::new(), round: 0,
+                    applied_seq: 0, event_ack: self.next_event - 1, in_flight: VecDeque::new(), heard: now, accepted: now, acked: 0, sent: VecDeque::new(), round: 0,
                     host, ready: false, lobby_seq: 0, joined: who.joined, name, continued: false,
                 });
                 self.accept(link, from, token, slot);
@@ -855,7 +856,10 @@ impl Server {
         }
 
         // Anyone who has gone quiet is gone
-        let gone: Vec<usize> = self.remotes.iter().enumerate().filter(|(_, r)| now - r.heard > TIMEOUT).map(|(i, _)| i).collect();
+        let gone: Vec<usize> = self.remotes.iter().enumerate().filter(|(_, r)| {
+            if r.next_seq.is_none() { now - r.accepted > LOAD_TIMEOUT as f64 }
+            else { now - r.heard > TIMEOUT }
+        }).map(|(i, _)| i).collect();
         for i in gone.into_iter().rev() {
             let r = self.remotes.remove(i);
             self.drop_player(r.slot);

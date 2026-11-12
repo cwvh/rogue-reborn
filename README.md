@@ -249,12 +249,11 @@ scripts/mp.sh rm08 --net bad               # your connection 90 ms each way, 30 
 `--skill` is `easy`, `normal` or `hard`, `--npcs N` and `--no-pvp` go to the server, and anything
 after `--` goes to `rr`.
 
-The bots are `rrbot --connect HOST:PORT --fight [--skill hard] [--side gold]`. They wander the
-level, opening the doors they come to, and turn on whoever they see on the other side: they react
+The bots are `rrbot --connect HOST:PORT --fight [--skill hard] [--side gold]`. They explore the
+level, opening doors along planned paths, and turn on whoever they see on the other side: they react
 after a moment, turn at a limited rate, fire in bursts with an aim that drifts and settles,
 sidestep and now and then throw a grenade. They see only what a player on the same computer
-would, so their shots are judged the same way. They are poor at finding each other on a big
-level. `--trace` prints where a bot is and whom it fights, once a second.
+would, so their shots are judged the same way. `--trace` prints movement and combat decisions.
 
 `rrbot` without `--fight` is a scripted client (`rrbot --connect HOST:PORT --keys WF --seconds
 10`), and `scripts/net-test.sh` runs a server and two bots over real sockets and checks that the

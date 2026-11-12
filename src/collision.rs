@@ -68,6 +68,19 @@ impl Params {
         if crouched { self.crouch_height } else { self.height }
     }
 
+    /// Heights above the feet of the three spheres that stand for a body in clearance checks,
+    /// from just over a step to just under the head.
+    pub fn sphere_heights(&self, crouched: bool) -> [f32; 3] {
+        let (lo, hi) = self.sphere_range(crouched);
+        [0, 1, 2].map(|k| lo + (hi - lo) * k as f32 / 2.0)
+    }
+
+    /// The lowest and highest of those heights.
+    pub fn sphere_range(&self, crouched: bool) -> (f32, f32) {
+        let lo = self.step_up + self.radius;
+        (lo, (self.body_height(crouched) - self.radius).max(lo))
+    }
+
     /// Feet to eye, standing or crouched
     pub fn eye(&self, crouched: bool) -> f32 {
         if crouched { self.crouch_eye_height } else { self.eye_height }
@@ -90,6 +103,7 @@ impl Player {
     }
 }
 
+#[derive(Clone, Debug)]
 struct Tri {
     a: V3,
     b: V3,
@@ -118,6 +132,8 @@ struct Tri {
 
 /// Marks faces that are solid whichever rooms are active
 const NO_ROOM: u32 = u32::MAX;
+const DOOR_FIT_EVERY: f32 = 10.0;
+const DOOR_SWEEP_STEPS: usize = 16;
 /// The flag on a group of an object's collision faces (`map::CollisionGroup::flags`) that leaves them
 /// out of the walls: the original's loader skips such a group when it reads a room's walls
 /// (RogueSpear.exe 0x55eeb0)
@@ -148,6 +164,9 @@ pub struct CollisionWorld {
     tris: Vec<Tri>,
     /// Named groups of triangles that can be switched off: (name, range into `tris`)
     groups: Vec<(String, std::ops::Range<usize>)>,
+    glass_tris: std::ops::Range<usize>,
+    pane_bounds: Vec<[f32; 6]>,
+    pane_cells: std::collections::HashMap<usize, Vec<u32>>,
     // Uniform grid over XZ; each cell lists the triangles overlapping it
     min_x: f32,
     min_z: f32,
@@ -181,6 +200,40 @@ struct DoorBody {
     local: Vec<[V3; 3]>,
     /// Where they are in `tris`
     range: std::ops::Range<usize>,
+    bounds: [f32; 6],
+}
+
+#[derive(Clone, Debug)]
+pub struct LeafSnapshot {
+    bounds: [f32; 6],
+    triangles: Option<Vec<Tri>>,
+}
+
+impl LeafSnapshot {
+    pub fn clear(&self, params: Params, a: V3, b: V3) -> bool {
+        let mut lo = 0.0f32;
+        let mut hi = 1.0f32;
+        for k in 0..3 {
+            let (min,max) = if k==1 { (self.bounds[k]-params.height,self.bounds[k+3]) }
+                else { (self.bounds[k]-params.radius,self.bounds[k+3]+params.radius) };
+            let d = b[k]-a[k];
+            if d.abs()<1e-6 { if a[k]<min || a[k]>max { return true; } }
+            else { let (x,y)=((min-a[k])/d,(max-a[k])/d); lo=lo.max(x.min(y)); hi=hi.min(x.max(y)); if lo>hi { return true; } }
+        }
+        let Some(triangles) = &self.triangles else { return false };
+        triangles.iter().all(|t| swept_body_distance(&params, a, b, t) >= params.radius - 0.5)
+    }
+}
+
+fn triangle_bounds<'a>(tris: impl Iterator<Item = &'a Tri>) -> [f32; 6] {
+    let mut bounds = [f32::INFINITY, f32::INFINITY, f32::INFINITY,
+        f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
+    for t in tris {
+        for at in [t.a, t.b, t.c] {
+            for k in 0..3 { bounds[k] = bounds[k].min(at[k]); bounds[k + 3] = bounds[k + 3].max(at[k]); }
+        }
+    }
+    bounds
 }
 
 /// One triangle of a door leaf, with the door `open` this far
@@ -317,6 +370,7 @@ impl CollisionWorld {
         }
 
         // Intact glass is solid until it breaks
+        let first_glass = tris.len();
         let mut groups = Vec::new();
         for pane in &glass {
             let first = tris.len();
@@ -329,6 +383,8 @@ impl CollisionWorld {
             }
             groups.push((pane.name.clone(), first..tris.len()));
         }
+        let glass_tris = first_glass..tris.len();
+        let pane_bounds = groups.iter().map(|(_, range)| triangle_bounds(tris[range.clone()].iter())).collect();
 
         // Doors start closed, and are solid whichever rooms are around the player
         let mut bodies = Vec::new();
@@ -340,7 +396,8 @@ impl CollisionWorld {
                 tris.push(placed_tri(&door, *p, 0.0, *material));
             }
             let local: Vec<[V3; 3]> = leaf.into_iter().map(|(p, _)| p).collect();
-            bodies.push(DoorBody { range: first..tris.len(), local, door });
+            let bounds = triangle_bounds(tris[first..].iter());
+            bodies.push(DoorBody { range: first..tris.len(), local, door, bounds });
         }
         let door_tris = first_door..tris.len();
 
@@ -364,6 +421,9 @@ impl CollisionWorld {
         let mut world = Self {
             tris,
             groups,
+            glass_tris,
+            pane_bounds,
+            pane_cells: std::collections::HashMap::new(),
             min_x,
             min_z,
             cell,
@@ -390,6 +450,13 @@ impl CollisionWorld {
                 }
             }
         }
+        for (i, b) in world.pane_bounds.iter().enumerate() {
+            for r in world.row(b[2])..=world.row(b[5]) {
+                for c in world.col(b[0])..=world.col(b[3]) {
+                    world.pane_cells.entry(r * cols + c).or_default().push(i as u32);
+                }
+            }
+        }
         world
     }
 
@@ -404,7 +471,7 @@ impl CollisionWorld {
             tri(corner(-half, -half), corner(half, half), corner(-half, half)),
         ];
         let cell = 2.0 * half;
-        let mut world = Self { tris, groups: Vec::new(), min_x: -half, min_z: -half, cell, cols: 1, rows: 1, cells: vec![vec![0, 1]], params: Params::default(), doors: Vec::new(), passes: Vec::new(), door_tris: 0..0 };
+        let mut world = Self { tris, groups: Vec::new(), glass_tris: 0..0, pane_bounds: Vec::new(), pane_cells: std::collections::HashMap::new(), min_x: -half, min_z: -half, cell, cols: 1, rows: 1, cells: vec![vec![0, 1]], params: Params::default(), doors: Vec::new(), passes: Vec::new(), door_tris: 0..0 };
         world.cells[0] = vec![0, 1];
         world
     }
@@ -414,6 +481,133 @@ impl CollisionWorld {
     /// The doors, in the order `set_door_open` takes them
     pub fn doors(&self) -> impl Iterator<Item = &crate::door::Door> {
         self.doors.iter().map(|d| &d.door)
+    }
+
+    /// Body clearance from one door leaf, independent of the active room set.
+    pub fn door_clearance(&self, p: &Player, index: usize) -> f32 {
+        let Some(door) = self.doors.get(index) else { return f32::INFINITY };
+        let bounds = door.bounds;
+        if p.pos[0] + self.params.radius < bounds[0] || p.pos[0] - self.params.radius > bounds[3]
+            || p.pos[2] + self.params.radius < bounds[2] || p.pos[2] - self.params.radius > bounds[5]
+            || p.pos[1] + self.params.body_height(p.crouched) < bounds[1] || p.pos[1] > bounds[4] {
+            return f32::INFINITY;
+        }
+        door.range.clone().filter(|&i| !self.tris[i].off)
+            .map(|i| body_distance(&self.params, p.pos, p.crouched, &self.tris[i]) - self.params.radius)
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    /// Whether the closed leaf obstructs a standing body's next walking leg.
+    pub fn closed_door_blocks(&self, from: V3, to: V3, index: usize) -> bool {
+        let Some(door) = self.doors.get(index) else { return false };
+        let tris: Vec<_> = door.local.iter().zip(door.range.clone()).filter(|(_, i)| !self.tris[*i].off)
+            .map(|(&p, _)| placed_tri(&door.door, p, 0.0, usize::MAX)).collect();
+        let steps = (len(sub(to, from)) / DOOR_FIT_EVERY).ceil().max(1.0) as usize;
+        (0..=steps).any(|i| {
+            let feet = [0, 1, 2].map(|k| from[k] + (to[k] - from[k]) * i as f32 / steps as f32);
+            tris.iter().any(|t| body_distance(&self.params, feet, false, t) < self.params.radius - 0.5)
+        })
+    }
+
+    pub fn door_path_clear(&self, from: V3, to: V3, index: usize) -> bool {
+        let Some(door) = self.doors.get(index) else { return true };
+        let b = door.bounds;
+        let radius = self.params.radius;
+        if from[0].max(to[0]) + radius < b[0] || from[0].min(to[0]) - radius > b[3]
+            || from[2].max(to[2]) + radius < b[2] || from[2].min(to[2]) - radius > b[5]
+            || from[1].max(to[1]) + self.params.height < b[1] || from[1].min(to[1]) > b[4] { return true; }
+        let steps = (len(sub(to, from)) / DOOR_FIT_EVERY).ceil().max(1.0) as usize;
+        (0..=steps).all(|i| {
+            let feet = [0, 1, 2].map(|k| from[k] + (to[k] - from[k]) * i as f32 / steps as f32);
+            self.door_clearance(&Player::new(feet), index) >= -0.5
+        })
+    }
+
+    /// Conservative bounds for an observed leaf over its remaining motion. Circular
+    /// arcs stay within their endpoint chord plus its sagitta, including between poses.
+    fn door_sweep(&self, index: usize, open: f32, target: f32) -> Option<[f32; 6]> {
+        let body = self.doors.get(index)?;
+        let mut bounds = body.bounds;
+        for p in body.local.iter().flatten() {
+            let end = body.door.place(*p, target);
+            for k in 0..3 { bounds[k] = bounds[k].min(end[k]); bounds[k + 3] = bounds[k + 3].max(end[k]); }
+        }
+        if open != target && let crate::door::Motion::Swing { angle } = body.door.motion {
+            let radius = body.local.iter().flatten().map(|p| len(*p)).fold(0.0, f32::max);
+            let turn = (angle*(target-open)).abs().min(std::f32::consts::TAU);
+            let margin = radius*(1.0-(turn*0.5).cos());
+            for k in 0..3 { bounds[k] -= margin; bounds[k+3] += margin; }
+        }
+        Some(bounds)
+    }
+
+    pub fn freeze_leaf(&self, index: usize, open: f32, target: f32) -> Option<LeafSnapshot> {
+        Some(LeafSnapshot { bounds: self.door_sweep(index,open,target)?,
+            triangles: (open==target).then(|| self.tris[self.doors[index].range.clone()].to_vec()) })
+    }
+
+    /// Panes touched by a standing body anywhere along this leg, even if already broken.
+    pub fn panes_on_leg(&self, from: V3, to: V3) -> Vec<u32> {
+        if self.pane_cells.is_empty() { return Vec::new(); }
+        if self.pane_bounds.len() <= 8 {
+            return (0..self.pane_bounds.len() as u32).filter(|&p| self.pane_touches_leg(from, to, p)).collect();
+        }
+        let radius = self.params.radius;
+        let mut candidates = Vec::new();
+        for r in self.row(from[2].min(to[2]) - radius)..=self.row(from[2].max(to[2]) + radius) {
+            for c in self.col(from[0].min(to[0]) - radius)..=self.col(from[0].max(to[0]) + radius) {
+                if let Some(panes) = self.pane_cells.get(&(r * self.cols + c)) {
+                    for &pane in panes {
+                        if !candidates.contains(&pane) { candidates.push(pane); }
+                    }
+                }
+            }
+        }
+        candidates.retain(|&pane| self.pane_touches_leg(from, to, pane));
+        candidates.sort_unstable();
+        candidates
+    }
+
+    fn pane_touches_leg(&self, from: V3, to: V3, pane: u32) -> bool {
+        let radius = self.params.radius;
+        let b = self.pane_bounds[pane as usize];
+        if from[0].max(to[0]) + radius < b[0] || from[0].min(to[0]) - radius > b[3]
+            || from[2].max(to[2]) + radius < b[2] || from[2].min(to[2]) - radius > b[5]
+            || from[1].max(to[1]) + self.params.height < b[1] || from[1].min(to[1]) > b[4] { return false; }
+        self.groups[pane as usize].1.clone().any(|i| swept_body_distance(&self.params, from, to, &self.tris[i]) < radius - 0.5)
+    }
+
+    pub fn pane_broken(&self, index: u32) -> bool {
+        self.groups.get(index as usize).is_some_and(|(_, range)| range.clone().all(|i| self.tris[i].off))
+    }
+
+    pub fn pane_path_clear(&self, from: V3, to: V3) -> bool {
+        if self.pane_cells.is_empty() { return true; }
+        let radius = self.params.radius;
+        let (c0, c1) = (self.col(from[0].min(to[0]) - radius), self.col(from[0].max(to[0]) + radius));
+        let (r0, r1) = (self.row(from[2].min(to[2]) - radius), self.row(from[2].max(to[2]) + radius));
+        let clear = |p| self.pane_broken(p) || !self.pane_touches_leg(from, to, p);
+        // A long leg can cover many empty cells. Scan the pane bounds when that is cheaper.
+        if self.pane_bounds.len() <= 8 || (c1 - c0 + 1) * (r1 - r0 + 1) >= self.pane_bounds.len() {
+            return (0..self.pane_bounds.len() as u32).all(clear);
+        }
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                if self.pane_cells.get(&(r * self.cols + c)).is_some_and(|panes| panes.iter().any(|&p| !clear(p))) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Whether a stationary body stays clear as this leaf opens through its whole travel.
+    pub fn door_sweep_clear(&self, p: &Player, index: usize) -> bool {
+        let Some(door) = self.doors.get(index) else { return true };
+        (0..=DOOR_SWEEP_STEPS).all(|step| door.local.iter().zip(door.range.clone()).filter(|(_, i)| !self.tris[*i].off).all(|(&local, _)| {
+            let t = placed_tri(&door.door, local, step as f32 / DOOR_SWEEP_STEPS as f32, usize::MAX);
+            body_distance(&self.params, p.pos, p.crouched, &t) >= self.params.radius - 0.5
+        }))
     }
 
     /// Put door `index` open this far (0 closed to 1 open), moving its triangles
@@ -434,6 +628,7 @@ impl CollisionWorld {
                 self.cells[c].push(ti as u32);
             }
         }
+        self.doors[index].bounds = triangle_bounds(self.tris[self.doors[index].range.clone()].iter());
     }
 
     /// The grid cells a triangle covers
@@ -544,16 +739,16 @@ impl CollisionWorld {
     /// both sides, leaving out those that let `through` pass (`BULLETS`, `GRENADES`, `BLASTS`,
     /// or 0). With `body` it is the walls instead of the faces that stop rays.
     fn nearest(&self, origin: V3, dir: V3, max_dist: f32, through: u8, body: bool) -> Option<(f32, &Tri)> {
-        self.nearest_where(origin, dir, max_dist, through, |t| if body { self.stops_body(t) } else { self.stops_rays(t) })
+        self.nearest_where(origin, dir, max_dist, through, |_, t| if body { self.stops_body(t) } else { self.stops_rays(t) })
     }
 
     /// As `nearest`, over the faces `counts` lets in
-    fn nearest_where(&self, origin: V3, dir: V3, max_dist: f32, through: u8, counts: impl Fn(&Tri) -> bool) -> Option<(f32, &Tri)> {
+    fn nearest_where(&self, origin: V3, dir: V3, max_dist: f32, through: u8, counts: impl Fn(usize, &Tri) -> bool) -> Option<(f32, &Tri)> {
         let mut stops: Vec<(f32, &Tri)> = Vec::new();
         let mut passed: Vec<(f32, &Tri)> = Vec::new();
         for i in self.tris_along(origin, dir, max_dist) {
             let (i, t) = (i as usize, &self.tris[i as usize]);
-            if !counts(t) {
+            if !counts(i, t) {
                 continue;
             }
             let Some(d) = crate::combat::ray_triangle(origin, dir, t.a, t.b, t.c).filter(|&d| d <= max_dist) else { continue };
@@ -698,7 +893,13 @@ impl CollisionWorld {
     /// those of no room), whichever rooms are solid around the players: for a line between two
     /// places far from them (see `Visibility::rooms_along`)
     pub fn bullet_hit_in(&self, origin: V3, dir: V3, max_dist: f32, rooms: &[u32]) -> Option<RayHit> {
-        let counts = |t: &Tri| t.ray && !t.off && (t.room == NO_ROOM || rooms.contains(&t.room));
+        let counts = |_: usize, t: &Tri| t.ray && !t.off && (t.room == NO_ROOM || rooms.contains(&t.room));
+        self.nearest_where(origin, dir, max_dist, BULLETS, counts).map(|(dist, t)| self.ray_hit(dist, t, dir))
+    }
+
+    /// Bot sight passes through glass and respects the room and surface rules for bullets.
+    pub fn sight_hit_in(&self, origin: V3, dir: V3, max_dist: f32, rooms: &[u32]) -> Option<RayHit> {
+        let counts = |i: usize, t: &Tri| !self.glass_tris.contains(&i) && t.ray && !t.off && (t.room == NO_ROOM || rooms.contains(&t.room));
         self.nearest_where(origin, dir, max_dist, BULLETS, counts).map(|(dist, t)| self.ray_hit(dist, t, dir))
     }
 
@@ -938,6 +1139,15 @@ impl CollisionWorld {
     /// As `wall_clearance`, but among the walls of one room only (and those of no room), and
     /// not its doors, which open and close: whether a body could stand there in that room
     pub fn wall_clearance_in(&self, p: &Player, room: u32) -> f32 {
+        self.clearance_in(p, room, true)
+    }
+
+    /// Clearance for the static walking graph. Pane state is checked when a route is queried.
+    pub fn structural_clearance_in(&self, p: &Player, room: u32) -> f32 {
+        self.clearance_in(p, room, false)
+    }
+
+    fn clearance_in(&self, p: &Player, room: u32, glass: bool) -> f32 {
         let prm = &self.params;
         let ny_floor = self.walkable_ny();
         let lo = prm.step_up + prm.radius;
@@ -950,7 +1160,7 @@ impl CollisionWorld {
             for c in c0..=c1 {
                 for &ti in &self.cells[r * self.cols + c] {
                     let t = &self.tris[ti as usize];
-                    if !t.wall || t.off || (t.room != room && t.room != NO_ROOM) || self.door_tris.contains(&(ti as usize)) || t.n[1].abs() >= ny_floor {
+                    if !t.wall || t.off || (t.room != room && t.room != NO_ROOM) || self.door_tris.contains(&(ti as usize)) || (!glass && self.glass_tris.contains(&(ti as usize))) || t.n[1].abs() >= ny_floor {
                         continue;
                     }
                     for k in 0..3 {
@@ -1078,12 +1288,151 @@ fn closest_on_triangle(p: V3, t: &Tri) -> V3 {
     add(a, add(scale(ab, vb * denom), scale(ac, vc * denom)))
 }
 
+/// The distance from a triangle to the nearest of a body's sphere centers, with feet at `feet`.
+fn body_distance(params: &Params, feet: V3, crouched: bool, t: &Tri) -> f32 {
+    // Feet, then the lowest height, then the offset: the order the clearance checks always used.
+    let (lo, hi) = params.sphere_range(crouched);
+    (0..3)
+        .map(|k| {
+            let center = [feet[0], feet[1] + lo + (hi - lo) * k as f32 / 2.0, feet[2]];
+            len(sub(center, closest_on_triangle(center, t)))
+        })
+        .fold(f32::INFINITY, f32::min)
+}
+
+/// As `body_distance`, for a standing body whose feet move straight from `from` to `to`.
+fn swept_body_distance(params: &Params, from: V3, to: V3, t: &Tri) -> f32 {
+    params.sphere_heights(false).iter()
+        .map(|h| segment_triangle_distance([from[0], from[1] + h, from[2]], [to[0], to[1] + h, to[2]], t))
+        .fold(f32::INFINITY, f32::min)
+}
+
+fn segment_triangle_distance(a: V3, b: V3, t: &Tri) -> f32 {
+    let delta = sub(b, a);
+    let length = len(delta);
+    if length > 1e-6 && crate::combat::ray_triangle(a, scale(delta, 1.0 / length), t.a, t.b, t.c).is_some_and(|d| d <= length) {
+        return 0.0;
+    }
+    let ends = len(sub(a, closest_on_triangle(a, t))).min(len(sub(b, closest_on_triangle(b, t))));
+    [(t.a, t.b), (t.b, t.c), (t.c, t.a)].into_iter()
+        .map(|(c, d)| segment_distance(a, b, c, d)).fold(ends, f32::min)
+}
+
+fn segment_distance(a: V3, b: V3, c: V3, d: V3) -> f32 {
+    let (u, v, w) = (sub(b, a), sub(d, c), sub(a, c));
+    let (uu, vv, uv, uw, vw) = (dot(u, u), dot(v, v), dot(u, v), dot(u, w), dot(v, w));
+    let mut s = if uu <= 1e-6 {
+        0.0
+    } else if vv <= 1e-6 {
+        (-uw / uu).clamp(0.0, 1.0)
+    } else {
+        let den = uu * vv - uv * uv;
+        if den > 1e-6 { ((uv * vw - uw * vv) / den).clamp(0.0, 1.0) } else { 0.0 }
+    };
+    let mut t = if vv <= 1e-6 { 0.0 } else { (uv * s + vw) / vv };
+    if t < 0.0 {
+        t = 0.0;
+        s = if uu <= 1e-6 { 0.0 } else { (-uw / uu).clamp(0.0, 1.0) };
+    } else if t > 1.0 {
+        t = 1.0;
+        s = if uu <= 1e-6 { 0.0 } else { ((uv - uw) / uu).clamp(0.0, 1.0) };
+    }
+    len(sub(add(w, scale(u, s)), scale(v, t)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
 
     const RM11: &str = "data/map/rm11/rm11.map";
+
+    #[test]
+    fn body_distance_adds_heights_in_the_original_order() {
+        // Adding feet + lo + offset and feet + (lo + offset) differ in the last bit here.
+        let params = Params::default();
+        let feet = [0.0, 1.00001_f32, 0.0];
+        let t = Tri { a: [-100.0, 180.5, -100.0], b: [100.0, 180.5, -100.0], c: [0.0, 180.5, 100.0], n: [0.0, -1.0, 0.0],
+            off: false, hidden: false, material: usize::MAX, room: NO_ROOM, wall: true, ray: true, passes: 0 };
+        let lo = params.step_up + params.radius;
+        let hi = (params.height - params.radius).max(lo);
+        let expected = (0..3).map(|k| 180.5 - (feet[1] + lo + (hi - lo) * k as f32 / 2.0)).fold(f32::INFINITY, f32::min);
+        assert_eq!(body_distance(&params, feet, false, &t).to_bits(), expected.to_bits());
+    }
+
+    #[test]
+    fn frozen_leaf_bounds_enclose_every_intermediate_pose() {
+        if !std::path::Path::new("data/map/rm16/rm16.map").exists() { return; }
+        let map = crate::map::read(std::path::Path::new("data/map/rm16/rm16.map")).unwrap();
+        let mut world = CollisionWorld::from_map(&map,Params::default());
+        assert!(!world.doors.is_empty());
+        for door in 0..world.doors.len() {
+            for open in [0.0,0.5,0.95,1.0] {
+                world.set_door_open(door,open);
+                for target in [0.0,1.0] {
+                    let snapshot = world.freeze_leaf(door,open,target).unwrap();
+                    let body = &world.doors[door];
+                    for step in 0..=20 {
+                        let pose = open+(target-open)*step as f32/20.0;
+                        for p in body.local.iter().flatten() {
+                            let at = body.door.place(*p,pose);
+                            for k in 0..3 { assert!(at[k]>=snapshot.bounds[k]-0.02 && at[k]<=snapshot.bounds[k+3]+0.02,"door={door}, open={open}, target={target}, pose={pose}"); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pane_requirements_cover_the_body_and_every_pane_on_a_leg() {
+        for pane_count in [2, 10] {
+            let mut world = CollisionWorld::flat_floor(0.0, 500.0);
+            let first = world.tris.len();
+            for i in 0..pane_count {
+                let z = if i == 0 { 0.0 } else if i == 1 { 80.0 } else { 250.0 + i as f32 * 10.0 };
+                let start = world.tris.len();
+                let (a, b, c, d) = ([-100.0, 45.0, z], [100.0, 45.0, z], [100.0, 200.0, z], [-100.0, 200.0, z]);
+                for (a, b, c) in [(a, b, c), (a, c, d)] {
+                    world.tris.push(Tri { a, b, c, n: [0.0, 0.0, 1.0], off: false, hidden: false,
+                        material: usize::MAX, room: NO_ROOM, wall: true, ray: true, passes: 0 });
+                }
+                world.groups.push((format!("pane{i}"), start..world.tris.len()));
+                world.pane_bounds.push(triangle_bounds(world.tris[start..].iter()));
+            }
+            world.glass_tris = first..world.tris.len();
+            world.pane_cells.insert(0, (0..pane_count as u32).collect());
+            world.cells[0].extend((first..world.tris.len()).map(|i| i as u32));
+            let (from, to) = ([120.0, 0.0, -100.0], [120.0, 0.0, 150.0]);
+            // The feet line misses the pane by 20 units, but the body's side clips both panes.
+            assert_eq!(world.panes_on_leg(from, to), vec![0, 1]);
+            assert!(!world.pane_path_clear(from, to));
+            world.switch_off("pane0");
+            assert!(!world.pane_path_clear(from, to));
+            assert_eq!(world.panes_on_leg(from, to), vec![0, 1]);
+            world.switch_off("pane1");
+            assert!(world.pane_path_clear(from, to));
+            world.switch_on("pane0");
+            assert!(!world.pane_path_clear(from, to));
+            assert!(world.panes_on_leg([131.0, 0.0, -100.0], [131.0, 0.0, 150.0]).is_empty());
+            assert!(world.panes_on_leg([0.0, 300.0, -100.0], [0.0, 300.0, 150.0]).is_empty());
+            assert_eq!(world.panes_on_leg([0.0, 0.0, -40.0], [0.0, 0.0, -20.0]), vec![0]);
+            assert_eq!(world.panes_on_leg([0.0, 0.0, -20.0], [0.0, 0.0, -20.0]), vec![0]);
+            let p = Player::new([0.0, 0.0, -20.0]);
+            assert!(world.wall_clearance_in(&p, 0) < 0.0);
+            assert!(world.structural_clearance_in(&p, 0) >= 0.0);
+            let (eye, dir) = ([0.0, 100.0, -100.0], [0.0, 0.0, 1.0]);
+            assert!(world.sight_hit_in(eye, dir, 400.0, &[]).is_none());
+            // An opaque obstacle can also have NO_ROOM and no material. Only pane triangles pass.
+            let wall = world.tris.len() as u32;
+            world.tris.push(Tri { a: [-100.0, 0.0, 120.0], b: [100.0, 0.0, 120.0], c: [100.0, 250.0, 120.0],
+                n: [0.0, 0.0, 1.0], off: false, hidden: false, material: usize::MAX, room: NO_ROOM,
+                wall: true, ray: true, passes: 0 });
+            world.cells[0].push(wall);
+            assert!((world.bullet_hit_in(eye, dir, 400.0, &[]).unwrap().dist - 100.0).abs() < 0.1);
+            assert!((world.sight_hit_in(eye, dir, 400.0, &[]).unwrap().dist - 220.0).abs() < 0.1);
+        }
+    }
 
     fn load() -> Option<CollisionWorld> {
         let path = Path::new(RM11);
@@ -1413,6 +1762,21 @@ mod tests {
         // Once broken the bullet carries on to whatever is outside
         w.switch_off("02_glass");
         assert!(shoot(&w).map_or(true, |d| d > 130.0));
+    }
+
+    #[test]
+    fn a_broken_high_window_still_has_a_sill() {
+        let level = map::read(Path::new("data/map/m00/citystreet_large.map")).unwrap();
+        let mut world = CollisionWorld::from_map(&level, Params::default());
+        let pane = world.groups.iter().position(|(name, _)| name == "02_glass").unwrap();
+        let mut body = Player::new([32267.0, 33317.0, 34850.0]);
+        for _ in 0..240 { world.step(&mut body, [0.0, 0.0], 1.0 / 60.0); }
+        let floor = body.pos[1];
+        assert!(world.pane_bounds[pane][1] - floor > world.params.step_up);
+        world.switch_off("02_glass");
+        for _ in 0..120 { world.step(&mut body, [0.0, -10.0], 1.0 / 60.0); }
+        assert!(body.pos[2] > 34727.0 + 20.0);
+        assert!((body.pos[1] - floor).abs() <= world.params.step_up);
     }
 
     #[test]

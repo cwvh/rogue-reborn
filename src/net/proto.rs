@@ -1125,7 +1125,7 @@ fn write_state(w: &mut Writer, s: &Snapshot, base: Option<&Snapshot>) {
     }
 }
 
-pub(crate) fn write_results(w: &mut Writer, r: &RoundResults) {
+pub fn write_results(w: &mut Writer, r: &RoundResults) {
     w.u16(r.number);
     w.u8(outcome_code(Some(r.outcome)).0);
     w.u8(r.winner.unwrap_or(u8::MAX));
@@ -1143,7 +1143,7 @@ pub(crate) fn write_results(w: &mut Writer, r: &RoundResults) {
     }
 }
 
-pub(crate) fn read_results(r: &mut Reader) -> Result<RoundResults> {
+pub fn read_results(r: &mut Reader) -> Result<RoundResults> {
     let (number, code, winner, played, n) = (r.u16()?, r.u8()?, r.u8()?, r.u16()?, r.u8()? as usize);
     ensure!(n <= MAX_PLAYERS, "too many players in the results");
     let mut rows = Vec::with_capacity(n);
@@ -1163,7 +1163,7 @@ pub(crate) fn read_results(r: &mut Reader) -> Result<RoundResults> {
     Ok(RoundResults { number, outcome, winner, played, rows })
 }
 
-pub(crate) fn write_session(w: &mut Writer, s: &Session) {
+pub fn write_session(w: &mut Writer, s: &Session) {
     w.varint(s.generation);
     w.u8(s.host.unwrap_or(u8::MAX));
     // No round is 0 seconds long, so 0 is no limit
@@ -1172,7 +1172,7 @@ pub(crate) fn write_session(w: &mut Writer, s: &Session) {
     w.u8(s.base_pair);
 }
 
-pub(crate) fn read_session(r: &mut Reader) -> Result<Session> {
+pub fn read_session(r: &mut Reader) -> Result<Session> {
     let (generation, host, time_limit) = (r.varint()?, r.u8()?, r.u16()?);
     Ok(Session { generation, host: (host != u8::MAX).then_some(host), time_limit: (time_limit != 0).then_some(time_limit), friendly_fire: r.bool()?, base_pair: r.u8()? })
 }
@@ -1268,7 +1268,7 @@ fn read_state(r: &mut Reader, base: Option<&Snapshot>) -> Result<Snapshot> {
     Ok(Snapshot { tick, time, ack_seq, lobby_ack, culling, players, npcs, thrown, doors, broken, round, session, results, events: Vec::new() })
 }
 
-pub(crate) fn write_setup(w: &mut Writer, s: &Setup) {
+pub fn write_setup(w: &mut Writer, s: &Setup) {
     w.string(&s.map);
     w.string(&s.model);
     w.string(&s.idle);
@@ -1314,7 +1314,7 @@ pub(crate) fn write_setup(w: &mut Writer, s: &Setup) {
     }
 }
 
-pub(crate) fn read_setup(r: &mut Reader) -> Result<Setup> {
+pub fn read_setup(r: &mut Reader) -> Result<Setup> {
     let (map, model, idle) = (r.string()?, r.string()?, r.string()?);
     let (magazine, ammo, reserve, grenades) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
     let speed_scale = r.f32()?;
@@ -1342,11 +1342,11 @@ pub(crate) fn read_setup(r: &mut Reader) -> Result<Setup> {
 pub const UNIFORMS: [&str; 2] = ["data/character/team_hrt/blue_M_a.CRP", "data/character/team_camo/desert1_M_a.CRP"];
 
 /// A side as a number: 0 for none, then Blue and Gold
-pub(crate) fn side_code(side: Option<Side>) -> u8 {
+pub fn side_code(side: Option<Side>) -> u8 {
     side.map_or(0, |s| 1 + s.index() as u8)
 }
 
-pub(crate) fn side_from(code: u8) -> Result<Option<Side>> {
+pub fn side_from(code: u8) -> Result<Option<Side>> {
     match code {
         0 => Ok(None),
         1 => Ok(Some(Side::Blue)),
