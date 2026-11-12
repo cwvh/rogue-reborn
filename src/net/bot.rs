@@ -57,6 +57,14 @@ const TOO_CLOSE: f32 = 140.0;
 /// the second
 const FAR: f32 = 1100.0;
 const NEAR: f32 = 350.0;
+const CLOSE: f32 = 600.0;
+const TAP_RANGE: f32 = 900.0;
+/// Burst and pause lengths in seconds, each as (shortest, longest)
+const CLOSE_BURST: ((f32, f32), (f32, f32)) = ((1.0, 2.0), (0.15, 0.4));
+const MID_BURST: ((f32, f32), (f32, f32)) = ((0.15, 0.5), (0.2, 0.6));
+const TAP_BURST: ((f32, f32), (f32, f32)) = ((0.08, 0.2), (0.3, 0.7));
+/// Past CLOSE, a burst stops once the aim is this many times the start angle off
+const HOLD_ANGLE: f32 = 2.0;
 /// How long it remembers where it last saw someone, and goes looking there
 const MEMORY: f32 = 4.0;
 /// Keep a local escape direction long enough to turn and move out of a tight corner.
@@ -519,14 +527,15 @@ impl Bot {
             } else if ready {
                 // On target, near enough: in bursts
                 let off = angle_between(self.yaw, true_yaw).abs().max((self.pitch - true_pitch).abs());
-                if off < 3.0 + 1.5 * self.skill.aim_error {
-                    if self.time < self.burst_until {
-                        input.fire = true;
-                    } else if self.time >= self.pause_until {
-                        self.burst_until = self.time + self.between(0.15, 0.5);
-                        self.pause_until = self.burst_until + self.between(0.2, 0.6);
-                        input.fire = true;
-                    }
+                let start = 3.0 + 1.5 * self.skill.aim_error;
+                if self.time < self.burst_until {
+                    // Up close a burst sprays to its end. Farther out it outlasts a target crossing.
+                    input.fire = dist < CLOSE || off < start * HOLD_ANGLE;
+                } else if off < start && self.time >= self.pause_until {
+                    let (burst, pause) = if dist < CLOSE { CLOSE_BURST } else if dist > TAP_RANGE { TAP_BURST } else { MID_BURST };
+                    self.burst_until = self.time + self.between(burst.0, burst.1);
+                    self.pause_until = self.burst_until + self.between(pause.0, pause.1);
+                    input.fire = true;
                 }
             }
         }
@@ -786,6 +795,104 @@ mod tests {
             if sim.players[0].player.pos[2] >= 31580.0 { break; }
         }
         assert!(sim.players[0].player.pos[2] >= 31580.0, "the broken low window must be walkable");
+    }
+
+    fn ahead(eye: V3, dist: f32) -> V3 {
+        let h = horizontal(0.0);
+        [eye[0] + h[0] * dist, eye[1] + h[1] * dist, eye[2] + h[2] * dist]
+    }
+
+    fn trigger_runs(dist: f32, seconds: f32, seed: u64) -> (usize, usize) {
+        let mut sim = crate::net::setup::build_sim(&crate::net::lab::demo_setup()).unwrap();
+        sim.add_player([0.0, 0.0, 0.0]);
+        sim.add_player([0.0, 0.0, 400.0]);
+        sim.tick(&[Input::default(); 2], TICK);
+        let mut bot = Bot::new(Skill { reaction: 0.0, aim_error: 0.0, ..Skill::hard() }, seed);
+        bot.yaw = 0.0;
+        let eye = sim.eye(0);
+        let aim = ahead(eye, dist);
+        let (mut run, mut longest, mut held) = (0, 0, 0);
+        for _ in 0..(seconds / TICK) as usize {
+            bot.time += TICK;
+            let mut input = Input::default();
+            bot.fight(&sim, 0, eye, 1, dist, aim, &mut input);
+            if input.fire { run += 1; held += 1; longest = longest.max(run); } else { run = 0; }
+        }
+        (longest, held)
+    }
+
+    #[test]
+    fn up_close_a_bot_holds_the_trigger_in_long_bursts() {
+        for seed in 1..6 {
+            let (longest, _) = trigger_runs(400.0, 10.0, seed);
+            assert!(longest as f32 * TICK >= 1.0 - 2.0 * TICK, "seed {seed}: longest burst {longest} ticks");
+        }
+    }
+
+    #[test]
+    fn up_close_a_burst_sprays_on_far_off_target_but_farther_out_it_stops() {
+        for (dist, holds) in [(400.0, true), (700.0, false)] {
+            let mut sim = crate::net::setup::build_sim(&crate::net::lab::demo_setup()).unwrap();
+            sim.add_player([0.0, 0.0, 0.0]);
+            sim.add_player([0.0, 0.0, 400.0]);
+            sim.tick(&[Input::default(); 2], TICK);
+            let mut bot = Bot::new(Skill { reaction: 0.0, aim_error: 0.0, ..Skill::hard() }, 7);
+            let eye = sim.eye(0);
+            let on = ahead(eye, dist);
+            bot.time = 1.0;
+            bot.target = Some(1);
+            bot.yaw = 0.0;
+            bot.next_drift = 100.0;
+            let mut input = Input::default();
+            bot.fight(&sim, 0, eye, 1, dist, on, &mut input);
+            assert!(input.fire);
+            // Far outside the hold angle
+            bot.yaw = 30.0;
+            bot.skill.turn_rate = 0.0;
+            bot.time += TICK;
+            let mut input = Input::default();
+            bot.fight(&sim, 0, eye, 1, dist, on, &mut input);
+            assert_eq!(input.fire, holds, "at {dist}");
+        }
+    }
+
+    #[test]
+    fn far_away_a_bot_only_taps() {
+        for seed in 1..6 {
+            let (longest, held) = trigger_runs(1000.0, 10.0, seed);
+            assert!(longest as f32 * TICK <= 0.2 + 2.0 * TICK, "seed {seed}: longest burst {longest} ticks");
+            assert!(held > 0);
+        }
+    }
+
+    #[test]
+    fn a_burst_survives_a_target_crossing_but_does_not_start_off_target() {
+        let mut sim = crate::net::setup::build_sim(&crate::net::lab::demo_setup()).unwrap();
+        sim.add_player([0.0, 0.0, 0.0]);
+        sim.add_player([0.0, 0.0, 400.0]);
+        sim.tick(&[Input::default(); 2], TICK);
+        let mut bot = Bot::new(Skill { reaction: 0.0, aim_error: 0.0, ..Skill::hard() }, 7);
+        let eye = sim.eye(0);
+        let on = ahead(eye, 400.0);
+        let mut input = Input::default();
+        bot.time = 1.0;
+        bot.target = Some(1);
+        bot.yaw = 0.0;
+        bot.next_drift = 100.0;
+        bot.fight(&sim, 0, eye, 1, 400.0, on, &mut input);
+        assert!(input.fire);
+        // Between the start angle and the hold angle
+        bot.yaw = 5.0;
+        bot.skill.turn_rate = 0.0;
+        bot.time += TICK;
+        let mut input = Input::default();
+        bot.fight(&sim, 0, eye, 1, 400.0, on, &mut input);
+        assert!(input.fire, "the burst should hold");
+        bot.burst_until = 0.0;
+        bot.pause_until = 0.0;
+        let mut input = Input::default();
+        bot.fight(&sim, 0, eye, 1, 400.0, on, &mut input);
+        assert!(!input.fire, "a new burst should not start 5 degrees off");
     }
 
     fn grenade_returns_to_gun(behavior: Behavior, lose_during: Option<bool>, reloading: bool) {

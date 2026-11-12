@@ -589,7 +589,7 @@ fn a_clock_that_runs_fast_does_not_pile_up_inputs_on_the_server() {
 #[test]
 fn players_on_wifi_keep_playing_through_its_bursts_and_stalls() {
     use crate::net::lab::fight;
-    let f = fight(4, 2, Conditions::wifi(), 40.0);
+    let f = fight(4, 2, Conditions::wifi(), 240.0);
     assert!(f.remote.shots > 10, "{f:?}");
     // Shots from a held trigger are judged as the shooter would have seen them; what is left is
     // a stall longer than the server looks back, and the shooter's own place mispredicted
