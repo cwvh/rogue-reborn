@@ -39,7 +39,7 @@ use crate::camera::{Camera, listener_of, apply_camera};
 use rogue_reborn::util::unit3;
 use crate::player::{BodyKey, BodyState};
 use rogue_reborn::body::{self, PlayerMotions};
-use crate::draw::{WeaponDraw, CharacterArrays, draw_weapon, draw_character, draw_glass, draw_fracture, build_mesh, Which, draw_plan, wipe_opening, room_color};
+use crate::draw::{WeaponDraw, CharacterArrays, draw_weapon, FlashDraw, FlashPart, FlashSpot, Flashes, draw_flash, draw_flash_here, draw_character, draw_glass, draw_fracture, build_mesh, Which, draw_plan, wipe_opening, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
 use rogue_reborn::levels::{find_zone_spawn, find_mission_spawns, pick_index, list_levels, find_level, extract_map_num};
@@ -126,6 +126,37 @@ fn round_banner(r: &RoundState, now: f32, winner: Option<&str>) -> String {
         // The results screen is up
         (Phase::Results, None) | (Phase::Debrief, _) => String::new(),
     }
+}
+
+fn load_flash_draw() -> Option<FlashDraw> {
+    let model = map::read_model(Path::new("data/model/muzzle_flash.qob")).ok()?;
+    let mut parts = Vec::new();
+    for object in &model.geometries.objects {
+        for od in &object.object_datas {
+            let material = model.materials.materials.get(od.material as usize)?;
+            let stem = Path::new(&material.filename).file_stem()?.to_string_lossy().to_string();
+            // Some textures are named with a TGA prefix that the material's file name lacks
+            let texture = find_file(Path::new("data/texture"), &stem, "rsb")
+                .or_else(|| find_file(Path::new("data/texture"), &format!("TGA{stem}"), "rsb"))
+                .and_then(|p| rsb::read(&p).ok())
+                .and_then(|t| upload_rsb_to_gl(&t))?;
+            let (mut verts, mut uvs) = (Vec::new(), Vec::new());
+            let n = od.faces.face_indices.len().min(od.faces.texture_indices.len());
+            for k in 0..n {
+                let (i0, i1, i2) = od.faces.face_indices[k];
+                let (t0, t1, t2) = od.faces.texture_indices[k];
+                for (i, t) in [(i0, t0), (i1, t1), (i2, t2)] {
+                    let v = &object.vertices[i as usize];
+                    verts.push([v.x, v.y, v.z]);
+                    let uv = &od.texture_vertices.uv_coords[t as usize];
+                    uvs.push([uv.u, uv.v]);
+                }
+            }
+            parts.push(FlashPart { verts, uvs, texture });
+        }
+    }
+    println!("loaded muzzle_flash.qob ({} triangles)", parts.iter().map(|p| p.verts.len() / 3).sum::<usize>());
+    Some(FlashDraw { parts })
 }
 
 fn main() {
@@ -392,7 +423,7 @@ fn main() {
 
     // The MP5K: definition, model and texture
     let weapon_def = weapon::read(Path::new("data/kit/pw_mp5k.wpn")).ok();
-    let load_model_draw = |file: &str, muzzle: [f32; 3]| -> Option<WeaponDraw> {
+    let load_model_draw = |file: &str, muzzle: [f32; 3], flash_scale: f32| -> Option<WeaponDraw> {
         let model = map::read_model(&Path::new("data/model").join(file)).ok()?;
         let mut verts = Vec::new();
         let mut uvs = Vec::new();
@@ -426,11 +457,13 @@ fn main() {
         }
         let center = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
         let length = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f32::max).max(1.0);
-        Some(WeaponDraw { verts, uvs, texture, muzzle, center, length })
+        Some(WeaponDraw { verts, uvs, texture, muzzle, center, length, flash_scale })
     };
-    let weapon_draw = weapon_def.as_ref().and_then(|w| load_model_draw(&w.model, w.muzzle));
+    let weapon_draw = weapon_def.as_ref().and_then(|w| load_model_draw(&w.model, w.muzzle, w.flash_scale));
     // The grenade in the hand (the original's grenade.qob is a flat inventory picture)
-    let grenade_draw = load_model_draw("rsw_smokegrenade.qob", [0.0; 3]);
+    let grenade_draw = load_model_draw("rsw_smokegrenade.qob", [0.0; 3], 0.0);
+    // The original's flash model has crossed planes along the barrel and a four-point star
+    let flash_draw = load_flash_draw();
 
     // Bullet holes: the game own sprites, or with --realistic-decals pictures drawn for each surface
     const HOLE_VARIANTS: usize = 6;
@@ -617,7 +650,7 @@ fn main() {
     });
     // The weapons in the characters' hands
     let held_draws: Vec<Option<WeaponDraw>> = characters.as_ref().map_or_else(Vec::new, |c| {
-        c.weapons.iter().map(|(_, w)| load_model_draw(&w.model, w.muzzle)).collect()
+        c.weapons.iter().map(|(_, w)| load_model_draw(&w.model, w.muzzle, w.flash_scale)).collect()
     });
 
     if let Some(p) = args.pos { camera.position = p; }
@@ -817,8 +850,16 @@ fn main() {
     // ...and flinches, and sees a grey tunnel for a moment
     let mut concussion = concussion::Concussion::default();
     let master_volume = args.volume.unwrap_or(1.0).clamp(0.0, 1.0);
-    // Last shot: start, end, whether it struck a character, and when it fades
-    let mut tracer: Option<([f32; 3], [f32; 3], bool, f32)> = None;
+    let mut hit_marker_until = 0.0f32;
+    let (mut player_flashes, mut npc_flashes) = (Flashes::default(), Flashes::default());
+    let flash_spots: std::cell::RefCell<Vec<FlashSpot>> = Default::default();
+    let flash_rng = std::cell::Cell::new(0x9E37_79B9_7F4A_7C15u64);
+    let flash_roll = || {
+        let mut r = flash_rng.get();
+        let x = rogue_reborn::util::next_rng(&mut r);
+        flash_rng.set(r);
+        (x >> 40) as f32 / (1u64 << 24) as f32
+    };
     let mut third_person = args.third_person;
     let mut movement = Movement::Idle;
     let mut player_frame = 0.0f32;
@@ -1313,9 +1354,9 @@ fn main() {
                     }
                     recent_log.push_back(line);
                 }
-                sim::Event::Shot { player, start, end, hit_character } => {
+                sim::Event::Shot { player, hit_character, .. } => {
                     if player == me {
-                        tracer = Some((start, end, hit_character, game_time + 0.1));
+                        hit_marker_until = if hit_character { game_time + 0.1 } else { 0.0 };
                     }
                     if let (Some((name, at)), Some(snd)) = (sim::shot_sound(&event, me), sound.as_mut()) {
                         snd.play_at(name, at, listener_of(&camera), 1.0);
@@ -1544,6 +1585,12 @@ fn main() {
 
         // Frame timing for FPS
         let fps = if raw_dt > 0.0 { 1.0 / raw_dt } else { 0.0 };
+
+        // The sim sets a player's flash_until to 0.05 s after the shot.
+        // It is 0 before the first shot.
+        let shot_at = |until: f32| if until > 0.0 { until - 0.05 } else { f32::NEG_INFINITY };
+        let player_flash: Vec<bool> = sim.players.iter().enumerate().map(|(slot, p)| player_flashes.shows(slot, shot_at(p.flash_until), game_time) && !p.equipped_grenade).collect();
+        let npc_flash: Vec<bool> = sim.npcs.iter().enumerate().map(|(i, n)| npc_flashes.shows(i, n.last_shot, game_time)).collect();
 
         render_time = Instant::now();
         unsafe {
@@ -1865,6 +1912,8 @@ fn main() {
                 sum
             };
 
+            let note_flash = |wd: &WeaponDraw| flash_spots.borrow_mut().push(FlashSpot::here(wd, flash_roll()));
+
             // Characters at the spawn points, posed for what they are doing
             if let Some(chars) = &sim.characters {
                 let c = &chars.model;
@@ -1912,14 +1961,21 @@ fn main() {
                     let held = spot.weapon.and_then(|w| held_draws.get(w)).and_then(Option::as_ref);
                     if let (Some(bones), Some(wd), Some((hand, off))) = (&bones, held, &weapon_attach) {
                         glPushMatrix();
-                        match chars.dropped_weapon(spot, game_time, *hand, off) {
-                            Some(lying) => glMultMatrixf(lying.as_ptr()),
+                        let lying = match chars.dropped_weapon(spot, game_time, *hand, off) {
+                            Some(lying) => {
+                                glMultMatrixf(lying.as_ptr());
+                                true
+                            }
                             None => {
                                 glMultMatrixf(bones[*hand].matrix().as_ptr());
                                 glMultMatrixf(off.matrix().as_ptr());
+                                false
                             }
+                        };
+                        draw_weapon(wd, textured);
+                        if !lying && npc_flash.get(i).copied().unwrap_or(false) {
+                            note_flash(wd);
                         }
-                        draw_weapon(wd, textured, game_time - spot.last_shot < 0.05);
                         glPopMatrix();
                     }
                     glPopMatrix();
@@ -2001,7 +2057,10 @@ fn main() {
                     if grenade {
                         glTranslatef(-wd.center[0], -wd.center[1], -wd.center[2]);
                     }
-                    draw_weapon(wd, textured, flash);
+                    draw_weapon(wd, textured);
+                    if flash {
+                        note_flash(wd);
+                    }
                     glPopMatrix();
                 }
                 glPopMatrix();
@@ -2041,7 +2100,7 @@ fn main() {
                         let (movement, frame) = remote_anim.update(slot, pos, yaw, step_dt, doing, frames, args.speed_scale.unwrap_or(1.0), args.anim_scale.unwrap_or(1.5));
                         let scale = actors.get(slot % actors.len().max(1)).map_or([1.0; 3], |a| a.scale);
                         let hand = if p.equipped_grenade { p.throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
-                        let flash = !p.equipped_grenade && game_time < p.flash_until;
+                        let flash = player_flash[slot];
                         // Hidden, the animation still follows them
                         let flinch = flinch_at(chars, p, view_time);
                         let hip_turn = remote_anim.hip_turn(slot, yaw);
@@ -2090,7 +2149,7 @@ fn main() {
                 let scale = actors.first().map_or([1.0; 3], |a| a.scale);
                 let mine = &sim.players[me];
                 let hand = if mine.equipped_grenade { mine.throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
-                let flash = !mine.equipped_grenade && game_time < mine.flash_until;
+                let flash = player_flash[me];
                 if mine.respawn_at.is_none() {
                     let flinch = flinch_at(chars, mine, game_time);
                     draw_body(chars, mine.side, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash, mine.reloading(game_time), sim.firing(me), mine.player.crouched, player_hip_turn, flinch, mine.peek, bodies.entry(me).or_default());
@@ -2154,7 +2213,7 @@ fn main() {
                     glRotatef(spin, 1.0, 0.3, 0.0);
                     // Model space (forward -Y, up +Z) turned so its length runs the way it spins
                     glTranslatef(-gd.center[0], -gd.center[1], -gd.center[2]);
-                    draw_weapon(gd, textured, false);
+                    draw_weapon(gd, textured);
                     glPopMatrix();
                 }
                 glColor4f(1.0, 1.0, 1.0, 1.0);
@@ -2336,26 +2395,13 @@ fn main() {
                 draw_fracture(&level.materials, &map_num, &mut textures, textured, f);
             }
 
-            // Bullet trail and impact
-            if let Some((a, b, hit, until)) = tracer {
-                if game_time < until {
-                    glDisable(0x0DE1);
-                    glColor4f(1.0, 0.9, 0.4, 1.0);
-                    glBegin(0x0001); // GL_LINES
-                    glVertex3f(a[0], a[1], a[2]);
-                    glVertex3f(b[0], b[1], b[2]);
-                    glEnd();
-                    if hit { glColor4f(1.0, 0.1, 0.1, 1.0); } else { glColor4f(0.9, 0.9, 0.9, 1.0); }
-                    let r = 6.0;
-                    glBegin(0x0001);
-                    for (dx, dy, dz) in [(r, 0.0, 0.0), (0.0, r, 0.0), (0.0, 0.0, r)] {
-                        glVertex3f(b[0] - dx, b[1] - dy, b[2] - dz);
-                        glVertex3f(b[0] + dx, b[1] + dy, b[2] + dz);
-                    }
-                    glEnd();
-                    glColor4f(1.0, 1.0, 1.0, 1.0);
+            if let Some(flash) = flash_draw.as_ref().filter(|_| textured) {
+                for spot in flash_spots.borrow().iter() {
+                    draw_flash(flash, spot);
                 }
             }
+            flash_spots.borrow_mut().clear();
+            glColor4f(1.0, 1.0, 1.0, 1.0);
 
             // Render portals overlay when toggled
             if show_portals {
@@ -2462,7 +2508,10 @@ fn main() {
                 glRotatef(180.0, 0.0, 1.0, 0.0);
                 glRotatef(-90.0, 1.0, 0.0, 0.0);
                 glTranslatef(-wd.center[0], -wd.center[1], -wd.center[2]);
-                draw_weapon(wd, textured, game_time < sim.players[me].flash_until);
+                draw_weapon(wd, textured);
+                if let (true, Some(flash)) = (player_flash[me], flash_draw.as_ref().filter(|_| textured)) {
+                    draw_flash_here(flash, &FlashSpot::here(wd, flash_roll()));
+                }
                 glColor4f(1.0, 1.0, 1.0, 1.0);
             }
         }
@@ -2514,7 +2563,7 @@ fn main() {
             let winner = results.and_then(|r| r.rows.get(r.winner? as usize)).map(|row| row.name.as_str());
             let banner = round_banner(&round, game_time, winner);
             let msg = if game_time < sim.players[me].message.1 { sim.players[me].message.0.as_str() } else { banner.as_str() };
-            let marker = tracer.is_some_and(|t| t.2 && game_time < t.3);
+            let marker = game_time < hit_marker_until;
             let lines: Vec<(String, [f32; 3])> = feed.iter().map(|(_, text, color)| (text.clone(), *color)).collect();
             let dead = net.is_some() && sim.players[me].respawn_at.is_some();
             let meter = net.as_ref().filter(|_| lag_meter).map(|(client, _)| (&client.meter, net_clock.elapsed().as_secs_f64()));

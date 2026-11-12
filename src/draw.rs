@@ -22,10 +22,11 @@ pub struct WeaponDraw {
     /// Middle of the model's bounding box, and its longest side
     pub center: [f32; 3],
     pub length: f32,
+    /// Zero means no muzzle flash
+    pub flash_scale: f32,
 }
 
-// Draw the weapon model in the current matrix, with a muzzle flash if asked
-pub fn draw_weapon(wd: &WeaponDraw, textured: bool, flash: bool) {
+pub fn draw_weapon(wd: &WeaponDraw, textured: bool) {
     unsafe {
         if let (true, Some(tex)) = (textured, wd.texture) {
             glEnable(0x0DE1);
@@ -41,18 +42,97 @@ pub fn draw_weapon(wd: &WeaponDraw, textured: bool, flash: bool) {
             glVertex3f(v[0], v[1], v[2]);
         }
         glEnd();
-        // Muzzle flash: a short burst of lines out of the barrel
-        if flash {
-            glDisable(0x0DE1);
-            glColor4f(1.0, 0.85, 0.3, 1.0);
-            let m = wd.muzzle;
-            glBegin(0x0001); // GL_LINES
-            for (dx, dy, dz) in [(0.0, -22.0, 0.0), (7.0, -6.0, 0.0), (-7.0, -6.0, 0.0), (0.0, -6.0, 7.0), (0.0, -6.0, -7.0)] {
-                glVertex3f(m[0], m[1], m[2]);
-                glVertex3f(m[0] + dx, m[1] + dy, m[2] + dz);
+    }
+}
+
+pub struct FlashDraw {
+    pub parts: Vec<FlashPart>,
+}
+
+pub struct FlashPart {
+    pub verts: Vec<[f32; 3]>,
+    pub uvs: Vec<[f32; 2]>,
+    pub texture: u32,
+}
+
+pub struct FlashSpot {
+    pub matrix: [f32; 16],
+    pub muzzle: [f32; 3],
+    pub scale: f32,
+}
+
+impl FlashSpot {
+    pub fn here(wd: &WeaponDraw, roll: f32) -> Self {
+        let mut matrix = [0.0f32; 16];
+        unsafe { glGetFloatv(0x0BA6, matrix.as_mut_ptr()); } // GL_MODELVIEW_MATRIX
+        Self { matrix, muzzle: wd.muzzle, scale: wd.flash_scale * (0.8 + 0.4 * roll) }
+    }
+}
+
+pub fn draw_flash(flash: &FlashDraw, spot: &FlashSpot) {
+    if spot.scale <= 0.0 {
+        return;
+    }
+    unsafe {
+        glPushMatrix();
+        glLoadIdentity();
+        glMultMatrixf(spot.matrix.as_ptr());
+        draw_flash_here(flash, spot);
+        glPopMatrix();
+    }
+}
+
+// Needs the weapon's model-view matrix to be current
+pub fn draw_flash_here(flash: &FlashDraw, spot: &FlashSpot) {
+    if spot.scale <= 0.0 {
+        return;
+    }
+    unsafe {
+        glPushMatrix();
+        glTranslatef(spot.muzzle[0], spot.muzzle[1], spot.muzzle[2]);
+        glScalef(spot.scale, spot.scale, spot.scale);
+        glDisable(0x0B44); // GL_CULL_FACE
+        glEnable(0x0DE1);
+        glEnable(0x0BE2); // GL_BLEND
+        glBlendFunc(0x0302, 0x0303); // SRC_ALPHA, ONE_MINUS_SRC_ALPHA
+        glDepthMask(0);
+        glColor4f(1.0, 1.0, 1.0, 1.0);
+        for part in &flash.parts {
+            glBindTexture(0x0DE1, part.texture);
+            glBegin(0x0004); // GL_TRIANGLES
+            for (v, uv) in part.verts.iter().zip(&part.uvs) {
+                glTexCoord2f(uv[0], uv[1]);
+                glVertex3f(v[0], v[1], v[2]);
             }
             glEnd();
         }
+        glDepthMask(1);
+        glDisable(0x0BE2);
+        glPopMatrix();
+    }
+}
+
+// The original shows each shot's flash for at least one frame.
+// It stays visible until FLASH_SECONDS after the shot.
+#[derive(Default)]
+pub struct Flashes {
+    // Per gun, the last shot time seen and whether its flash has been shown
+    seen: HashMap<usize, (f32, bool)>,
+}
+
+const FLASH_SECONDS: f32 = 0.02;
+// A shot older than this is not flashed when first seen
+const NEW_SHOT_SECONDS: f32 = 0.25;
+
+impl Flashes {
+    pub fn shows(&mut self, gun: usize, shot: f32, now: f32) -> bool {
+        let e = self.seen.entry(gun).or_insert((f32::NEG_INFINITY, true));
+        if shot != e.0 {
+            *e = (shot, now - shot > NEW_SHOT_SECONDS);
+        }
+        let show = !e.1 || now - shot <= FLASH_SECONDS;
+        e.1 = true;
+        show
     }
 }
 
@@ -581,4 +661,24 @@ pub fn room_color(name: &str, current: bool) -> [f32; 3] {
         _ => (1.0, 0.0, x),
     };
     [r * 0.8 + 0.1, g * 0.8 + 0.1, b * 0.8 + 0.1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_flash_shows_once_then_for_a_short_while() {
+        let mut f = Flashes::default();
+        assert!(!f.shows(0, f32::NEG_INFINITY, 1.0));
+        assert!(!f.shows(0, 0.5, 1.0), "an old shot is not new");
+        // A slow frame still shows the flash once
+        assert!(f.shows(0, 1.0, 1.1));
+        assert!(!f.shows(0, 1.0, 1.2));
+        assert!(f.shows(0, 2.0, 2.005));
+        assert!(f.shows(0, 2.0, 2.015));
+        assert!(!f.shows(0, 2.0, 2.025));
+        assert!(f.shows(0, 2.075, 2.08));
+        assert!(f.shows(1, 2.075, 2.08));
+    }
 }

@@ -1,12 +1,14 @@
 //! Weapon definitions (`data/kit/*.wpn`).
 //!
-//! Text files, one value per line, with no field names. Only the fields
-//! worked out so far are read: the magazine size and reserve ammunition
-//! (the first two integer-only lines), the sound of a shot (the first `.wav`),
-//! the kind of weapon, how it reloads and how it is held (the three lines after the sounds), the
-//! model file (the first quoted `.qob`), the muzzle offset in model space (the
-//! first line of three numbers after it), and after the ammunition's name the
-//! numbers its spread is worked out from (see `sim::aim`).
+//! Text files with one value per line and no field names.
+//! Only the fields worked out so far are read.
+//! The first two integer-only lines give the magazine size and reserve ammunition.
+//! The first `.wav` names the sound of a shot.
+//! The three lines before the model give the kind of weapon, how it reloads and how it is held.
+//! The first quoted `.qob` names the model file.
+//! The first line of three numbers after it gives the muzzle offset in model space.
+//! The eight lines after the ammunition's name give its spread (see `sim::aim`).
+//! The line after those gives the size of the muzzle flash.
 
 use std::path::Path;
 
@@ -38,6 +40,7 @@ pub struct Weapon {
     pub pellets: u32,
     pub pellet_spread: f32,
     pub gun: Option<Gun>,
+    pub flash_scale: f32,
 }
 
 impl Weapon {
@@ -93,6 +96,8 @@ pub fn parse(text: &str) -> Result<Weapon> {
         close: numbers[7],
     });
 
+    let flash_scale = ammo_at.and_then(|a| lines.get(a + 9)).and_then(|l| l.parse().ok()).unwrap_or(0.0);
+
     let shot = (reload_class == "shotgun").then(|| {
         let spread: f32 = lines.get(muzzle_at + 1)?.parse().ok()?;
         let n: usize = lines.get(muzzle_at + 2)?.parse().ok()?;
@@ -106,7 +111,7 @@ pub fn parse(text: &str) -> Result<Weapon> {
     }).flatten();
     let (pellets, pellet_spread) = shot.unwrap_or((1, 0.0));
 
-    Ok(Weapon { id, magazine, reserve, model, muzzle, sound, class, reload_class, hold, ammo, gun, pellets, pellet_spread })
+    Ok(Weapon { id, magazine, reserve, model, muzzle, sound, class, reload_class, hold, ammo, gun, pellets, pellet_spread, flash_scale })
 }
 
 #[cfg(test)]
@@ -127,6 +132,7 @@ mod tests {
         assert_eq!(w.sound.as_deref(), Some("C_sb5ks.wav"));
         assert_eq!((w.class.as_str(), w.reload_class.as_str(), w.hold.as_str(), w.ammo.as_deref()), ("compact", "subgun", "compact", Some("9mmP(FMJ)")));
         assert_eq!((w.pellets, w.pellet_spread), (1, 0.0));
+        assert_eq!(w.flash_scale, 0.09);
         // What sim::aim has for it
         let (gun, mp5k) = (w.gun.unwrap(), crate::sim::aim::MP5K);
         assert_eq!((gun.moving, gun.crouched, gun.recoil, gun.close), (mp5k.moving, mp5k.crouched, mp5k.recoil, mp5k.close));
@@ -159,6 +165,14 @@ mod tests {
         }
         eprintln!("{ok} weapons parsed, {} failed: {:?}", bad.len(), &bad[..bad.len().min(3)]);
         assert!(ok > bad.len(), "most weapons should parse");
+    }
+
+    #[test]
+    fn flash_scales_follow_the_weapon() {
+        for (file, scale) in [("pw_car15", 0.4), ("pw_mp5sd", 0.01), ("pw_shotgun", 0.5), ("tw_dragunov", 0.8)] {
+            let Ok(w) = read(&Path::new("data/kit").join(format!("{file}.wpn"))) else { return };
+            assert_eq!(w.flash_scale, scale, "{file}");
+        }
     }
 
     #[test]
