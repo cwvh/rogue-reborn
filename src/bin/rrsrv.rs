@@ -60,12 +60,11 @@ struct Args {
     base_pair: Option<usize>,
     /// Players cannot hurt their own side
     no_friendly_fire: bool,
-    /// Play in rounds, one life each, starting whenever two sides (or players) are there; each
-    /// this long (seconds), or with no limit
+    /// Play in rounds with one life each. A round starts when two sides (or players) are there
+    /// and all are ready.
     rounds: bool,
+    /// A round's length (seconds). Without it rounds have no limit.
     round_time: Option<f32>,
-    /// With a host, start the rounds anyway as if there were none
-    auto_start: bool,
     /// The game is the host's, started for them by `rr --host`: it ends when they leave, or if
     /// they have not come in this long (seconds)
     hosted: bool,
@@ -81,7 +80,7 @@ fn parse_args() -> Args {
         port: 27960, demo: false, map: None, level: None, npcs: demo::MAX_NPCS, max_players: 4, seed: 0x5eed,
         model: PathBuf::from("data/character/team_hrt/blue_M_a.CRP"), no_models: false, grenades: 3, duration: None, quiet: false, no_pvp: false, no_lag_compensation: false,
         snapshot_rate: 60.0, sim_latency: 0.0, sim_jitter: 0.0, sim_loss: 0.0, record: None, check: None, teams: false, base_pair: None, no_friendly_fire: false,
-        rounds: false, round_time: Some(ROUND_TIME), auto_start: false, hosted: false, host_wait: None,
+        rounds: false, round_time: Some(ROUND_TIME), hosted: false, host_wait: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -111,7 +110,6 @@ fn parse_args() -> Args {
             "--no-friendly-fire" => a.no_friendly_fire = true,
             "--rounds" => a.rounds = true,
             "--round-time" => a.round_time = Some(value("--round-time").parse::<f32>().unwrap_or_else(|_| usage("--round-time expects seconds"))).filter(|&s| s > 0.0),
-            "--auto-start" => a.auto_start = true,
             "--hosted" => a.hosted = true,
             "--host-wait" => a.host_wait = Some(value("--host-wait").parse().unwrap_or_else(|_| usage("--host-wait expects seconds"))),
             "--check" => a.check = Some(PathBuf::from(value("--check"))),
@@ -130,7 +128,7 @@ fn usage(problem: &str) -> ! {
     eprintln!("             [--model FILE] [--no-models] [--grenades N] [--duration SECONDS] [--quiet] [--snapshot-rate HZ] [--no-pvp] [--no-lag-compensation]");
     eprintln!("             [--sim-latency MS] [--sim-jitter MS] [--sim-loss PERCENT]   (to make the connection worse)");
     eprintln!("             [--teams [--base-pair N] [--no-friendly-fire]] [--rounds [--round-time SECONDS, 0 for none]] [--record FILE]");
-    eprintln!("             [--auto-start] [--hosted [--host-wait SECONDS]]   (with RR_HOST_KEY: start rounds without the host, or end the game without them)");
+    eprintln!("             [--hosted [--host-wait SECONDS]]   (with RR_HOST_KEY: end the game without the host)");
     eprintln!("       rrsrv --check FILE");
     std::process::exit(if problem.is_empty() { 0 } else { 2 });
 }
@@ -330,7 +328,6 @@ fn main() {
     if args.rounds {
         server.play_rounds();
         server.set_time_limit(args.round_time);
-        server.set_auto_start(key.is_none() || args.auto_start);
     }
     if args.record.is_some() {
         server.record();

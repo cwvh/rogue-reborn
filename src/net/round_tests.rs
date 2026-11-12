@@ -3,7 +3,7 @@
 use crate::net::client::{Frame, Status};
 use crate::net::lab::{Game, demo_setup, team_setup};
 use crate::net::link::Conditions;
-use crate::net::proto::Setup;
+use crate::net::proto::{LobbyCommand, Setup};
 use crate::net::record::Change;
 use crate::net::round::{Outcome, Phase};
 use crate::net::server::{LOAD_TIMEOUT, RELEASE_AFTER, Seat};
@@ -74,6 +74,14 @@ fn run_until(game: &mut Game, phase: Phase, seconds: f32) -> bool {
         game.step();
     }
     game.server.round().phase == phase
+}
+
+fn ready_up(game: &mut Game) {
+    // Wait for clients to receive the lobby generation before sending ready commands.
+    game.run(0.5);
+    for peer in 0..game.peers.len() {
+        game.lobby(peer, LobbyCommand::Ready(true));
+    }
 }
 
 fn slot(game: &Game, peer: usize) -> usize {
@@ -316,10 +324,11 @@ fn a_new_round_puts_everyone_back_alike_on_every_client() {
     let mut game = in_rounds(face_off());
     let blue = join(&mut game, Side::Blue, thrower(Side::Blue));
     let gold = join(&mut game, Side::Gold, idle(Side::Gold));
-    game.server.set_auto_start(true);
+    ready_up(&mut game);
     assert!(run_until(&mut game, Phase::Results, 20.0));
     assert!(game.server.sim.players.iter().all(|p| !p.active || p.respawn_at.is_some()));
-    // The next round starts by itself, from the lobby
+    assert!(run_until(&mut game, Phase::Lobby, 20.0));
+    ready_up(&mut game);
     assert!(run_until(&mut game, Phase::Hold, 20.0));
     game.run(0.5);
     assert_eq!(game.server.round().number, 2);
@@ -360,11 +369,13 @@ fn a_match_in_rounds_plays_back_the_same() {
     let mut game = Game::with_setup(Conditions::poor(), face_off());
     game.server.play_rounds();
     game.server.record();
-    game.server.set_auto_start(true);
     join(&mut game, Side::Blue, thrower(Side::Blue));
     join(&mut game, Side::Gold, shooter(Side::Gold, |sim| !sim.thrown.is_empty()));
+    ready_up(&mut game);
     assert!(run_until(&mut game, Phase::Results, 20.0));
     let late = join(&mut game, Side::Blue, idle(Side::Blue));
+    assert!(run_until(&mut game, Phase::Lobby, 20.0));
+    ready_up(&mut game);
     assert!(run_until(&mut game, Phase::Live, 20.0));
     game.run(2.0);
     assert_eq!(game.server.round().number, 2);

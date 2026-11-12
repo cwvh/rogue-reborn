@@ -214,6 +214,8 @@ const ID_CHOICE: u32 = 10;
 pub fn lobby(ui: &mut Ui, v: &LobbyView, chat: &mut Chat) -> Vec<LobbyCommand> {
     let mut commands = Vec::new();
     let lobby = v.round.phase == Phase::Lobby;
+    // Players can cancel an automatic countdown by changing ready or side.
+    let open = lobby || (v.round.phase == Phase::Countdown && v.session.auto_countdown);
     let host = v.host();
     let settings = host && lobby;
 
@@ -254,7 +256,7 @@ pub fn lobby(ui: &mut Ui, v: &LobbyView, chat: &mut Chat) -> Vec<LobbyCommand> {
     if v.team_game() {
         for (side, rect, id, art, fallback) in [(Side::Blue, BLUE, ID_BLUE, Art::SideBlue, BLUE_BAR), (Side::Gold, GOLD, ID_GOLD, Art::SideGold, GOLD_BAR)] {
             let mine = v.side() == Some(side);
-            let (look, clicked) = ui.control(id, rect, lobby && !mine);
+            let (look, clicked) = ui.control(id, rect, open && !mine);
             let shown = if mine { 2 } else { state(look) };
             ui.art(art, shown, rect, fallback);
             ui.centered(if side == Side::Blue { "BLUE" } else { "GOLD" }, FontId::Text, rect, if shown == 3 { DIM_TEXT } else { WHITE });
@@ -325,11 +327,13 @@ pub fn lobby(ui: &mut Ui, v: &LobbyView, chat: &mut Chat) -> Vec<LobbyCommand> {
     // What the player can do now
     let hint = match v.round.phase {
         Phase::Countdown if host => "The round is about to start. STOP holds it.",
+        Phase::Countdown if v.session.auto_countdown => "Everyone is ready. Click READY again to hold the round.",
         Phase::Countdown => "The round is about to start.",
         _ if host && !v.two_sides() => if v.team_game() { "Each side needs someone before you can start." } else { "You need someone to play against." },
-        _ if host => "You are the host. Start the round when everyone is ready.",
-        _ if v.session.host.is_some() => "Waiting for the host to start the round.",
-        _ => "The round starts when both sides have someone.",
+        _ if !v.two_sides() => "The round starts when both sides have someone.",
+        _ if host => "Start the round, or it starts when everyone is ready.",
+        _ if v.session.host.is_some() => "The round starts when all are ready or the host starts it.",
+        _ => "The round starts when everyone is ready.",
     };
     ui.fill(STATUS, LABEL);
     ui.left(hint, FontId::Text, STATUS, 4.0, LABEL_TEXT);
@@ -339,7 +343,7 @@ pub fn lobby(ui: &mut Ui, v: &LobbyView, chat: &mut Chat) -> Vec<LobbyCommand> {
 
     // Ready, and the host's start and stop
     let ready = v.ready.contains(&v.me);
-    let (look, clicked) = ui.control(ID_READY, READY, lobby);
+    let (look, clicked) = ui.control(ID_READY, READY, open);
     button(ui, READY, look, ready, "READY");
     if clicked {
         commands.push(LobbyCommand::Ready(!ready));
@@ -732,7 +736,7 @@ mod tests {
             Seen {
                 round: RoundState { phase: Phase::Lobby, ..RoundState::default() },
                 time: 0.0,
-                session: Session { generation: 1, host: Some(0), time_limit: Some(180), friendly_fire: true, base_pair: 0 },
+                session: Session { generation: 1, host: Some(0), time_limit: Some(180), friendly_fire: true, base_pair: 0, auto_countdown: false },
                 me,
                 players: vec![pl(0, Some(Side::Blue)), pl(1, Some(Side::Gold)), pl(2, Some(Side::Gold))],
                 ready: vec![1],
@@ -807,7 +811,7 @@ mod tests {
         }).collect();
         assert_eq!(lights, [(Art::Host, LIGHT), (Art::Ready, LIGHT), (Art::NotReady, LIGHT)]);
         let t = texts(&draws);
-        for s in ["PLAYER 1", "PLAYER 2", "PLAYER 3", "Team Survival", LEVEL, "Upper Floors", "3:00", "Blue Medium", "Waiting for the host to start the round."] {
+        for s in ["PLAYER 1", "PLAYER 2", "PLAYER 3", "Team Survival", LEVEL, "Upper Floors", "3:00", "Blue Medium", "The round starts when all are ready or the host starts it."] {
             assert!(t.contains(&s), "{s} is not shown");
         }
         // Their own bar is lit, and the others are dark
@@ -870,6 +874,22 @@ mod tests {
             }
         }
         assert_eq!(click(&counting(0), START).0, [LobbyCommand::Stop]);
+    }
+
+    #[test]
+    fn in_a_countdown_that_began_by_itself_ready_and_side_still_change() {
+        let counting = |me| {
+            let mut seen = Seen { round: RoundState { phase: Phase::Countdown, ends: Some(4.2), ..RoundState::default() }, ..Seen::new(me) };
+            seen.session.auto_countdown = true;
+            seen
+        };
+        assert_eq!(click(&counting(2), READY).0, [LobbyCommand::Ready(true)]);
+        assert_eq!(click(&counting(2), BLUE).0, [LobbyCommand::Side(Side::Blue)]);
+        assert_eq!(click(&counting(0), START).0, [LobbyCommand::Stop]);
+        for rect in [FRIENDLY_FIRE, arrows(INSERTIONS)[1], arrows(LENGTH)[0]] {
+            assert_eq!(click(&counting(0), rect).0, [], "{rect:?}");
+        }
+        assert!(texts(&click(&counting(2), Rect::default()).1).contains(&"Everyone is ready. Click READY again to hold the round."));
     }
 
     #[test]

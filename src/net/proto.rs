@@ -87,8 +87,8 @@ pub struct BasePairSetup {
 /// The session's settings, which the host changes in the lobby
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Session {
-    /// Counts the times the phase has entered Lobby or Countdown. A lobby command is for the
-    /// one it names.
+    /// Goes up with each new lobby, countdown or results screen. Lobby commands made for an
+    /// older one are dropped. An automatic countdown keeps the lobby's.
     pub generation: u32,
     pub host: Option<u8>,
     /// A round's time limit (seconds), or none
@@ -96,6 +96,8 @@ pub struct Session {
     pub friendly_fire: bool,
     /// Which of `Setup::base_pairs` the sides start from
     pub base_pair: u8,
+    /// Whether the countdown began by itself. Players can cancel it by changing ready or side.
+    pub auto_countdown: bool,
 }
 
 /// What a player asks for in the lobby. The last five are the host's alone.
@@ -1170,11 +1172,12 @@ pub fn write_session(w: &mut Writer, s: &Session) {
     w.u16(s.time_limit.unwrap_or(0));
     w.bool(s.friendly_fire);
     w.u8(s.base_pair);
+    w.bool(s.auto_countdown);
 }
 
 pub fn read_session(r: &mut Reader) -> Result<Session> {
     let (generation, host, time_limit) = (r.varint()?, r.u8()?, r.u16()?);
-    Ok(Session { generation, host: (host != u8::MAX).then_some(host), time_limit: (time_limit != 0).then_some(time_limit), friendly_fire: r.bool()?, base_pair: r.u8()? })
+    Ok(Session { generation, host: (host != u8::MAX).then_some(host), time_limit: (time_limit != 0).then_some(time_limit), friendly_fire: r.bool()?, base_pair: r.u8()?, auto_countdown: r.bool()? })
 }
 
 fn outcome_code(o: Option<Outcome>) -> (u8, u8) {
@@ -1624,7 +1627,7 @@ mod tests {
             doors: vec![(0.0, false), (0.5, true), (1.0, true)],
             broken: vec![(3, 10.5), (200, 11.0)],
             round: RoundState { phase: Phase::Results, number: 7, ends: Some(20.0), wins: [3, 2], last: Some(Outcome::Won(Side::Gold)) },
-            session: Session { generation: 9, host: Some(3), time_limit: Some(240), friendly_fire: true, base_pair: 2 },
+            session: Session { generation: 9, host: Some(3), time_limit: Some(240), friendly_fire: true, base_pair: 2, auto_countdown: true },
             results: Some(results(4)),
             events: vec![
                 (10, Event::Sound { name: "C_GRFRAG.WAV".to_string(), at: Some([1.0, 2.0, 3.0]), gain: 1.0 }),

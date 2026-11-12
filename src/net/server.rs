@@ -231,8 +231,8 @@ pub struct Server {
     until: Option<u32>,
     /// A round's time limit (seconds), or none
     time_limit: Option<f32>,
-    /// Start the countdown whenever there are two sides to play, as a host would
-    auto_start: bool,
+    /// Whether the countdown began by itself. Players can cancel it by changing ready or side.
+    auto_countdown: bool,
     /// Who is playing the round under way
     seats: Vec<Seat>,
     /// Every round played
@@ -252,7 +252,8 @@ pub struct Server {
     host_wait: f64,
     /// Why the game is over, once it is
     ended: Option<String>,
-    /// Counts the times the phase has entered Lobby or Countdown (`Session::generation`)
+    /// Goes up with each new lobby, countdown or results screen. Lobby commands made for an
+    /// older one are dropped. An automatic countdown keeps the lobby's (`Session::generation`).
     generation: u32,
     /// Which of the setup's base pairs the sides start from
     base_pair: u8,
@@ -271,7 +272,7 @@ impl Server {
         Server {
             sim, setup, build: build.to_string(), spawns, spawned: 0, remotes: Vec::new(), tick: 0, next_tick_at: None, events: VecDeque::new(), next_event: 1,
             snapshot_every: SNAPSHOT_EVERY, lag_compensation: true, max_rewind: MAX_REWIND / TICK, snapshots_sent: 0, snapshot_bytes: 0, snapshots_split: 0, recorder: None,
-            round: RoundState::default(), until: None, time_limit: Some(ROUND_TIME), auto_start: false, seats: Vec::new(), records: Vec::new(), news: Vec::new(), chat: Vec::new(),
+            round: RoundState::default(), until: None, time_limit: Some(ROUND_TIME), auto_countdown: false, seats: Vec::new(), records: Vec::new(), news: Vec::new(), chat: Vec::new(),
             host_key: None, hosted: false, host_came: false, began: None, host_wait: HOST_WAIT, ended: None, generation: 0, base_pair, recorded: None,
             results: None,
         }
@@ -302,6 +303,7 @@ impl Server {
             time_limit: self.time_limit.map(|t| t.round().clamp(1.0, u16::MAX as f32) as u16),
             friendly_fire: self.sim.friendly_fire,
             base_pair: self.base_pair,
+            auto_countdown: self.auto_countdown,
         }
     }
 
@@ -317,11 +319,6 @@ impl Server {
     /// Where the rounds are
     pub fn round(&self) -> RoundState {
         self.round
-    }
-
-    /// Start the countdown whenever there are two sides to play, and stop it if one empties
-    pub fn set_auto_start(&mut self, on: bool) {
-        self.auto_start = on;
     }
 
     /// Change the time limit (seconds, or none). Only in the lobby: once the countdown starts,
@@ -363,24 +360,37 @@ impl Server {
         true
     }
 
-    /// Start the countdown to the next round, from the lobby
+    /// Only the host can stop this countdown.
     pub fn start_countdown(&mut self) -> bool {
-        if self.round.phase != Phase::Lobby {
-            return false;
-        }
-        self.say(format!("starting round {} in {COUNTDOWN:.0} seconds", self.round.number + 1));
-        self.set_phase(Phase::Countdown, Some(COUNTDOWN));
-        true
+        self.begin_countdown(false)
     }
 
-    /// Stop the countdown, back to the lobby
+    /// Clears everyone's ready so the countdown does not start again at once.
     pub fn stop_countdown(&mut self) -> bool {
         if self.round.phase != Phase::Countdown {
             return false;
         }
+        for r in &mut self.remotes {
+            r.ready = false;
+        }
         self.say("the countdown was stopped".to_string());
         self.set_phase(Phase::Lobby, None);
         true
+    }
+
+    fn begin_countdown(&mut self, auto: bool) -> bool {
+        if self.round.phase != Phase::Lobby {
+            return false;
+        }
+        let why = if auto { "everyone is ready: " } else { "" };
+        self.say(format!("{why}starting round {} in {COUNTDOWN:.0} seconds", self.round.number + 1));
+        self.auto_countdown = auto;
+        self.set_phase(Phase::Countdown, Some(COUNTDOWN));
+        true
+    }
+
+    fn all_ready(&self) -> bool {
+        self.remotes.iter().all(|r| r.ready) && teams(&self.sim, false).len() >= 2
     }
 
     /// Send snapshots this many times a second (the nearest the 60 ticks a second allow)
@@ -547,6 +557,8 @@ impl Server {
     fn lobby(&mut self, i: usize, generation: u32, command: LobbyCommand) -> bool {
         let (slot, host) = (self.remotes[i].slot, self.remotes[i].host);
         let lobby = self.round.phase == Phase::Lobby;
+        // Players can cancel an automatic countdown by changing ready or side.
+        let open = lobby || (self.round.phase == Phase::Countdown && self.auto_countdown);
         // Made for another lobby, countdown or results than these. What is said is said whenever.
         if generation != self.generation && !matches!(command, LobbyCommand::Say(_)) {
             return false;
@@ -578,7 +590,7 @@ impl Server {
                 ready
             }
             LobbyCommand::Side(side) => {
-                if !lobby || self.sim.bases.iter().any(Vec::is_empty) {
+                if !open || self.sim.bases.iter().any(Vec::is_empty) {
                     return false;
                 }
                 if self.sim.players[slot].side != Some(side) {
@@ -591,10 +603,10 @@ impl Server {
                 true
             }
             LobbyCommand::Ready(on) => {
-                if lobby {
+                if open {
                     self.remotes[i].ready = on;
                 }
-                lobby
+                open
             }
             LobbyCommand::Start if host => lobby && teams(&self.sim, false).len() >= 2 && self.start_countdown(),
             LobbyCommand::Stop if host => self.stop_countdown(),
@@ -651,9 +663,15 @@ impl Server {
     /// Move to `phase`, for `seconds` if the clock ends it. Players are held unless the round
     /// is being played.
     fn set_phase(&mut self, phase: Phase, seconds: Option<f32>) {
+        // Keep the generation between the lobby and an automatic countdown. Ready and side
+        // commands stay valid.
+        let same_screen = self.auto_countdown && matches!((self.round.phase, phase), (Phase::Lobby, Phase::Countdown) | (Phase::Countdown, Phase::Lobby));
         self.round.phase = phase;
+        if phase != Phase::Countdown {
+            self.auto_countdown = false;
+        }
         // A new lobby, countdown or results screen: commands made for the last are stale
-        if matches!(phase, Phase::Lobby | Phase::Countdown | Phase::Debrief) {
+        if matches!(phase, Phase::Lobby | Phase::Countdown | Phase::Debrief) && !same_screen {
             match self.generation.checked_add(1) {
                 Some(g) => self.generation = g,
                 None => self.ended = Some("the session ran out of numbers".to_string()),
@@ -682,16 +700,20 @@ impl Server {
 
     /// The rounds move on, once a tick
     fn run_rounds(&mut self, link: &mut impl Link) {
-        let sides = teams(&self.sim, false).len();
         match self.round.phase {
             Phase::Open => {}
             Phase::Lobby => {
-                if self.auto_start && sides >= 2 {
-                    self.start_countdown();
+                if self.all_ready() {
+                    self.begin_countdown(true);
                 }
             }
-            Phase::Countdown if self.auto_start && sides < 2 => {
-                self.stop_countdown();
+            Phase::Countdown if self.auto_countdown && !self.all_ready() => {
+                let why = match self.remotes.iter().find(|r| !r.ready) {
+                    Some(r) => format!("player {} is not ready", r.slot),
+                    None => "a side has no one".to_string(),
+                };
+                self.say(format!("{why}: the countdown was stopped"));
+                self.set_phase(Phase::Lobby, None);
             }
             Phase::Countdown => {
                 if self.timed_out() {

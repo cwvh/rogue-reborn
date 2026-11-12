@@ -26,8 +26,8 @@ use crate::sim::{Input, Side, Sim, TICK};
 
 type V3 = [f32; 3];
 
-const SERVER_MAGIC: &[u8; 8] = b"RRSERV\0\x05";
-const CLIENT_MAGIC: &[u8; 8] = b"RRCLNT\0\x05";
+const SERVER_MAGIC: &[u8; 8] = b"RRSERV\0\x06";
+const CLIENT_MAGIC: &[u8; 8] = b"RRCLNT\0\x06";
 
 /// A change in who plays, between two ticks
 #[derive(Clone, Debug, PartialEq)]

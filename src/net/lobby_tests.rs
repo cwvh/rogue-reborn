@@ -162,6 +162,172 @@ fn the_host_starts_with_players_not_ready_but_not_with_a_side_empty() {
     assert_eq!(game.server.round().phase, Phase::Countdown);
 }
 
+fn two_players(host: bool) -> (Game, usize, usize) {
+    let mut game = if host {
+        hosted(false)
+    } else {
+        let mut game = Game::with_setup(Conditions::lan(), team_setup());
+        game.server.play_rounds();
+        game
+    };
+    let blue = join(&mut game, Side::Blue, if host { KEY } else { 0 });
+    let gold = join(&mut game, Side::Gold, 0);
+    (game, blue, gold)
+}
+
+fn phase(game: &Game) -> Phase {
+    game.server.round().phase
+}
+
+#[test]
+fn when_everyone_is_ready_the_countdown_starts_with_or_without_a_host() {
+    for host in [true, false] {
+        let (mut game, blue, gold) = two_players(host);
+        game.lobby(blue, LobbyCommand::Ready(true));
+        game.run(1.0);
+        assert_eq!(phase(&game), Phase::Lobby, "started with one not ready (host: {host})");
+        assert!(!game.server.session().auto_countdown);
+        game.lobby(gold, LobbyCommand::Ready(true));
+        game.run(0.5);
+        assert_eq!(phase(&game), Phase::Countdown, "host: {host}");
+        assert!(game.server.session().auto_countdown);
+        assert!(game.peers[gold].client.session.auto_countdown);
+        assert!(run_until(&mut game, Phase::Live, 20.0));
+        assert!(!game.server.session().auto_countdown);
+    }
+}
+
+#[test]
+fn a_hostless_game_with_two_sides_waits_for_the_one_not_ready() {
+    let (mut game, blue, _gold) = two_players(false);
+    game.lobby(blue, LobbyCommand::Ready(true));
+    game.run(3.0);
+    assert_eq!(phase(&game), Phase::Lobby);
+}
+
+#[test]
+fn no_one_alone_starts_a_round_by_being_ready() {
+    let mut game = hosted(false);
+    let host = join(&mut game, Side::Blue, KEY);
+    game.lobby(host, LobbyCommand::Ready(true));
+    game.run(1.0);
+    assert_eq!(phase(&game), Phase::Lobby);
+}
+
+#[test]
+fn a_player_unreadying_stops_an_automatic_countdown_and_readying_again_restarts_it() {
+    let (mut game, blue, gold) = two_players(true);
+    let lobby = game.server.session().generation;
+    game.lobby(blue, LobbyCommand::Ready(true));
+    game.lobby(gold, LobbyCommand::Ready(true));
+    game.run(0.5);
+    assert_eq!(phase(&game), Phase::Countdown);
+    // The lobby's generation stays, so commands sent from the lobby still count.
+    assert_eq!(game.server.session().generation, lobby);
+    game.lobby(gold, LobbyCommand::Ready(false));
+    game.run(0.5);
+    assert_eq!(phase(&game), Phase::Lobby);
+    assert_eq!(game.server.session().generation, lobby);
+    assert!(!ready(&game, gold) && ready(&game, blue));
+    game.lobby(gold, LobbyCommand::Ready(true));
+    game.run(0.5);
+    assert_eq!(phase(&game), Phase::Countdown);
+    // Commands sent while the countdown runs still count.
+    game.lobby(gold, LobbyCommand::Ready(false));
+    game.lobby(gold, LobbyCommand::Ready(true));
+    game.lobby(gold, LobbyCommand::Ready(false));
+    game.run(0.5);
+    assert_eq!(phase(&game), Phase::Lobby);
+    game.lobby(gold, LobbyCommand::Ready(true));
+    assert!(run_until(&mut game, Phase::Live, 20.0));
+    assert_eq!(game.server.round().number, 1);
+}
+
+#[test]
+fn a_countdown_the_host_started_cannot_be_stopped_by_unreadying_or_by_a_side_change() {
+    let (mut game, host, gold) = two_players(true);
+    game.lobby(gold, LobbyCommand::Ready(true));
+    game.run(0.5);
+    game.lobby(host, LobbyCommand::Start);
+    game.run(0.5);
+    assert_eq!(phase(&game), Phase::Countdown);
+    assert!(!game.server.session().auto_countdown);
+    game.lobby(gold, LobbyCommand::Ready(false));
+    game.lobby(gold, LobbyCommand::Side(Side::Blue));
+    game.run(0.5);
+    assert_eq!(phase(&game), Phase::Countdown);
+    assert!(ready(&game, gold));
+    assert!(game.peers[gold].client.lobby_waiting().next().is_none(), "a refused command is still waiting");
+    assert!(run_until(&mut game, Phase::Live, 20.0));
+}
+
+#[test]
+fn the_host_stops_an_automatic_countdown_and_it_waits_for_everyone_to_ready_again() {
+    let (mut game, host, gold) = two_players(true);
+    game.lobby(host, LobbyCommand::Ready(true));
+    game.lobby(gold, LobbyCommand::Ready(true));
+    game.run(0.5);
+    assert_eq!(phase(&game), Phase::Countdown);
+    game.lobby(host, LobbyCommand::Stop);
+    game.run(2.0);
+    assert_eq!(phase(&game), Phase::Lobby, "it started again at once");
+    assert!(!ready(&game, host) && !ready(&game, gold));
+    game.lobby(host, LobbyCommand::Ready(true));
+    game.lobby(gold, LobbyCommand::Ready(true));
+    game.run(0.5);
+    assert_eq!(phase(&game), Phase::Countdown);
+}
+
+#[test]
+fn a_side_change_a_newcomer_or_an_empty_side_stops_an_automatic_countdown() {
+    let (mut game, blue, gold) = two_players(false);
+    for p in [blue, gold] {
+        game.lobby(p, LobbyCommand::Ready(true));
+    }
+    game.run(0.5);
+    assert_eq!(phase(&game), Phase::Countdown);
+    game.lobby(gold, LobbyCommand::Side(Side::Blue));
+    game.run(0.5);
+    assert_eq!(phase(&game), Phase::Lobby);
+    assert!(!ready(&game, gold));
+    game.lobby(gold, LobbyCommand::Side(Side::Gold));
+    game.lobby(gold, LobbyCommand::Ready(true));
+    game.run(0.5);
+    assert_eq!(phase(&game), Phase::Countdown);
+    let late = join(&mut game, Side::Gold, 0);
+    game.run(0.5);
+    assert_eq!(phase(&game), Phase::Lobby);
+    game.lobby(late, LobbyCommand::Ready(true));
+    game.run(0.5);
+    assert_eq!(phase(&game), Phase::Countdown);
+    for p in [gold, late] {
+        let peer = &mut game.peers[p];
+        peer.client.leave(&mut peer.link);
+        peer.on = false;
+    }
+    game.run(0.5);
+    assert_eq!(phase(&game), Phase::Lobby);
+}
+
+#[test]
+fn bots_are_always_ready_so_a_game_of_bots_and_a_player_starts_when_the_player_is_ready() {
+    let mut game = hosted(false);
+    let host = join(&mut game, Side::Blue, KEY);
+    let bot = game.join_bot(crate::net::bot::Skill::easy(), 3);
+    game.peers[bot].client.ask_side(Some(Side::Gold));
+    game.run(1.0);
+    assert!(ready(&game, bot));
+    assert_eq!(phase(&game), Phase::Lobby);
+    game.lobby(host, LobbyCommand::Ready(true));
+    game.run(0.5);
+    assert_eq!(phase(&game), Phase::Countdown);
+    game.lobby(host, LobbyCommand::Stop);
+    game.run(1.5);
+    assert_eq!(phase(&game), Phase::Lobby);
+    assert!(ready(&game, bot));
+    assert!(!ready(&game, host));
+}
+
 #[test]
 fn players_change_side_and_say_ready_in_the_lobby_and_each_round_asks_again() {
     let mut game = hosted(false);

@@ -373,10 +373,11 @@ and even that fell away over time. We leave it out for now.
 original's aim assist, which was never used online. We have no minimap or aim assist, so we
 leave both out.
 
-Only the host can change the session: its fields and its options. Ready only shows who is
-ready: the host can start the countdown whenever they like. The countdown is usually 5 seconds, and each second is announced
-in the chat ("Starting mission in 5 seconds", then "Away we go"). "Start suspended" suggests the
-host can stop it.
+Only the host can change the session: its fields and its options. In the original, ready only
+shows who is ready: the host can start the countdown whenever they like. Ours does that too, and
+also starts it when everyone is ready (see "Lobby (done)"). The countdown is usually 5
+seconds, and each second is announced in the chat ("Starting mission in 5 seconds", then "Away
+we go"). "Start suspended" suggests the host can stop it.
 
 Ours keeps the server a separate process, `rrsrv`, even when a player hosts. Hosting from `rr`
 starts `rrsrv` with a secret token, and `rr` joins it on localhost with that token, which makes
@@ -410,7 +411,8 @@ results screen (debrief), then the lobby again.
   its start: the host can stop the countdown, but cannot change the session while it runs.
   Players may have picked their kit for the map and settings they saw, so a change slipped in
   at the last moment would be unfair to them. Players' sides are locked too. Players can still
-  change their kit until the countdown ends.
+  change their kit until the countdown ends. (Ours: in a countdown that began because everyone
+  was ready, ready and side are not locked: changing either stops it.)
 - **Loading.** Each client builds the round's game and tells the server when it is ready. A
   player who is ready sees through their own eyes at their starting place, but cannot move,
   look around or change weapons. A player not ready within 30 seconds is dropped. Once the rest
@@ -473,9 +475,9 @@ The server runs the phases (`net::round`, `Server::play_rounds`): lobby, countdo
 loading (up to 30 s), hold (2 s), live, results (3 s), the results screen (up to 30 s), and the
 lobby again.
 
-- **The lobby** is a screen of its own (see "Lobby (done)"). Without a host, `--rounds` starts
-  the countdown once there are two sides (or two players) to play, and stops it if one
-  empties. With one, the host starts it.
+- **The lobby** is a screen of its own (see "Lobby (done)"). The countdown starts when every
+  player is ready and there are two sides (or two players) to play, with a host or without
+  one. A host can also start it at any time.
 - **Held** (`Sim::frozen`) in the lobby and the countdown, while a round loads, and for the 2 s
   after: no one moves, looks around, fires or changes weapons. The server ignores their input,
   and their own screen holds them too. Once a round is decided, players move as they like, as
@@ -591,17 +593,24 @@ and `--max-players` (8 unless given), and passes them to an `rrsrv` it starts be
   sends it to everyone with the next tick's events (`Event::Chat`). In a round, what the dead
   say goes only to the dead, marked as theirs, so they cannot call out to the living. Typing in
   a round is still to come.
-- **Who may do what.** Anyone picks a side and says ready, in the lobby. Ready is only
-  information, as in the original: the host can start with players not ready, but not with a
-  side empty. The host changes the length, friendly fire and the pair of bases in the lobby,
-  and stops the countdown while it runs. A side change clears that player's ready, and a new
-  round clears everyone's. Bots say ready in every lobby.
+- **Who may do what.** Anyone picks a side and says ready, in the lobby. Ready starts the
+  countdown (ours; in the original it only shows): when every player is ready and there are two
+  sides to play, the server starts it by itself, hosted or not. That countdown is automatic. If
+  any player says not ready while it runs, or changes side (which clears their ready), or a
+  player joins (who is not ready), or a side empties, it stops, back to the lobby. The host can
+  start the countdown at any time, with players not ready, but not with a side empty. A
+  countdown the host started is locked: ready and side do not change, and only the host's Stop
+  ends it. The host's Stop also works on an automatic countdown, and clears everyone's ready so
+  that it does not start again at once. The host changes the length, friendly fire and the pair
+  of bases in the lobby only. A side change clears that player's ready, and a new round clears
+  everyone's. Bots are always ready: they say it in every lobby, so a game of bots starts as
+  soon as the players are ready. "Every player" is every player who has joined: none is an
+  onlooker, and one with no side (a game without teams) counts.
 - **The host** is whoever joins with the server's key (`RR_HOST_KEY`, read from the
   environment so that it never shows in a list of processes). A key of 0 is none. Only one at
   a time is host, and a player who takes the host's slot later is not. `rr --host` makes the
   key from the OS's random source. Another player can host a dedicated server's lobby with
-  `RR_HOST_KEY=... rr --connect`. A server with a key does not start rounds by itself, unless
-  `--auto-start` says to.
+  `RR_HOST_KEY=... rr --connect`.
 - **The host's game ends without them.** `rrsrv --hosted` ends the game when the host leaves,
   goes quiet for 5 s, or has not come 30 s after it began, and tells everyone why
   (`ToClient::Goodbye` has a reason now). So a crash of `rr` leaves nothing running for long.
@@ -611,10 +620,13 @@ and `--max-players` (8 unless given), and passes them to an `rrsrv` it starts be
   fire and pair of bases. They go one at a time, oldest first, sent every 100 ms until the
   snapshot's `lobby_ack` reaches them. The server takes each number once, the next after the
   last, and no other. Each carries the lobby it was made in (`Session::generation`, counting
-  the times the phase has entered the lobby or the countdown), so a late one from another lobby
-  or countdown is refused, except a line of chat. A refused command is acknowledged and does
-  nothing.
-- **The session** (`Session`: generation, host, length, friendly fire, pair of bases) rides in
+  the new lobbies, countdowns and results screens), so a late one from another lobby or
+  countdown is refused, except a line of chat. An automatic countdown is not a new screen: it
+  keeps the lobby's generation, and so does the lobby it stops back to, so a ready made just
+  before it began still counts and a quick un-ready is not refused. A refused command is
+  acknowledged and does nothing.
+- **The session** (`Session`: generation, host, length, friendly fire, pair of bases, and
+  whether the countdown under way is automatic, which unlocks ready and side) rides in
   every snapshot, sent only when it changes, and each player's ready with them. Clients take
   friendly fire and the bases from it as each snapshot arrives. The setup carries every pair of
   bases with its name, so an `Accept` for a level with many is sent in parts.

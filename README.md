@@ -177,9 +177,10 @@ rr --connect HOST:27960 --side blue --name "[RAINBOW] Pie4Foo" --first-person --
 
 `rr --host` starts a Team Survival server and joins it as the host. Between rounds everyone
 waits in the lobby, laid out after the original's session screen. Players pick a side and say
-ready there, and the host sets the round length, friendly fire and the bases, and starts each
-round. Closing the host's window ends the game. A dedicated server, `rrsrv --level
-citystreet_large --teams --rounds`, starts each round by itself instead.
+ready there, and the host sets the round length, friendly fire and the bases. A round starts
+when everyone is ready, or when the host starts it. Closing the host's window ends the game. A
+dedicated server, `rrsrv --level citystreet_large --teams --rounds`, starts each round when
+everyone is ready.
 
 - `--teams` puts players on two sides, Blue and Gold, starting from a pair of the level's bases
   (`--base-pair N`, or one the seed picks). `--side blue|gold` on `rr` and `rrbot` asks for a

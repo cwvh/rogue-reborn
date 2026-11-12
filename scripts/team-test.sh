@@ -7,10 +7,11 @@
 #                        [--base-pair N] [--seed N] [--port PORT] [--no-window | --host]
 #                        [-- options for rr...]
 #
-# LEVEL is a level's name, citystreet_large unless given. The rounds start by themselves once
-# both sides have someone. Closing your window leaves the game running: press Enter to join
-# again (as a late joiner, if a round is under way), or Ctrl+C to stop. With --no-window only
-# the server and bots start, and you join yourself.
+# LEVEL defaults to citystreet_large. Rounds start when both sides have someone and everyone
+# is ready. Bots are always ready.
+# Closing your window leaves the game running. Press Enter to join again or Ctrl+C to stop.
+# You join as a late joiner if a round is under way.
+# With --no-window only the server and bots start. You join yourself.
 #
 # With --host your window starts the server (`rr --host`) and you are its host: you start each
 # round from the lobby, and closing the window ends the game.
