@@ -14,7 +14,7 @@ use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 use std::rc::Rc;
 use std::net::ToSocketAddrs;
-use rogue_reborn::{map, rsb, actor, combat, crp, demo, grenade, blastlight, concussion, recording, skeleton, sim, sound, weapon, ambience, glass};
+use rogue_reborn::{map, rsb, actor, combat, crp, demo, grenade, blastlight, concussion, recording, skeleton, sim, sound, weapon, ambience, glass, casings};
 use rogue_reborn::net::client::{Client, Seen, Status};
 use rogue_reborn::net::host::{HostedServer, STARTUP, new_key};
 use rogue_reborn::net::proto::LobbyCommand;
@@ -48,6 +48,12 @@ use crate::textures::{load_character_texture, ensure_texture};
 
 /// Soot marks a blast can leave
 const SCORCH_VARIANTS: usize = 4;
+
+/// Added to a terrorist's number so its casings are not taken for a player's
+const NPC_OWNERS: usize = 1000;
+const MOST_CASINGS_A_FRAME: u32 = 4;
+const SHELL_SOUND_GAP: f32 = 0.2;
+const SHELL_SOUND_GAIN: f32 = 0.5;
 
 /// Frames to skip before timing, while textures load
 const BENCH_WARMUP: u32 = 30;
@@ -652,6 +658,7 @@ fn main() {
     let held_draws: Vec<Option<WeaponDraw>> = characters.as_ref().map_or_else(Vec::new, |c| {
         c.weapons.iter().map(|(_, w)| load_model_draw(&w.model, w.muzzle, w.flash_scale)).collect()
     });
+    let held_ejectors: Vec<Option<casings::Ejector>> = characters.as_ref().map_or_else(Vec::new, |c| c.weapons.iter().map(|(_, w)| casings::Ejector::of(w)).collect());
 
     if let Some(p) = args.pos { camera.position = p; }
     if let Some(y) = args.yaw { camera.yaw = y; }
@@ -853,6 +860,11 @@ fn main() {
     let mut hit_marker_until = 0.0f32;
     let (mut player_flashes, mut npc_flashes) = (Flashes::default(), Flashes::default());
     let flash_spots: std::cell::RefCell<Vec<FlashSpot>> = Default::default();
+    let mut casings = casings::Casings::default();
+    let casing_pending: std::cell::RefCell<HashMap<usize, u32>> = Default::default();
+    let casing_spots: std::cell::RefCell<Vec<(usize, casings::Ejector, [f32; 16])>> = Default::default();
+    let mut shell_sound_at: HashMap<usize, f32> = HashMap::new();
+    let player_ejector = weapon_def.as_ref().and_then(casings::Ejector::of);
     let flash_rng = std::cell::Cell::new(0x9E37_79B9_7F4A_7C15u64);
     let flash_roll = || {
         let mut r = flash_rng.get();
@@ -884,6 +896,8 @@ fn main() {
             // The first movement after it does not turn the view
             last_cursor_pos = None;
             window.set_cursor_mode(if showing { CursorMode::Normal } else { CursorMode::Disabled });
+            casings.clear();
+            casing_pending.borrow_mut().clear();
         }
 
         for (_, event) in glfw::flush_messages(&events) {
@@ -1358,6 +1372,10 @@ fn main() {
                     if player == me {
                         hit_marker_until = if hit_character { game_time + 0.1 } else { 0.0 };
                     }
+                    // The gun's place is known only when it is drawn, so the casings wait for that
+                    if player_ejector.is_some() && !gate.showing() {
+                        *casing_pending.borrow_mut().entry(player).or_default() += 1;
+                    }
                     if let (Some((name, at)), Some(snd)) = (sim::shot_sound(&event, me), sound.as_mut()) {
                         snd.play_at(name, at, listener_of(&camera), 1.0);
                     }
@@ -1366,6 +1384,9 @@ fn main() {
                 sim::Event::CharacterShot { npc, .. } => {
                     if let Some(n) = sim.npcs.get_mut(npc) {
                         n.last_shot = game_time;
+                        if n.weapon.and_then(|w| held_ejectors.get(w)).is_some_and(Option::is_some) && !gate.showing() {
+                            *casing_pending.borrow_mut().entry(NPC_OWNERS + npc).or_default() += 1;
+                        }
                     }
                 }
                 sim::Event::BulletHit { point, normal, dir, surface, material, dist, seed } => {
@@ -1593,6 +1614,7 @@ fn main() {
         let npc_flash: Vec<bool> = sim.npcs.iter().enumerate().map(|(i, n)| npc_flashes.shows(i, n.last_shot, game_time)).collect();
 
         render_time = Instant::now();
+        let view_to_map: Option<casings::Mat4>;
         unsafe {
             glClearStencil(1);
             glClear(0x00004000 | 0x00000100 | 0x00000400); // GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT
@@ -1623,6 +1645,9 @@ fn main() {
             };
             apply_camera(&view);
             glScalef(1.0, 1.0, -1.0);
+            let mut world_view = [0f32; 16];
+            glGetFloatv(0x0BA6, world_view.as_mut_ptr()); // GL_MODELVIEW_MATRIX
+            view_to_map = casings::invert_affine(&world_view);
 
             // What the portals show from here: the rooms the player is in, and each room
             // seen through the previous one's portals (see visibility::plan)
@@ -1913,6 +1938,13 @@ fn main() {
             };
 
             let note_flash = |wd: &WeaponDraw| flash_spots.borrow_mut().push(FlashSpot::here(wd, flash_roll()));
+            let note_casings = |owner: usize, ejector: &casings::Ejector| {
+                if casing_pending.borrow().contains_key(&owner) {
+                    let mut matrix = [0f32; 16];
+                    glGetFloatv(0x0BA6, matrix.as_mut_ptr()); // GL_MODELVIEW_MATRIX
+                    casing_spots.borrow_mut().push((owner, *ejector, matrix));
+                }
+            };
 
             // Characters at the spawn points, posed for what they are doing
             if let Some(chars) = &sim.characters {
@@ -1976,6 +2008,9 @@ fn main() {
                         if !lying && npc_flash.get(i).copied().unwrap_or(false) {
                             note_flash(wd);
                         }
+                        if let (false, Some(e)) = (lying, spot.weapon.and_then(|w| held_ejectors.get(w)).and_then(Option::as_ref)) {
+                            note_casings(NPC_OWNERS + i, e);
+                        }
                         glPopMatrix();
                     }
                     glPopMatrix();
@@ -1994,7 +2029,7 @@ fn main() {
             // lasts.
             // `body` is what the drawing remembers of this body from frame to frame.
             let draw_body = |chars: &Characters, side: Option<sim::Side>, movement: Movement, frame: f32, feet: [f32; 3], yaw_deg: f32, scale: [f32; 3],
-                             face: Option<u32>, hand: Option<&Option<WeaponDraw>>, grenade: bool, flash: bool, reloading: Option<Reloading>,
+                             face: Option<u32>, hand: Option<&Option<WeaponDraw>>, grenade: bool, flash: bool, owner: usize, reloading: Option<Reloading>,
                              firing: bool, crouched: bool, hip_turn: f32, flinch: Option<(&rogue_reborn::motion::Motion, f32, f32)>,
                              peek: Option<rogue_reborn::sim::peek::Peek>, body: &mut BodyState| -> bool {
                 let Some(Rig { skeleton: skel, skin }) = &chars.rig else { return false };
@@ -2061,6 +2096,9 @@ fn main() {
                     if flash {
                         note_flash(wd);
                     }
+                    if let (false, Some(e)) = (grenade, player_ejector.as_ref()) {
+                        note_casings(owner, e);
+                    }
                     glPopMatrix();
                 }
                 glPopMatrix();
@@ -2104,7 +2142,7 @@ fn main() {
                         // Hidden, the animation still follows them
                         let flinch = flinch_at(chars, p, view_time);
                         let hip_turn = remote_anim.hip_turn(slot, yaw);
-                        if !visible || draw_body(chars, p.side, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, doing.reloading, doing.firing, doing.crouched, hip_turn, flinch, peek, bodies.entry(slot).or_default()) {
+                        if !visible || draw_body(chars, p.side, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, slot, doing.reloading, doing.firing, doing.crouched, hip_turn, flinch, peek, bodies.entry(slot).or_default()) {
                             continue;
                         }
                     } else {
@@ -2152,7 +2190,7 @@ fn main() {
                 let flash = player_flash[me];
                 if mine.respawn_at.is_none() {
                     let flinch = flinch_at(chars, mine, game_time);
-                    draw_body(chars, mine.side, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash, mine.reloading(game_time), sim.firing(me), mine.player.crouched, player_hip_turn, flinch, mine.peek, bodies.entry(me).or_default());
+                    draw_body(chars, mine.side, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash, me, mine.reloading(game_time), sim.firing(me), mine.player.crouched, player_hip_turn, flinch, mine.peek, bodies.entry(me).or_default());
                 }
             }
 
@@ -2395,6 +2433,50 @@ fn main() {
                 draw_fracture(&level.materials, &map_num, &mut textures, textured, f);
             }
 
+            if !gate.showing() {
+                let spots = casing_spots.take();
+                if let Some(to_map) = &view_to_map {
+                    for (owner, ejector, gun) in spots {
+                        let rounds = casing_pending.borrow().get(&owner).copied().unwrap_or(0);
+                        for _ in 0..rounds.min(MOST_CASINGS_A_FRAME) {
+                            casings.eject(&gun, to_map, &ejector, owner, 1.0);
+                        }
+                    }
+                }
+                for landing in casings.update(step_dt, &sim.world) {
+                    let weapon = if landing.owner >= NPC_OWNERS {
+                        sim.npcs.get(landing.owner - NPC_OWNERS).and_then(|n| n.weapon).and_then(|w| sim.characters.as_ref()?.weapons.get(w)).map(|(_, w)| w)
+                    } else {
+                        weapon_def.as_ref()
+                    };
+                    let last = shell_sound_at.entry(landing.owner).or_insert(f32::NEG_INFINITY);
+                    if let (Some(name), Some(snd)) = (weapon.and_then(|w| w.shell_sound.as_deref()), sound.as_mut()) {
+                        if game_time - *last >= SHELL_SOUND_GAP {
+                            *last = game_time;
+                            snd.play_at(name, landing.at, listener_of(&camera), SHELL_SOUND_GAIN);
+                        }
+                    }
+                }
+                glDisable(0x0DE1); // GL_TEXTURE_2D
+                glDisable(0x0BE2); // GL_BLEND
+                glDisable(0x0B44); // GL_CULL_FACE
+                glBegin(0x0007); // GL_QUADS
+                // In first person our own casings are only heard, not seen
+                let own_hidden = first_person && !third_person;
+                for c in casings.iter().filter(|c| shown(c.pos) && !(own_hidden && c.owner == me)) {
+                    for (corners, normal) in c.faces() {
+                        // Brass, darker on faces that look down
+                        let shade = 0.55 + 0.45 * (normal[1] * 0.5 + 0.5);
+                        glColor3f(0.80 * shade, 0.62 * shade, 0.25 * shade);
+                        for p in corners {
+                            glVertex3f(p[0], p[1], p[2]);
+                        }
+                    }
+                }
+                glEnd();
+                glColor4f(1.0, 1.0, 1.0, 1.0);
+            }
+
             if let Some(flash) = flash_draw.as_ref().filter(|_| textured) {
                 for spot in flash_spots.borrow().iter() {
                     draw_flash(flash, spot);
@@ -2477,7 +2559,11 @@ fn main() {
         // The held weapon in front of the camera, over the scene. A grenade is small, so it is held
         // further out in proportion, drawn back by the wind-up, and gone once it has been thrown.
         let held = if sim.players[me].equipped_grenade { grenade_draw.as_ref().filter(|_| sim.players[me].throw.is_none_or(|t| !t.thrown)) } else { weapon_draw.as_ref() };
-        if let (true, true, false, Some(wd)) = (args.viewmodel && sim.players[me].respawn_at.is_none(), first_person, third_person, held) {
+        // Without the view model (the default) the gun is not drawn.
+        // Its place still says where the casings leave, and only a firing gun needs it.
+        let casing_rounds = casing_pending.borrow().get(&me).copied().unwrap_or(0);
+        let gun_shows = args.viewmodel;
+        if let (true, true, false, Some(wd)) = ((gun_shows || (casing_rounds > 0 && !sim.players[me].equipped_grenade)) && sim.players[me].respawn_at.is_none(), first_person, third_person, held) {
             let l = wd.length;
             let [ox, oy, oz] = if sim.players[me].equipped_grenade {
                 let held_for = sim.players[me].charge_from.map_or(0.0, |from| ((game_time - from) / grenade::CHARGE_SECONDS).clamp(0.0, 1.0));
@@ -2494,11 +2580,16 @@ fn main() {
                 (p * std::f32::consts::PI).sin() * 0.8 * l
             });
             unsafe {
-                // Its own depth range, so the gun never sinks into a wall
-                glClear(0x00000100); // GL_DEPTH_BUFFER_BIT
-                glMatrixMode(0x1701); // GL_PROJECTION
-                glLoadIdentity();
-                glu_perspective(45.0, aspect, l * 0.05, l * 20.0); // narrower than the world, as in most shooters
+                if gun_shows {
+                    // Its own depth range, so the gun never sinks into a wall
+                    glClear(0x00000100); // GL_DEPTH_BUFFER_BIT
+                    glMatrixMode(0x1701); // GL_PROJECTION
+                    glLoadIdentity();
+                    glu_perspective(45.0, aspect, l * 0.05, l * 20.0); // narrower than the world, as in most shooters
+                } else {
+                    glMatrixMode(0x1700); // GL_MODELVIEW
+                    glPushMatrix();
+                }
                 glMatrixMode(0x1700); // GL_MODELVIEW
                 glLoadIdentity();
                 glTranslatef(ox * l, oy * l - dip, -oz * l + kick);
@@ -2508,13 +2599,31 @@ fn main() {
                 glRotatef(180.0, 0.0, 1.0, 0.0);
                 glRotatef(-90.0, 1.0, 0.0, 0.0);
                 glTranslatef(-wd.center[0], -wd.center[1], -wd.center[2]);
-                draw_weapon(wd, textured);
-                if let (true, Some(flash)) = (player_flash[me], flash_draw.as_ref().filter(|_| textured)) {
-                    draw_flash_here(flash, &FlashSpot::here(wd, flash_roll()));
+                if gun_shows {
+                    draw_weapon(wd, textured);
+                    if let (true, Some(flash)) = (player_flash[me], flash_draw.as_ref().filter(|_| textured)) {
+                        draw_flash_here(flash, &FlashSpot::here(wd, flash_roll()));
+                    }
+                }
+                // The casings leave the gun as it is placed here.
+                // Its view is narrower than the world's, so they start further from the middle.
+                if let (true, false, Some(e), Some(to_map)) = (casing_rounds > 0, gate.showing(), player_ejector.as_ref().filter(|_| !sim.players[me].equipped_grenade), &view_to_map) {
+                    let mut gun = [0f32; 16];
+                    glGetFloatv(0x0BA6, gun.as_mut_ptr()); // GL_MODELVIEW_MATRIX
+                    let widen = 30f32.to_radians().tan() / 22.5f32.to_radians().tan();
+                    for _ in 0..casing_rounds.min(MOST_CASINGS_A_FRAME) {
+                        casings.eject(&gun, to_map, e, me, widen);
+                    }
+                }
+                if !gun_shows {
+                    glPopMatrix();
                 }
                 glColor4f(1.0, 1.0, 1.0, 1.0);
             }
         }
+        // Rounds fired by guns not drawn this frame leave no casings
+        casing_pending.borrow_mut().clear();
+        casing_spots.borrow_mut().clear();
         // println!("render_time:{:?}", render_time.elapsed());
 
         // Draw simple debug text overlay (upper-right)

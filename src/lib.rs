@@ -15,6 +15,7 @@ pub mod sound;
 pub mod ambience;
 pub mod glass;
 pub mod impact;
+pub mod casings;
 pub mod visibility;
 pub mod coplanar;
 pub mod door;

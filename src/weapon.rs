@@ -4,6 +4,7 @@
 //! Only the fields worked out so far are read.
 //! The first two integer-only lines give the magazine size and reserve ammunition.
 //! The first `.wav` names the sound of a shot.
+//! The sixth sound is a spent casing landing on the floor.
 //! The three lines before the model give the kind of weapon, how it reloads and how it is held.
 //! The first quoted `.qob` names the model file.
 //! The first line of three numbers after it gives the muzzle offset in model space.
@@ -27,6 +28,8 @@ pub struct Weapon {
     pub muzzle: [f32; 3],
     /// The sound of one shot
     pub sound: Option<String>,
+    /// The sixth sound, a spent casing on the floor. None for a shotgun.
+    pub shell_sound: Option<String>,
     /// "long arm", "compact", "machine pistol", "sniper" or "pistol"
     pub class: String,
     /// How it reloads: "subgun", "shotgun", "pistol" or "bolt action"
@@ -75,7 +78,10 @@ pub fn parse(text: &str) -> Result<Weapon> {
     let model = lines[model_at].trim_matches('"').to_string();
     let word = |i: Option<usize>| i.and_then(|i| lines.get(i)).map_or_else(String::new, |l| l.trim_matches('"').to_ascii_lowercase());
     let (class, reload_class, hold) = (word(model_at.checked_sub(3)), word(model_at.checked_sub(2)), word(model_at.checked_sub(1)));
-    let sound = lines.iter().find(|l| l.to_ascii_lowercase().ends_with(".wav\"")).map(|l| l.trim_matches('"').to_string());
+    let is_wav = |l: &str| l.to_ascii_lowercase().ends_with(".wav\"");
+    let sound_at = lines.iter().position(|l| is_wav(l));
+    let sound = sound_at.map(|i| lines[i].trim_matches('"').to_string());
+    let shell_sound = sound_at.and_then(|i| lines.get(i + 5)).filter(|l| is_wav(l)).map(|l| l.trim_matches('"').to_string());
 
     let (muzzle_at, muzzle) = lines.iter().enumerate().skip(model_at + 1).find_map(|(i, l)| {
         let v: Vec<f32> = l.split_whitespace().filter_map(|n| n.parse().ok()).collect();
@@ -111,7 +117,7 @@ pub fn parse(text: &str) -> Result<Weapon> {
     }).flatten();
     let (pellets, pellet_spread) = shot.unwrap_or((1, 0.0));
 
-    Ok(Weapon { id, magazine, reserve, model, muzzle, sound, class, reload_class, hold, ammo, gun, pellets, pellet_spread, flash_scale })
+    Ok(Weapon { id, magazine, reserve, model, muzzle, sound, shell_sound, class, reload_class, hold, ammo, gun, pellets, pellet_spread, flash_scale })
 }
 
 #[cfg(test)]
@@ -130,6 +136,7 @@ mod tests {
         assert_eq!(w.model, "rsw_mp5k.qob");
         assert_eq!(w.muzzle, [0.0, -43.0, 13.0]);
         assert_eq!(w.sound.as_deref(), Some("C_sb5ks.wav"));
+        assert_eq!(w.shell_sound.as_deref(), Some("C_SBMSHL.WAV"));
         assert_eq!((w.class.as_str(), w.reload_class.as_str(), w.hold.as_str(), w.ammo.as_deref()), ("compact", "subgun", "compact", Some("9mmP(FMJ)")));
         assert_eq!((w.pellets, w.pellet_spread), (1, 0.0));
         assert_eq!(w.flash_scale, 0.09);
@@ -172,6 +179,14 @@ mod tests {
         for (file, scale) in [("pw_car15", 0.4), ("pw_mp5sd", 0.01), ("pw_shotgun", 0.5), ("tw_dragunov", 0.8)] {
             let Ok(w) = read(&Path::new("data/kit").join(format!("{file}.wpn"))) else { return };
             assert_eq!(w.flash_scale, scale, "{file}");
+        }
+    }
+
+    #[test]
+    fn shell_sounds_follow_the_weapon() {
+        for (file, shell) in [("pw_car15", Some("C_SBMSHL.WAV")), ("sw_9mm", Some("C_PSSHL.wav")), ("tw_dragunov", Some("C_psshl.wav")), ("pw_shotgun", None)] {
+            let Ok(w) = read(&Path::new("data/kit").join(format!("{file}.wpn"))) else { return };
+            assert_eq!(w.shell_sound.as_deref(), shell, "{file}");
         }
     }
 
