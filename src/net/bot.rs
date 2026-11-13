@@ -65,6 +65,10 @@ const MID_BURST: ((f32, f32), (f32, f32)) = ((0.15, 0.5), (0.2, 0.6));
 const TAP_BURST: ((f32, f32), (f32, f32)) = ((0.08, 0.2), (0.3, 0.7));
 /// Past CLOSE, a burst stops once the aim is this many times the start angle off
 const HOLD_ANGLE: f32 = 2.0;
+/// Degrees
+const RECOIL_CAP: f32 = 8.0;
+/// Degrees a second
+const RECOIL_WANDER: f32 = 6.0;
 /// How long it remembers where it last saw someone, and goes looking there
 const MEMORY: f32 = 4.0;
 /// Keep a local escape direction long enough to turn and move out of a tight corner.
@@ -116,19 +120,23 @@ pub struct Skill {
     pub field: f32,
     /// The least time between two of its grenades, in seconds
     pub grenade_every: f32,
+    /// Degrees a second while the trigger is held
+    pub recoil_climb: f32,
+    /// Decay rate a second once it lets go
+    pub recoil_recover: f32,
 }
 
 impl Skill {
     pub fn easy() -> Skill {
-        Skill { reaction: 0.8, aim_error: 6.0, turn_rate: 180.0, sight: 2500.0, field: 55.0, grenade_every: 40.0 }
+        Skill { reaction: 0.8, aim_error: 6.0, turn_rate: 180.0, sight: 2500.0, field: 55.0, grenade_every: 40.0, recoil_climb: 4.5, recoil_recover: 4.0 }
     }
 
     pub fn normal() -> Skill {
-        Skill { reaction: 0.45, aim_error: 3.0, turn_rate: 360.0, sight: 3500.0, field: 70.0, grenade_every: 20.0 }
+        Skill { reaction: 0.45, aim_error: 3.0, turn_rate: 360.0, sight: 3500.0, field: 70.0, grenade_every: 20.0, recoil_climb: 3.0, recoil_recover: 8.0 }
     }
 
     pub fn hard() -> Skill {
-        Skill { reaction: 0.25, aim_error: 1.2, turn_rate: 720.0, sight: 5000.0, field: 90.0, grenade_every: 12.0 }
+        Skill { reaction: 0.25, aim_error: 1.2, turn_rate: 720.0, sight: 5000.0, field: 90.0, grenade_every: 12.0, recoil_climb: 1.5, recoil_recover: 14.0 }
     }
 
     /// A skill by name: easy, normal or hard
@@ -187,6 +195,8 @@ pub struct Bot {
     /// How far off its aim is now, and where that is drifting to (degrees of yaw and pitch)
     error: (f32, f32),
     error_to: (f32, f32),
+    /// Upward pitch from recoil, in degrees
+    climb: f32,
     next_drift: f32,
     /// Firing in bursts: the trigger is held until the first, and not again before the second
     burst_until: f32,
@@ -232,6 +242,7 @@ impl Bot {
             last_seen: None,
             error: (0.0, 0.0),
             error_to: (0.0, 0.0),
+            climb: 0.0,
             next_drift: 0.0,
             burst_until: 0.0,
             pause_until: 0.0,
@@ -499,6 +510,7 @@ impl Bot {
             self.seen_since = self.time;
             let e = 4.0 * self.skill.aim_error.max(1.0);
             self.error = (self.between(-e, e), self.between(-e, e) * 0.5);
+            self.climb = 0.0;
             self.next_drift = self.time;
         }
         self.last_seen = Some((self.time, aim));
@@ -515,7 +527,7 @@ impl Bot {
         let (true_yaw, true_pitch) = (yaw_of(d), pitch_of(d));
         // A grenade lobbed a little high; otherwise the gun, aimed at the chest
         let lob = if self.throwing.is_some() { 8.0 + dist / 200.0 } else { 0.0 };
-        self.turn_toward(true_yaw + self.error.0, true_pitch + self.error.1 + lob, self.skill.turn_rate);
+        self.turn_toward(true_yaw + self.error.0, true_pitch + self.error.1 + self.climb + lob, self.skill.turn_rate);
 
         let p = &sim.players[me];
         let ready = self.time - self.seen_since >= self.skill.reaction;
@@ -538,6 +550,13 @@ impl Bot {
                     input.fire = true;
                 }
             }
+        }
+
+        if input.fire && self.time < self.burst_until {
+            self.climb = (self.climb + self.skill.recoil_climb * TICK).min(RECOIL_CAP);
+            self.error.0 += self.between(-1.0, 1.0) * RECOIL_WANDER * TICK;
+        } else {
+            self.climb *= (-self.skill.recoil_recover * TICK).exp();
         }
 
         // Sidestep, and keep a middling distance, but not off a ledge
@@ -893,6 +912,51 @@ mod tests {
         let mut input = Input::default();
         bot.fight(&sim, 0, eye, 1, 400.0, on, &mut input);
         assert!(!input.fire, "a new burst should not start 5 degrees off");
+    }
+
+    fn burst_pitch(skill: Skill, seconds: f32) -> (f32, f32) {
+        let mut sim = crate::net::setup::build_sim(&crate::net::lab::demo_setup()).unwrap();
+        sim.add_player([0.0, 0.0, 0.0]);
+        sim.add_player([0.0, 0.0, 400.0]);
+        sim.tick(&[Input::default(); 2], TICK);
+        let mut bot = Bot::new(Skill { reaction: 0.0, aim_error: 0.0, ..skill }, 7);
+        let eye = sim.eye(0);
+        let on = ahead(eye, 400.0);
+        bot.time = 1.0;
+        bot.target = Some(1);
+        bot.yaw = 0.0;
+        bot.next_drift = 1000.0;
+        let mut input = Input::default();
+        bot.fight(&sim, 0, eye, 1, 400.0, on, &mut input);
+        assert!(input.fire);
+        let start = bot.pitch;
+        bot.burst_until = bot.time + seconds;
+        bot.pause_until = bot.burst_until + 0.3;
+        let (burst_end, pause_end) = (bot.burst_until, bot.pause_until);
+        while bot.time < burst_end {
+            bot.time += TICK;
+            bot.fight(&sim, 0, eye, 1, 400.0, on, &mut Input::default());
+        }
+        let climbed = bot.pitch - start;
+        while bot.time < pause_end - TICK {
+            bot.time += TICK;
+            bot.fight(&sim, 0, eye, 1, 400.0, on, &mut Input::default());
+        }
+        (climbed, bot.pitch - start)
+    }
+
+    #[test]
+    fn a_long_burst_climbs_and_the_pause_brings_the_aim_back() {
+        let (climbed, settled) = burst_pitch(Skill::normal(), 1.5);
+        assert!((3.0..6.0).contains(&climbed), "climbed {climbed}");
+        assert!(settled.abs() < 1.0, "settled {settled}");
+    }
+
+    #[test]
+    fn a_hard_bot_climbs_less_than_an_easy_one() {
+        let (easy, _) = burst_pitch(Skill::easy(), 1.5);
+        let (hard, _) = burst_pitch(Skill::hard(), 1.5);
+        assert!(hard < easy, "hard {hard}, easy {easy}");
     }
 
     fn grenade_returns_to_gun(behavior: Behavior, lose_during: Option<bool>, reloading: bool) {
