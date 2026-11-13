@@ -273,6 +273,8 @@ pub struct PlayerSnap {
     pub kills: u32,
     pub deaths: u32,
     pub hp: f32,
+    pub wounds: u8,
+    pub leg_wounds: u8,
     pub respawn_at: Option<f32>,
     /// What the latest hit set the body playing (see `PlayerState::hit`), and when it began.
     /// A fall lasts until the next round, so the whole time is sent; it changes only with a hit.
@@ -415,6 +417,8 @@ impl Snapshot {
             kills: p.kills,
             deaths: p.deaths,
             hp: p.hp,
+            wounds: p.wounds,
+            leg_wounds: p.leg_wounds,
             respawn_at: p.respawn_at,
             hit: p.hit.map(|h| (h.motion, h.start)),
             equipped_grenade: p.equipped_grenade,
@@ -490,6 +494,7 @@ impl Snapshot {
             p.kills = s.kills;
             p.deaths = s.deaths;
             p.hp = s.hp;
+            (p.wounds, p.leg_wounds) = (s.wounds, s.leg_wounds);
             p.respawn_at = s.respawn_at;
             p.hit = s.hit.map(|(motion, start)| Struck { motion, start });
             p.equipped_grenade = s.equipped_grenade;
@@ -827,6 +832,8 @@ fn write_player(w: &mut Writer, p: &PlayerSnap) {
     write_throw(w, p.throw);
     w.u16(p.deaths as u16);
     w.f32(p.hp);
+    w.u8(p.wounds);
+    w.u8(p.leg_wounds);
     write_opt_f32(w, p.respawn_at);
     write_peek(w, p.peek);
     w.varint(p.joined);
@@ -857,7 +864,7 @@ fn read_player(r: &mut Reader, slot: u8) -> Result<PlayerSnap> {
     let flash_until = r.f32()?;
     let kills = r.u16()? as u32;
     let throw = read_throw(r)?;
-    let (deaths, hp, respawn_at) = (r.u16()? as u32, r.f32()?, r.opt_f32()?);
+    let (deaths, hp, wounds, leg_wounds, respawn_at) = (r.u16()? as u32, r.f32()?, r.u8()?, r.u8()?, r.opt_f32()?);
     let peek = read_peek(r)?;
     let joined = r.varint()?;
     let ready = r.bool()?;
@@ -870,7 +877,7 @@ fn read_player(r: &mut Reader, slot: u8) -> Result<PlayerSnap> {
     let aim = if on(5) { Some(read_aim(r)?) } else { None };
     Ok(PlayerSnap {
         slot, joined, side: side_from(flags >> 6)?, pos, vel_y, on_ground: on(0), crouched: on(4), look, controlled: on(1), ammo, reserve, reload_until,
-        flash_until, gun_trigger: on(2), kills, deaths, hp, respawn_at, hit, equipped_grenade: on(3), grenades_left, charge_from,
+        flash_until, gun_trigger: on(2), kills, deaths, hp, wounds, leg_wounds, respawn_at, hit, equipped_grenade: on(3), grenades_left, charge_from,
         throw, message, target_hp, peek, aim, ready, name, continued,
     })
 }
@@ -914,6 +921,7 @@ fn write_player_delta(w: &mut Writer, p: &PlayerSnap, base: &PlayerSnap) {
         p.ready != base.ready,
         p.name != base.name,
         p.continued != base.continued,
+        (p.wounds, p.leg_wounds) != (base.wounds, base.leg_wounds),
     ];
     w.varint(changed.iter().enumerate().fold(0, |acc, (n, &c)| acc | (c as u32) << n));
     if changed[0] { w.v3(p.pos); }
@@ -940,11 +948,12 @@ fn write_player_delta(w: &mut Writer, p: &PlayerSnap, base: &PlayerSnap) {
     if changed[21] { w.bool(p.ready); }
     if changed[22] { w.string(&p.name); }
     if changed[23] { w.bool(p.continued); }
+    if changed[24] { w.u8(p.wounds); w.u8(p.leg_wounds); }
 }
 
 /// The player `base` was, changed as the mask in the message says
 fn read_player_delta(r: &mut Reader, mask: u32, base: &PlayerSnap) -> Result<PlayerSnap> {
-    ensure!(mask < 1 << 24, "no such parts of a player as {mask:#x}");
+    ensure!(mask < 1 << 25, "no such parts of a player as {mask:#x}");
     let on = |n: u32| mask >> n & 1 != 0;
     let mut p = base.clone();
     if on(0) { p.pos = r.v3()?; }
@@ -976,6 +985,7 @@ fn read_player_delta(r: &mut Reader, mask: u32, base: &PlayerSnap) -> Result<Pla
     if on(21) { p.ready = r.bool()?; }
     if on(22) { p.name = r.string()?; }
     if on(23) { p.continued = r.bool()?; }
+    if on(24) { (p.wounds, p.leg_wounds) = (r.u8()?, r.u8()?); }
     Ok(p)
 }
 
@@ -1588,7 +1598,7 @@ mod tests {
     fn player(slot: u8) -> PlayerSnap {
         PlayerSnap {
             slot, joined: 300 + slot as u32, side: Some(Side::Gold), pos: [1.0, 2.0, 3.0], vel_y: -4.0, on_ground: true, crouched: true, look: (123, 65000), controlled: true,
-            ammo: 12, reserve: 400, reload_until: Some(3.5), flash_until: 1.25, gun_trigger: true, kills: 3, deaths: 1, hp: 62.5,
+            ammo: 12, reserve: 400, reload_until: Some(3.5), flash_until: 1.25, gun_trigger: true, kills: 3, deaths: 1, hp: 62.5, wounds: 4, leg_wounds: 2,
             respawn_at: Some(20.0),
             hit: Some(("thiu_la", 14.25)),
             equipped_grenade: true, grenades_left: 2, charge_from: None,
@@ -1759,7 +1769,7 @@ mod tests {
     fn a_snapshot_too_big_for_a_datagram_comes_through_in_parts() {
         // A full game in full, with a hunt's worth of terrorists and a level of doors
         let mut snap = crowded(40);
-        snap.doors = (0..150).map(|i| (i as f32 / 150.0, i % 2 == 0)).collect();
+        snap.doors = (0..140).map(|i| (i as f32 / 140.0, i % 2 == 0)).collect();
         let (bytes, sent) = ToClient::Snapshot(snap.clone()).encode();
         assert_eq!(sent, snap.events.len(), "the events fit in the last part");
         let datagrams = split(snap.tick, bytes.clone());
@@ -1892,6 +1902,8 @@ mod tests {
         next.players[1].charge_from = Some(2.0);
         next.players[1].hp = 0.0;
         next.players[1].respawn_at = None;
+        next.players[1].wounds = 5;
+        next.players[1].leg_wounds = 3;
         next.players[0].deaths = 2;
         next.players[0].hit = None;
         next.players[1].hit = Some(("thwu_ll", 14.9));

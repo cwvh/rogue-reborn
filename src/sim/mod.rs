@@ -29,7 +29,7 @@ use crate::util::{dist3, mul3, next_rng, unit3};
 use crate::visibility::Visibility;
 
 use characters::{Characters, Npc};
-use movement::{Reloading, crouched_speed, forward, ground_speed, right};
+use movement::{Reloading, forward, right};
 
 type V3 = [f32; 3];
 
@@ -104,6 +104,7 @@ const ANIM_PACE: f32 = 1.5;
 struct Seen {
     feet: V3,
     crouched: bool,
+    limp: bool,
     /// How far a peek leaned them (see `Sim::peek_offset`)
     lean: V3,
     /// Which way they faced, as a camera's yaw in degrees
@@ -506,6 +507,10 @@ pub struct PlayerState {
 
     // Health, when players can hurt each other (see `Sim::pvp`)
     pub hp: f32,
+    /// Counts surviving bullet wounds and the subset that hit a leg.
+    /// Respawning or starting a new round clears both counts.
+    pub wounds: u8,
+    pub leg_wounds: u8,
     /// When a dead player comes back, or none if they are alive
     pub respawn_at: Option<f32>,
     pub deaths: u32,
@@ -699,6 +704,8 @@ impl Sim {
             gun_trigger: false,
             kills: 0,
             hp: PLAYER_HP,
+            wounds: 0,
+            leg_wounds: 0,
             respawn_at: None,
             deaths: 0,
             hit: None,
@@ -1316,16 +1323,19 @@ impl Sim {
             reloading: p.reloading(now),
             firing: p.gun_trigger && p.ammo > 0,
             crouched,
+            wounds: p.wounds,
+            leg_wounds: p.leg_wounds,
         };
+        let limp = p.leg_wounds > 0;
         let flinch = p.hit.map(|h| (h.motion, (now - h.start) * 30.0));
         let peek = p.peek;
         let lean = self.peek_offset(slot);
         let player = self.characters.as_ref().map(|c| &c.player);
-        let frames = |m: movement::Movement| player.and_then(|pm| pm.get(m, crouched)).map_or(1, |m| m.frames.max(1)) as f32;
+        let frames = |m: movement::Movement| player.and_then(|pm| pm.get(m, crouched, limp)).map_or(1, |m| m.frames.max(1)) as f32;
         let (movement, frame) = self.animators.update(slot, pos, yaw, dt, doing, frames, self.speed_scale, ANIM_PACE);
         let hip_turn = self.animators.hip_turn(slot, yaw);
         let flinch = flinch.filter(|&(m, f)| f < self.characters.as_ref().map_or(0.0, |c| c.frames(m)));
-        Some(Seen { feet: pos, crouched, lean, yaw, movement, frame, hip_turn, reloading: doing.reloading, firing: doing.firing, flinch, peek, time: now })
+        Some(Seen { feet: pos, crouched, limp, lean, yaw, movement, frame, hip_turn, reloading: doing.reloading, firing: doing.firing, flinch, peek, time: now })
     }
 
     /// What a player's body was doing `back` ticks ago (between ticks, if it is not a whole
@@ -1384,7 +1394,8 @@ impl Sim {
             body.crouched = false;
         }
         let crouched = body.crouched;
-        let speed = |m| if crouched { crouched_speed(m) } else { ground_speed(m) };
+        let (wounds, leg_wounds) = (self.players[slot].wounds, self.players[slot].leg_wounds);
+        let speed = |m| movement::pace(m, crouched, wounds, leg_wounds);
         let alive = self.players[slot].respawn_at.is_none();
         // The body moved to the side as far as the head goes has to be clear of the walls
         let (body, side) = (self.players[slot].player, right(input.look().0));
@@ -1977,7 +1988,7 @@ impl Sim {
     fn seen_now(&self, slot: usize) -> Option<Seen> {
         let p = &self.players[slot];
         (p.active && p.respawn_at.is_none()).then(|| Seen {
-            feet: p.player.pos, crouched: p.player.crouched, lean: self.peek_offset(slot), yaw: dequantize(p.look.0),
+            feet: p.player.pos, crouched: p.player.crouched, limp: p.leg_wounds > 0, lean: self.peek_offset(slot), yaw: dequantize(p.look.0),
             movement: movement::Movement::Idle, frame: 0.0, hip_turn: 0.0, reloading: p.reloading(self.time),
             firing: p.gun_trigger && p.ammo > 0, flinch: None, peek: p.peek, time: self.time,
         })
@@ -1998,7 +2009,7 @@ impl Sim {
         }
         let flinch = seen.flinch.and_then(|(m, f)| chars.motions.get(m).map(|m| (m, f)));
         let doing = crate::body::Doing {
-            movement: seen.movement, frame: seen.frame, crouched: seen.crouched, reloading: seen.reloading, firing: seen.firing,
+            movement: seen.movement, frame: seen.frame, crouched: seen.crouched, limp: seen.limp, reloading: seen.reloading, firing: seen.firing,
             flinch, peek: seen.peek, hip_turn: seen.hip_turn, changing: None, shuffle: None, clock: seen.time,
         };
         let pose = crate::body::pose(&chars.player, &rig.skeleton, &doing)?;
@@ -2062,6 +2073,12 @@ impl Sim {
             (Wound::Shot(part, from), true) => combat::death_motion(part, from, roll >> 8, up),
             (Wound::Blast(from), true) => combat::blast_death_motion(from, up),
         };
+        if let (Wound::Shot(part, _), false, true) = (wound, killed, amount > 0.0 && !self.god) {
+            p.wounds = p.wounds.saturating_add(1);
+            if matches!(part, combat::BodyPart::LeftLeg | combat::BodyPart::RightLeg) {
+                p.leg_wounds = p.leg_wounds.saturating_add(1);
+            }
+        }
         p.hit = Some(Struck { motion, start: now });
         ev.push(Event::Log(format!("t={now:.2} player {victim} {} with {motion}", if killed { "falls" } else { "flinches" })));
         if !killed {
@@ -2184,6 +2201,7 @@ impl Sim {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use movement::{crouched_speed, ground_speed};
 
     /// Whether `killer` killed `victim` this way, whatever they were called
     fn killed(events: &[Event], killer: Option<usize>, victim: usize, cause: Cause) -> bool {
@@ -2215,6 +2233,71 @@ mod tests {
         let p = &sim.players[0];
         assert_eq!(p.hp, PLAYER_HP);
         assert!(p.respawn_at.is_none() && p.hit.is_some());
+    }
+
+    fn shot_at(sim: &mut Sim, part: combat::BodyPart) {
+        let wound = Wound::Shot(part, combat::Facing::Front);
+        sim.hurt_player(0, None, 30.0, [0.0, 50.0, -350.0], wound, Cause::Terrorist, &mut Vec::new());
+    }
+
+    #[test]
+    fn a_bullet_that_wounds_counts_and_one_in_a_leg_counts_as_a_leg_wound() {
+        let mut sim = demo();
+        shot_at(&mut sim, combat::BodyPart::Torso);
+        assert_eq!((sim.players[0].wounds, sim.players[0].leg_wounds), (1, 0));
+        shot_at(&mut sim, combat::BodyPart::RightLeg);
+        assert_eq!((sim.players[0].wounds, sim.players[0].leg_wounds), (2, 1));
+        let wound = Wound::Shot(combat::BodyPart::LeftLeg, combat::Facing::Front);
+        sim.hurt_player(0, None, PLAYER_HP, [0.0, 50.0, -350.0], wound, Cause::Terrorist, &mut Vec::new());
+        assert_eq!((sim.players[0].wounds, sim.players[0].leg_wounds), (2, 1));
+        let mut sim = demo();
+        let wound = Wound::Shot(combat::BodyPart::LeftLeg, combat::Facing::Front);
+        sim.hurt_player(0, None, 0.0, [0.0, 50.0, -350.0], wound, Cause::Terrorist, &mut Vec::new());
+        assert_eq!((sim.players[0].wounds, sim.players[0].leg_wounds), (0, 0));
+    }
+
+    #[test]
+    fn a_blast_does_not_make_a_player_limp() {
+        let mut sim = demo();
+        sim.hurt_player(0, None, 30.0, [0.0, 50.0, -350.0], Wound::Blast(combat::Facing::Front), Cause::Grenade, &mut Vec::new());
+        assert!(sim.players[0].hp < PLAYER_HP);
+        assert_eq!((sim.players[0].wounds, sim.players[0].leg_wounds), (0, 0));
+    }
+
+    #[test]
+    fn wounds_last_until_the_player_is_back() {
+        let mut sim = demo();
+        shot_at(&mut sim, combat::BodyPart::LeftLeg);
+        sim.respawn(0);
+        assert_eq!((sim.players[0].wounds, sim.players[0].leg_wounds), (0, 0));
+        shot_at(&mut sim, combat::BodyPart::LeftLeg);
+        sim.new_round(1);
+        assert_eq!((sim.players[0].wounds, sim.players[0].leg_wounds), (0, 0));
+    }
+
+    #[test]
+    fn a_leg_wound_slows_a_walk_to_the_originals_ratio_and_never_speeds_a_strafe_up() {
+        use movement::Movement::*;
+        assert!((movement::pace(Walk, false, 0, 1) - ground_speed(Walk) * 0.479).abs() < 1e-3);
+        assert!((movement::pace(Walk, false, 1, 1) - ground_speed(Walk) * 0.479 / 1.05).abs() < 1e-3);
+        assert!((movement::pace(Run, false, 0, 1) - ground_speed(Run) * 0.754).abs() < 1e-3);
+        for m in [WalkLeft, WalkRight, StrafeLeft, StrafeRight, Back] {
+            assert!(movement::pace(m, false, 0, 1) <= ground_speed(m), "{m:?}");
+        }
+        assert_eq!(movement::pace(WalkLeft, false, 0, 1), ground_speed(WalkLeft));
+        assert!((movement::pace(Run, true, 0, 1) - crouched_speed(Run) * 0.590).abs() < 1e-3);
+        assert_eq!(movement::pace(Walk, true, 0, 1), crouched_speed(Walk));
+        assert!((movement::pace(Run, false, 2, 0) - ground_speed(Run) / 1.1).abs() < 1e-3);
+        assert!((movement::pace(Run, false, 20, 0) - ground_speed(Run) / 1.4).abs() < 1e-3);
+
+        let mut sim = demo();
+        sim.players[0].leg_wounds = 1;
+        sim.players[0].wounds = 1;
+        let z = sim.players[0].player.pos[2];
+        run(&mut sim, &Input { forward: true, run: false, ..holding() }, 0.5);
+        let gone = (sim.players[0].player.pos[2] - z).abs();
+        let expected = ground_speed(movement::Movement::Walk) * 0.479 / 1.05 * 0.5;
+        assert!((gone - expected).abs() < 5.0, "{gone} against {expected}");
     }
 
     /// Run `seconds` of ticks with the same input, keeping every event

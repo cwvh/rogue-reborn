@@ -34,6 +34,12 @@ pub struct PlayerMotions {
     pub crouch_back: Option<Motion>,
     pub crouch_left: Option<Motion>,
     pub crouch_right: Option<Motion>,
+    pub limp_run: Option<Motion>,
+    pub limp_walk: Option<Motion>,
+    pub limp_back: Option<Motion>,
+    pub limp_left: Option<Motion>,
+    pub limp_right: Option<Motion>,
+    pub limp_crouch_run: Option<Motion>,
     /// Crouching down from standing, and standing up from crouched
     pub crouch_down: Option<Motion>,
     pub stand_up: Option<Motion>,
@@ -51,11 +57,22 @@ pub struct PlayerMotions {
 }
 
 impl PlayerMotions {
-    /// The motion for a movement, standing or crouched. Firing, reloading and throwing are
-    /// the same motions crouched: the body kneels and the arms play them.
-    pub fn get(&self, m: Movement, crouched: bool) -> Option<&Motion> {
+    /// Crouched reloads and throws layer the standing arm motions over kneeling legs.
+    pub fn get(&self, m: Movement, crouched: bool, limp: bool) -> Option<&Motion> {
         if let (Movement::Fire, true, Some(fire)) = (m, crouched, &self.crouch_fire) {
             return Some(fire);
+        }
+        let limping = limp.then(|| match (m, crouched) {
+            (Movement::Run, false) => &self.limp_run,
+            (Movement::Walk, false) => &self.limp_walk,
+            (Movement::Back, false) => &self.limp_back,
+            (Movement::StrafeLeft | Movement::WalkLeft, false) => &self.limp_left,
+            (Movement::StrafeRight | Movement::WalkRight, false) => &self.limp_right,
+            (Movement::Run, true) => &self.limp_crouch_run,
+            _ => &None,
+        });
+        if let Some(Some(motion)) = limping {
+            return Some(motion);
         }
         match (m, crouched) {
             (Movement::Idle, false) => &self.idle,
@@ -144,6 +161,12 @@ impl PlayerMotions {
             crouch_back: pick("crouch_back", "tmc_bk"),
             crouch_left: pick("crouch_left", "tmc_lf"),
             crouch_right: pick("crouch_right", "tmc_rt"),
+            limp_run: pick("limp_run", "rmu_wrn"),
+            limp_walk: pick("limp_walk", "tmu_wwk1"),
+            limp_back: pick("limp_back", "tmu_wbk1"),
+            limp_left: pick("limp_left", "tmu_wlf1"),
+            limp_right: pick("limp_right", "tmu_wrt1"),
+            limp_crouch_run: pick("limp_crouch_run", "rmc_wrn"),
             crouch_down: planted_at("crouch_down", "up_cr", true),
             stand_up: planted("stand_up", "cr_up"),
             crouch_reload: planted("crouch_reload", CROUCHED_RELOAD_MOTION),
@@ -182,6 +205,7 @@ pub struct Doing<'a> {
     /// How far through the movement's motion
     pub frame: f32,
     pub crouched: bool,
+    pub limp: bool,
     pub reloading: Option<Reloading>,
     /// The gun is firing, which the arms show whatever the legs do
     pub firing: bool,
@@ -212,7 +236,7 @@ pub struct Pose {
 
 /// Pose a body for what it is doing. None without the motion for it.
 pub fn pose(motions: &PlayerMotions, skel: &Skeleton, d: &Doing) -> Option<Pose> {
-    let Doing { movement, frame, crouched, reloading, firing, flinch, peek, hip_turn, changing, shuffle, clock } = *d;
+    let Doing { movement, frame, crouched, limp, reloading, firing, flinch, peek, hip_turn, changing, shuffle, clock } = *d;
     let peeking = peek.filter(|_| flinch.is_none()).and_then(|k| motions.peek(k.right, k.crouched).map(|m| (m, k.frame, k.right)));
     let moving = motions.moving(movement, peek, flinch.is_some());
     let reload = reloading.and_then(|r| motions.reload(r, crouched).map(|m| (m, reload_frame(r, crouched, m.frames.max(1) as f32))));
@@ -228,15 +252,15 @@ pub fn pose(motions: &PlayerMotions, skel: &Skeleton, d: &Doing) -> Option<Pose>
     let (mot, at) = match (whole, changing, shuffle, movement, reload) {
         (Some(f), ..) => f,
         _ if peeking.is_some() => peeking.map(|(m, f, _)| (m, f))?,
-        _ if layered.is_some() => (motions.get(movement, crouched)?, frame),
+        _ if layered.is_some() => (motions.get(movement, crouched, limp)?, frame),
         (None, Some(change), ..) => change,
         (None, None, Some(s), ..) => s,
         (None, None, None, Movement::Reload, Some(shown)) => shown,
         _ if kneeling => {
-            let knee = motions.get(Movement::Idle, true)?;
+            let knee = motions.get(Movement::Idle, true, false)?;
             (knee, looping(knee))
         }
-        _ => (motions.get(movement, crouched)?, frame),
+        _ => (motions.get(movement, crouched, limp)?, frame),
     };
     let (root, mut rots) = mot.sample(at.min(mot.frames.saturating_sub(1) as f32));
     // A reload keeps the arms busy, so they fire only outside one, and a flinch the same
@@ -244,10 +268,10 @@ pub fn pose(motions: &PlayerMotions, skel: &Skeleton, d: &Doing) -> Option<Pose>
     // The legs come from the motion, and the upper body is layered over them.
     let shuffling = flinch.is_none() && peeking.is_none() && shuffle.is_some();
     if whole.is_none() && peeking.is_none() && (moving || arms_only || shuffling) {
-        let fire = motions.get(Movement::Fire, crouched).filter(|_| aiming).map(|m| (m, looping(m)));
-        let throw = motions.get(Movement::Throw, crouched).filter(|_| (arms_only || shuffling) && movement == Movement::Throw).map(|m| (m, at));
+        let fire = motions.get(Movement::Fire, crouched, false).filter(|_| aiming).map(|m| (m, looping(m)));
+        let throw = motions.get(Movement::Throw, crouched, false).filter(|_| (arms_only || shuffling) && movement == Movement::Throw).map(|m| (m, at));
         let flinched = layered.map(|(m, f)| (m, f.min(m.frames.saturating_sub(1) as f32)));
-        let upper = flinched.or(reload).or(fire).or(throw).or_else(|| motions.get(Movement::Idle, crouched).map(|hold| (hold, 0.0)));
+        let upper = flinched.or(reload).or(fire).or(throw).or_else(|| motions.get(Movement::Idle, crouched, false).map(|hold| (hold, 0.0)));
         if let Some((upper, upper_at)) = upper {
             let (_, hold_rots) = upper.sample(upper_at);
             // The hips of a crouched move pitch well forward of the kneeling hold's. Crouched,
@@ -271,8 +295,8 @@ pub fn pose(motions: &PlayerMotions, skel: &Skeleton, d: &Doing) -> Option<Pose>
     // Leaning, the arms alone still reload, fire and throw, from the leaned chest, as the
     // original plays those on the arms
     if let (Some(_), None) = (peeking, flinch) {
-        let fire = motions.get(Movement::Fire, crouched).filter(|_| aiming).map(|m| (m, looping(m)));
-        let throw = motions.get(Movement::Throw, crouched).filter(|_| movement == Movement::Throw).map(|m| (m, frame));
+        let fire = motions.get(Movement::Fire, crouched, false).filter(|_| aiming).map(|m| (m, looping(m)));
+        let throw = motions.get(Movement::Throw, crouched, false).filter(|_| movement == Movement::Throw).map(|m| (m, frame));
         if let Some((arms, arms_at)) = reload.or(fire).or(throw) {
             let (_, arm_rots) = arms.sample(arms_at);
             for b in skel.bones.iter().filter(|b| is_arm(&b.name)) {
@@ -304,7 +328,7 @@ mod tests {
     use std::path::Path;
 
     fn doing<'a>(movement: Movement, frame: f32, flinch: Option<(&'a Motion, f32)>) -> Doing<'a> {
-        Doing { movement, frame, crouched: false, reloading: None, firing: false, flinch, peek: None, hip_turn: 0.0, changing: None, shuffle: None, clock: 0.0 }
+        Doing { movement, frame, crouched: false, limp: false, reloading: None, firing: false, flinch, peek: None, hip_turn: 0.0, changing: None, shuffle: None, clock: 0.0 }
     }
 
     fn same(a: [f32; 4], b: [f32; 4]) -> bool {
@@ -314,7 +338,7 @@ mod tests {
     #[test]
     fn a_wound_flinches_the_upper_body_of_a_walking_player_and_the_whole_body_of_one_standing() {
         let Some(chars) = Characters::load(Path::new("data/character/team_hrt/blue_M_a.CRP"), "up_none_cyc") else { return };
-        let (Some(rig), Some(flinch), Some(walk)) = (chars.rig.as_ref(), chars.motions.get("thwu_bf"), chars.player.get(Movement::Walk, false)) else { return };
+        let (Some(rig), Some(flinch), Some(walk)) = (chars.rig.as_ref(), chars.motions.get("thwu_bf"), chars.player.get(Movement::Walk, false, false)) else { return };
         let skel = &rig.skeleton;
         let bone = |name: &str| skel.bones.iter().find(|b| b.name == name).unwrap().anim_index;
         let (frame, at) = (7.0, 12.0);
@@ -343,5 +367,28 @@ mod tests {
 
         let healthy = super::pose(&chars.player, skel, &doing(Movement::Walk, frame, None)).unwrap();
         assert_eq!(healthy.rotations[bone("LeftUpLeg")], walked[bone("LeftUpLeg")]);
+    }
+
+    #[test]
+    fn a_limping_player_walks_the_wounded_walk_with_a_flinch_over_it() {
+        let Some(chars) = Characters::load(Path::new("data/character/team_hrt/blue_M_a.CRP"), "up_none_cyc") else { return };
+        let (Some(rig), Some(flinch), Some(healthy), Some(limp)) = (
+            chars.rig.as_ref(), chars.motions.get("thwu_bf"), chars.player.get(Movement::Walk, false, false), chars.player.get(Movement::Walk, false, true),
+        ) else { return };
+        assert!(!std::ptr::eq(healthy, limp));
+        let skel = &rig.skeleton;
+        let leg = skel.bones.iter().find(|b| b.name == "LeftUpLeg").unwrap().anim_index;
+        let (frame, at) = (7.0, 12.0);
+        let limping = Doing { limp: true, ..doing(Movement::Walk, frame, None) };
+        let walking = super::pose(&chars.player, skel, &limping).unwrap();
+        assert_eq!(walking.rotations[leg], limp.sample(frame).1[leg]);
+        assert_ne!(walking.rotations[leg], healthy.sample(frame).1[leg]);
+        let (_, flinched) = flinch.sample(at);
+        let hit = super::pose(&chars.player, skel, &Doing { flinch: Some((flinch, at)), ..limping }).unwrap();
+        assert_eq!(hit.rotations[leg], walking.rotations[leg]);
+        let arm = skel.bones.iter().find(|b| b.name == "LeftUpArm").unwrap().anim_index;
+        assert_eq!(hit.rotations[arm], flinched[arm]);
+        assert!(std::ptr::eq(chars.player.get(Movement::Walk, true, true).unwrap(), chars.player.get(Movement::Walk, true, false).unwrap()));
+        assert!(!std::ptr::eq(chars.player.get(Movement::Run, true, true).unwrap(), chars.player.get(Movement::Run, true, false).unwrap()));
     }
 }

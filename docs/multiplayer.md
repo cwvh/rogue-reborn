@@ -42,9 +42,13 @@ A datagram holds 1200 bytes. A snapshot is sent as what changed since one the cl
 16 players all on the move and 16 characters, that is about 800 bytes, with room for events.
 
 - **Other players are sent less.** Only a client's own player carries what is on their screen:
-  fall speed, ammo, grenades left, throw charge and messages. Another player is about 55 bytes
-  in full, against 73. Their trigger is sent only while their gun fires. So no client is told
+  fall speed, ammo, grenades left, throw charge and messages. Another player is about 57 bytes
+  in full, against 75. Their trigger is sent only while their gun fires. So no client is told
   an enemy's ammo.
+- **Wounds are sent for every player**, as two counts: bullet wounds and those in a leg. They slow
+  a player's walking, and a leg wound makes them limp. Others need them to draw the limp, and a
+  client needs its own to predict its speed. A wound slows the player on the server a moment
+  before their screen knows, so the screen is moved a few units when the count arrives.
 - **A grenade is sent as where it is and how far it has turned**, 17 bytes. Only the server
   moves grenades and sets them off.
 - **A snapshot too big for a datagram goes in parts**, up to 16 (`proto::split`, `Parts`). This

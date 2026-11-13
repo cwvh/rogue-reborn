@@ -25,9 +25,11 @@ const DEATH_TOLD_LAN: f32 = 0.025;
 const SHOT_TOLD_FAR: f32 = 0.180;
 const DEATH_TOLD_FAR: f32 = 0.085;
 
-/// The server moving a player from where they predicted, a minute, and the furthest (units)
-/// (measured none in these fights, one of 6 units among 16 players)
-const FIXES_A_MINUTE: f32 = 0.5;
+/// Position corrections per minute and the largest correction in units.
+/// At 100 ms ping, measurements were about 1.5 per minute and 6 units.
+/// Wounds slow server movement before the client learns of them.
+/// Client prediction runs ahead during that delay.
+const FIXES_A_MINUTE: f32 = 2.0;
 const WORST_FIX: f32 = 50.0;
 
 /// Bytes a second for 16 players: the host's upload, and the most any client downloads

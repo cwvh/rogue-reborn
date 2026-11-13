@@ -21,6 +21,20 @@ pub enum Movement {
     Throw,
 }
 
+/// Measured with the planted-foot slip method described in `nominal_speed`.
+pub fn limp_nominal_speed(m: Movement, crouched: bool) -> f32 {
+    match (m, crouched) {
+        (Movement::Run, false) => 333.0,
+        (Movement::Run, true) => 158.0,
+        (_, true) => nominal_speed(m),
+        (Movement::Walk, false) => 102.0,
+        (Movement::Back, false) => 85.0,
+        (Movement::StrafeLeft | Movement::WalkLeft, false) => 103.0,
+        (Movement::StrafeRight | Movement::WalkRight, false) => 109.0,
+        _ => nominal_speed(m),
+    }
+}
+
 /// Ground speed (units per second) at which each animation plays at its own pace without
 /// the feet sliding. These are the speeds with the least slip of a planted foot, found with
 /// `SPEED=100 cargo run --release --example motion-info <motion>`. A planted foot is never
@@ -63,6 +77,46 @@ pub fn crouched_speed(m: Movement) -> f32 {
         Movement::StrafeLeft | Movement::StrafeRight | Movement::WalkLeft | Movement::WalkRight => 115.0,
         other => nominal_speed(other),
     }
+}
+
+/// Limp motions need a different reference speed to preserve foot timing.
+/// Wound slowdown is excluded so wounds also slow the animation as in the original game.
+pub fn animation_pace(m: Movement, crouched: bool, limp: bool) -> f32 {
+    let ground = if crouched { crouched_speed(m) } else { ground_speed(m) };
+    if !limp {
+        return ground;
+    }
+    // rmc_rn's least-slip speed from motion-info. Its feet slip more than most.
+    let healthy = if crouched && m == Movement::Run { 228.0 } else { nominal_speed(m) };
+    ground * limp_nominal_speed(m, crouched) / healthy
+}
+
+/// The original's wounded speed over its healthy speed for each movement.
+/// Its wounded walking strafes are faster, which we do not copy, so no ratio is above 1.
+pub fn limp_ratio(m: Movement, crouched: bool) -> f32 {
+    let ratio: f32 = match (m, crouched) {
+        (Movement::Run, false) => 0.754,
+        (Movement::Walk, false) => 0.479,
+        (Movement::Back, false) => 0.714,
+        (Movement::StrafeLeft, false) => 0.398,
+        (Movement::StrafeRight, false) => 0.462,
+        (Movement::WalkLeft, false) => 1.515,
+        (Movement::WalkRight, false) => 2.021,
+        (Movement::Run, true) => 0.590,
+        _ => 1.0,
+    };
+    ratio.min(1.0)
+}
+
+/// The original stretches every animation by 5% for each wound, up to 40%
+pub fn wound_slowdown(wounds: u8) -> f32 {
+    1.0 / (1.0 + 0.05 * wounds as f32).min(1.4)
+}
+
+pub fn pace(m: Movement, crouched: bool, wounds: u8, leg_wounds: u8) -> f32 {
+    let base = if crouched { crouched_speed(m) } else { ground_speed(m) };
+    let limp = if leg_wounds > 0 { limp_ratio(m, crouched) } else { 1.0 };
+    base * limp * wound_slowdown(wounds)
 }
 
 /// Pick the movement from the held keys
@@ -226,6 +280,22 @@ pub fn right(yaw: f32) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_animation_pace_keeps_the_feet_in_proportion_to_the_ground_for_limp_motions() {
+        use Movement::*;
+        for m in [Walk, Run, Back, StrafeLeft, StrafeRight, WalkLeft, WalkRight] {
+            assert_eq!(animation_pace(m, false, false), ground_speed(m), "{m:?}");
+            let want = ground_speed(m) * limp_nominal_speed(m, false) / nominal_speed(m);
+            assert!((animation_pace(m, false, true) - want).abs() < 1e-3, "{m:?}");
+        }
+        assert!((animation_pace(Walk, false, true) - 514.0 * 102.0 / 257.0).abs() < 1e-3);
+        for m in [Walk, Back, StrafeLeft, WalkRight] {
+            assert_eq!(animation_pace(m, true, true), crouched_speed(m), "{m:?}");
+        }
+        assert_ne!(animation_pace(Run, true, true), crouched_speed(Run));
+        assert_eq!(animation_pace(Run, true, false), crouched_speed(Run));
+    }
 
     #[test]
     fn a_reload_runs_through_its_motion_on_the_beats() {

@@ -30,7 +30,7 @@ use rogue_reborn::net::round::{Outcome, Phase, RoundState};
 use rogue_reborn::net::watch::{BEHIND, Pose, RISE, Watch, WatchContext, WatchMode, behind};
 use rogue_reborn::mission;
 use rogue_reborn::sim::characters::{Characters, Npc, Rig, place_npcs, place_terrorists};
-use rogue_reborn::sim::movement::{Movement, Reloading, crouched_speed, ground_speed, hip_turn, movement_from_keys};
+use rogue_reborn::sim::movement::{Movement, Reloading, animation_pace, hip_turn, movement_from_keys};
 use rogue_reborn::collision::{CollisionWorld, Params};
 use rogue_reborn::impact::{self, Surface};
 use crate::opengl::*;
@@ -1531,9 +1531,10 @@ fn main() {
             }
             player_hip_turn = hip_turn(shown.forward, shown.back, shown.left, shown.right);
             let crouched = sim.players[me].player.crouched;
-            let pace = if crouched { crouched_speed(movement) } else { ground_speed(movement) };
+            let limp = sim.players[me].leg_wounds > 0;
+            let pace = animation_pace(movement, crouched, limp);
             let rate = if matches!(movement, Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw) { 1.0 } else { (moved / (pace * args.speed_scale.unwrap_or(1.0))).clamp(0.5, 3.0) * args.anim_scale.unwrap_or(1.5) };
-            let frames = player_motions.get(movement, crouched).map_or(1, |m| m.frames.max(1)) as f32;
+            let frames = player_motions.get(movement, crouched, limp).map_or(1, |m| m.frames.max(1)) as f32;
             // A reload's frame follows its progress, and is picked where the body is drawn
             player_frame = if let (Movement::Throw, Some(th)) = (movement, sim.players[me].throw) {
                 ((game_time - th.start) / sim::THROW_SECONDS).clamp(0.0, 1.0) * (frames - 1.0)
@@ -2030,7 +2031,7 @@ fn main() {
             // `body` is what the drawing remembers of this body from frame to frame.
             let draw_body = |chars: &Characters, side: Option<sim::Side>, movement: Movement, frame: f32, feet: [f32; 3], yaw_deg: f32, scale: [f32; 3],
                              face: Option<u32>, hand: Option<&Option<WeaponDraw>>, grenade: bool, flash: bool, owner: usize, reloading: Option<Reloading>,
-                             firing: bool, crouched: bool, hip_turn: f32, flinch: Option<(&rogue_reborn::motion::Motion, f32, f32)>,
+                             firing: bool, crouched: bool, limp: bool, hip_turn: f32, flinch: Option<(&rogue_reborn::motion::Motion, f32, f32)>,
                              peek: Option<rogue_reborn::sim::peek::Peek>, body: &mut BodyState| -> bool {
                 let Some(Rig { skeleton: skel, skin }) = &chars.rig else { return false };
                 let moving = player_motions.moving(movement, peek, flinch.is_some());
@@ -2045,7 +2046,7 @@ fn main() {
                     .filter(|(m, f, _)| *f < m.frames.saturating_sub(1) as f32);
                 let turn = body.turn_hips(if moving { hip_turn } else { 0.0 }, game_time);
                 let doing = body::Doing {
-                    movement, frame, crouched, reloading, firing, flinch: flinch.map(|(m, f, _)| (m, f)), peek, hip_turn: turn,
+                    movement, frame, crouched, limp, reloading, firing, flinch: flinch.map(|(m, f, _)| (m, f)), peek, hip_turn: turn,
                     changing, shuffle: shuffle.map(|(m, f, _)| (m, f)), clock: game_time,
                 };
                 let Some(body::Pose { mut root, rotations: mut rots, aiming, peeking, shuffling }) = body::pose(&player_motions, skel, &doing) else { return false };
@@ -2133,8 +2134,11 @@ fn main() {
                             // The server sends others' trigger only while their gun has rounds
                             firing: p.gun_trigger,
                             crouched,
+                            wounds: p.wounds,
+                            leg_wounds: p.leg_wounds,
                         };
-                        let frames = |m: Movement| player_motions.get(m, doing.crouched).map_or(1, |m| m.frames.max(1)) as f32;
+                        let limp = p.leg_wounds > 0;
+                        let frames = |m: Movement| player_motions.get(m, doing.crouched, limp).map_or(1, |m| m.frames.max(1)) as f32;
                         let (movement, frame) = remote_anim.update(slot, pos, yaw, step_dt, doing, frames, args.speed_scale.unwrap_or(1.0), args.anim_scale.unwrap_or(1.5));
                         let scale = actors.get(slot % actors.len().max(1)).map_or([1.0; 3], |a| a.scale);
                         let hand = if p.equipped_grenade { p.throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
@@ -2142,7 +2146,7 @@ fn main() {
                         // Hidden, the animation still follows them
                         let flinch = flinch_at(chars, p, view_time);
                         let hip_turn = remote_anim.hip_turn(slot, yaw);
-                        if !visible || draw_body(chars, p.side, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, slot, doing.reloading, doing.firing, doing.crouched, hip_turn, flinch, peek, bodies.entry(slot).or_default()) {
+                        if !visible || draw_body(chars, p.side, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, slot, doing.reloading, doing.firing, doing.crouched, limp, hip_turn, flinch, peek, bodies.entry(slot).or_default()) {
                             continue;
                         }
                     } else {
@@ -2190,7 +2194,7 @@ fn main() {
                 let flash = player_flash[me];
                 if mine.respawn_at.is_none() {
                     let flinch = flinch_at(chars, mine, game_time);
-                    draw_body(chars, mine.side, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash, me, mine.reloading(game_time), sim.firing(me), mine.player.crouched, player_hip_turn, flinch, mine.peek, bodies.entry(me).or_default());
+                    draw_body(chars, mine.side, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash, me, mine.reloading(game_time), sim.firing(me), mine.player.crouched, mine.leg_wounds > 0, player_hip_turn, flinch, mine.peek, bodies.entry(me).or_default());
                 }
             }
 

@@ -351,7 +351,7 @@ impl Characters {
         }
         let doing = crate::body::Doing {
             movement: crate::sim::movement::Movement::Fire,
-            frame: 0.0, crouched: kneeling, reloading: None, firing: true, flinch: None, peek: None,
+            frame: 0.0, crouched: kneeling, limp: false, reloading: None, firing: true, flinch: None, peek: None,
             hip_turn: 0.0, changing: None, shuffle: None, clock: if firing { now } else { 0.0 },
         };
         let pose = crate::body::pose(arms, skeleton, &doing)?;
@@ -389,10 +389,10 @@ impl Characters {
         };
         // The motion loops, at the pace players' play at
         let arms = self.arms_of(npc);
-        let frames = arms.get(movement, false).map_or(1, |m| m.frames.max(1)) as f32;
+        let frames = arms.get(movement, false, false).map_or(1, |m| m.frames.max(1)) as f32;
         let doing = crate::body::Doing {
             movement,
-            frame: (now * 30.0 * super::ANIM_PACE * pace) % frames, crouched: false, reloading: None, firing: npc.aiming, flinch: None, peek: None,
+            frame: (now * 30.0 * super::ANIM_PACE * pace) % frames, crouched: false, limp: false, reloading: None, firing: npc.aiming, flinch: None, peek: None,
             hip_turn: 0.0, changing: None, shuffle: None, clock: 0.0,
         };
         let pose = crate::body::pose(arms, skeleton, &doing)?;

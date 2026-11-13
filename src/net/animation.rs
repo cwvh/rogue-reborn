@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::sim::movement::{Movement, Reloading, crouched_speed, forward, ground_speed, hip_turn, right};
+use crate::sim::movement::{Movement, Reloading, forward, hip_turn, pace as ground_pace, animation_pace, right};
 
 type V3 = [f32; 3];
 
@@ -29,6 +29,8 @@ pub struct Doing {
     pub firing: bool,
     /// Crouched, which moves at other paces
     pub crouched: bool,
+    pub wounds: u8,
+    pub leg_wounds: u8,
 }
 
 struct State {
@@ -71,7 +73,7 @@ impl Animators {
         }
         s.last = Some(pos);
 
-        let pace = |m: Movement| if doing.crouched { crouched_speed(m) } else { ground_speed(m) };
+        let pace = |m: Movement| ground_pace(m, doing.crouched, doing.wounds, doing.leg_wounds);
         let walking = locomotion(s.velocity, yaw, speed_scale, pace);
         let now = match (walking, doing) {
             (m, _) if m != Movement::Idle => m,
@@ -90,7 +92,7 @@ impl Animators {
             (Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw, _) => (s.frame + 30.0 * dt) % n,
             _ => {
                 let speed = s.velocity[0].hypot(s.velocity[1]) / speed_scale;
-                (s.frame + (speed / pace(now)).clamp(0.5, 3.0) * anim_pace * 30.0 * dt) % n
+                (s.frame + (speed / animation_pace(now, doing.crouched, doing.leg_wounds > 0)).clamp(0.5, 3.0) * anim_pace * 30.0 * dt) % n
             }
         };
         (now, s.frame)
@@ -145,6 +147,7 @@ fn locomotion(velocity: [f32; 2], yaw: f32, speed_scale: f32, pace: impl Fn(Move
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sim::movement::crouched_speed;
 
     const DT: f32 = 1.0 / 60.0;
 
@@ -227,6 +230,23 @@ mod tests {
         }
         // Standing, that pace would be a walk
         assert_eq!(seen, Movement::Run);
+    }
+
+    #[test]
+    fn a_limping_player_is_seen_to_run_at_the_slower_wounded_run() {
+        let f = forward(0.0, 0.0);
+        let limp = Doing { leg_wounds: 1, wounds: 1, ..Doing::default() };
+        let speed = crate::sim::movement::pace(Movement::Run, false, 1, 1);
+        let mut a = Animators::default();
+        let mut pos = [0.0; 3];
+        let mut seen = Movement::Idle;
+        for _ in 0..60 {
+            pos = [pos[0] + f[0] * speed * DT, 0.0, pos[2] - f[2] * speed * DT];
+            seen = a.update(0, pos, 0.0, DT, limp, |_| 30.0, 1.0, 1.5).0;
+        }
+        assert_eq!(seen, Movement::Run);
+        // Healthy, that pace would be a walk
+        assert_eq!(watch(0.0, f, speed, 1.0), Movement::Walk);
     }
 
     #[test]
