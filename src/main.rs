@@ -628,7 +628,8 @@ fn main() {
             s.npcs.iter().map(|n| n.actor.map(|a| a as usize)).collect(),
         ),
         // Characters at the spawn points
-        (None, Some(c), false, None) => place_npcs(&mission_spawns, own_spawn.as_slice(), &world, &c.model, &actors, &|i, p| {
+        // `--npcs` caps them in any level. 0 skips the terrorists and their walking grid.
+        (None, Some(c), false, None) => place_npcs(&mission_spawns[..args.npcs.unwrap_or(usize::MAX).min(mission_spawns.len())], own_spawn.as_slice(), &world, &c.model, &actors, &|i, p| {
             args.model_yaw.unwrap_or_else(|| match mission_spawns.first() {
                 // In the demo room everyone faces the player
                 Some(player) if args.demo => (player[0] - p[0]).atan2(player[2] - p[2]).to_degrees(),
