@@ -1990,6 +1990,9 @@ fn main() {
             let lit_at = |feet: [f32; 3], yaw: f32, scale: [f32; 3]| -> Option<CharacterLight> {
                 Some(standing_light(lighting.as_ref()?, &level, &sim.visibility, feet).local(feet, yaw, scale))
             };
+            // A flashing gun lights its shooter. With no falloff only the direction matters, so the
+            // light sits ahead of the chest, at gun height, in the character's own space.
+            let flashing = |lit: Option<CharacterLight>, on: bool| lit.map(|l| if on { l.with_muzzle([0.0, 100.0, 60.0]) } else { l });
             let tint = |lit: &Option<CharacterLight>| lit.as_ref().map_or([1.0; 3], |l| l.tint);
 
             let note_flash = |wd: &WeaponDraw| flash_spots.borrow_mut().push(FlashSpot::here(wd, flash_roll()));
@@ -2042,11 +2045,12 @@ fn main() {
                     let face = npc_actor[i].map(|a| face_textures[a]).and_then(|(main, blink)| {
                         if blinking { blink.or(main) } else { main }
                     });
-                    let lit = lit_at([spot.pos[0], y, spot.pos[2]], spot.yaw, spot.scale);
+                    let held = spot.weapon.and_then(|w| held_draws.get(w)).and_then(Option::as_ref);
+                    let glowing = npc_flash.get(i).copied().unwrap_or(false) && held.is_some_and(|w| w.flash_scale > 0.0) && !spot.health.is_dead();
+                    let lit = flashing(lit_at([spot.pos[0], y, spot.pos[2]], spot.yaw, spot.scale), glowing);
                     draw_character(model, arrays, verts, textures, face, textured, glow_on([spot.pos[0], y, spot.pos[2]]), lit.as_ref());
                     // Their weapon in the right hand, as the players hold theirs, or on the
                     // floor once they have dropped it dying
-                    let held = spot.weapon.and_then(|w| held_draws.get(w)).and_then(Option::as_ref);
                     if let (Some(bones), Some(wd), Some((hand, off))) = (&bones, held, &weapon_attach) {
                         glPushMatrix();
                         let lying = match chars.dropped_weapon(spot, game_time, *hand, off) {
@@ -2119,7 +2123,8 @@ fn main() {
                 // The body faces where the player looks (model forward is +Z)
                 glRotatef(yaw_deg, 0.0, 1.0, 0.0);
                 glScalef(scale[0], scale[1], scale[2]);
-                let lit = lit_at(feet, yaw_deg, scale);
+                let glowing = flash && hand.and_then(Option::as_ref).is_some_and(|w| w.flash_scale > 0.0);
+                let lit = flashing(lit_at(feet, yaw_deg, scale), glowing);
                 draw_character(model, arrays, &verts, textures, face, textured, glow_on(feet), lit.as_ref());
                 // What bullets hit (B): the players' model posed alike, whatever the uniform,
                 // outlined over it
@@ -2664,7 +2669,10 @@ fn main() {
                 glTranslatef(-wd.center[0], -wd.center[1], -wd.center[2]);
                 if gun_shows {
                     // Lit by the room the player stands in
-                    let light = lighting.as_ref().map_or([1.0; 3], |l| standing_light(l, &level, &sim.visibility, sim.players[me].player.pos).tint);
+                    let light = lighting.as_ref().map_or([1.0; 3], |l| {
+                        let lit = standing_light(l, &level, &sim.visibility, sim.players[me].player.pos);
+                        if player_flash[me] && wd.flash_scale > 0.0 { lit.flash_tint() } else { lit.tint }
+                    });
                     draw_weapon(wd, textured, light);
                     if let (true, Some(flash)) = (player_flash[me], flash_draw.as_ref().filter(|_| textured)) {
                         draw_flash_here(flash, &FlashSpot::here(wd, flash_roll()));

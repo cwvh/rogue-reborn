@@ -96,7 +96,7 @@ impl Lighting {
                 tint[k] += 0.5 * reach * l.diffuse[k];
             }
         }
-        CharacterLight { ambient, lights, tint: tint.map(|c| c.min(1.0)) }
+        CharacterLight { ambient, lights, tint: tint.map(|c| c.min(1.0)), muzzle: None }
     }
 }
 
@@ -107,6 +107,8 @@ pub struct CharacterLight {
     lights: Vec<Light>,
     /// One color for the whole character, for what is drawn without normals
     pub tint: [f32; 3],
+    /// A white light with no falloff, where a gun is flashing
+    muzzle: Option<[f32; 3]>,
 }
 
 impl CharacterLight {
@@ -123,7 +125,21 @@ impl CharacterLight {
             range: l.range / size,
             ..l.clone()
         }).collect();
-        CharacterLight { ambient: self.ambient, lights, tint: self.tint }
+        let muzzle = self.muzzle.map(|m| turn(sub(m, feet)).map(|v| v / size));
+        CharacterLight { ambient: self.ambient, lights, tint: self.tint, muzzle }
+    }
+
+    /// The same light with a muzzle flash at `point`
+    pub fn with_muzzle(mut self, point: [f32; 3]) -> CharacterLight {
+        self.muzzle = Some(point);
+        self.tint = self.flash_tint();
+        self
+    }
+
+    /// The gun's color while it flashes. It has no normals to light by angle, so it gets a flat
+    /// boost. The 0.5 is our guess, not the original's.
+    pub fn flash_tint(&self) -> [f32; 3] {
+        self.tint.map(|c| (c + 0.5).min(1.0))
     }
 
     fn at(&self, p: [f32; 3], n: [f32; 3]) -> [f32; 3] {
@@ -143,6 +159,10 @@ impl CharacterLight {
             for i in 0..3 {
                 color[i] += k * l.diffuse[i];
             }
+        }
+        if let Some(m) = self.muzzle {
+            let k = dot(unit(sub(m, p)), n).max(0.0);
+            color = color.map(|c| c + k);
         }
         color.map(|c| c.clamp(0.0, 1.0))
     }
@@ -275,5 +295,19 @@ mod tests {
         assert!(lit.lights.iter().all(|l| l.diffuse[0] == 1.0));
         // A dim level's ambient light is doubled
         assert_eq!(lit.ambient, [0.2; 3]);
+    }
+
+    #[test]
+    fn a_muzzle_light_adds_the_cosine_of_its_angle_and_clamps() {
+        let still = CharacterLight { ambient: [0.2; 3], lights: vec![], tint: [0.2; 3], muzzle: None };
+        let lit = still.clone().with_muzzle([0.0, 0.0, 10.0]);
+        let o = [0.0; 3];
+        assert_eq!(still.at(o, [0.0, 0.0, 1.0]), [0.2; 3]);
+        assert!((lit.at(o, [0.0, 0.0, 1.0])[0] - 1.0).abs() < 1e-6);
+        let slant = [0.6, 0.0, 0.8];
+        assert!((lit.at(o, slant)[1] - 1.0).abs() < 1e-6);
+        let dim = CharacterLight { ambient: [0.0; 3], ..lit.clone() };
+        assert!((dim.at(o, slant)[0] - 0.8).abs() < 1e-6);
+        assert_eq!(dim.at(o, [0.0, 0.0, -1.0]), [0.0; 3]);
     }
 }
