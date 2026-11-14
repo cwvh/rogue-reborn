@@ -8,6 +8,8 @@ pub enum Movement {
     Walk,
     Run,
     Back,
+    /// Backing up with the run key held (wk2_bk)
+    RunBack,
     /// Stepping to the side running (tms_l2 / tms_r2), and walking (tms_l1 / tms_r1), as the
     /// original picks them. Crouched there is the one pace.
     StrafeLeft,
@@ -22,13 +24,14 @@ pub enum Movement {
 }
 
 /// Ground speed (units per second) of each movement: the travel per frame in the original's
-/// motion times `MOTION_FPS`. Standing and healthy: tmu_wk2, tmu_rn, tmu_bk2, tms_l2/r2 and
-/// (walking) tms_l1/r1.
+/// motion times `MOTION_FPS`. Standing and healthy: tmu_wk2, tmu_rn, tmu_bk2, wk2_bk,
+/// tms_l2/r2 and (walking) tms_l1/r1.
 pub fn ground_speed(m: Movement) -> f32 {
     match m {
         Movement::Walk => 300.0,
         Movement::Run => 494.0,
         Movement::Back => 139.0,
+        Movement::RunBack => 296.0,
         Movement::StrafeLeft => 263.0,
         Movement::StrafeRight => 266.0,
         Movement::WalkLeft => 69.0,
@@ -43,7 +46,7 @@ pub fn crouched_speed(m: Movement) -> f32 {
     match m {
         Movement::Run => 360.0,
         Movement::Walk => 70.0,
-        Movement::Back => 45.0,
+        Movement::Back | Movement::RunBack => 45.0,
         Movement::StrafeLeft | Movement::WalkLeft => 41.0,
         Movement::StrafeRight | Movement::WalkRight => 55.0,
         other => ground_speed(other),
@@ -59,7 +62,7 @@ pub fn limp_speed(m: Movement, crouched: bool) -> f32 {
         (Movement::Run, true) => 213.0,
         (_, true) => crouched_speed(m),
         (Movement::Walk, false) => 202.0,
-        (Movement::Back, false) => 189.0,
+        (Movement::Back | Movement::RunBack, false) => 189.0,
         (Movement::StrafeLeft | Movement::WalkLeft, false) => 104.0,
         (Movement::StrafeRight | Movement::WalkRight, false) => 123.0,
         _ => ground_speed(m),
@@ -92,7 +95,7 @@ pub fn movement_from_keys(forward: bool, back: bool, left: bool, right: bool, ru
     if forward {
         if run { Movement::Run } else { Movement::Walk }
     } else if back {
-        Movement::Back
+        if run { Movement::RunBack } else { Movement::Back }
     } else if left && !right {
         if run { Movement::StrafeLeft } else { Movement::WalkLeft }
     } else if right && !left {
@@ -259,7 +262,7 @@ mod tests {
         };
         let near = |what: &str, got: f32, want: f32| assert!((got - want).abs() <= 1.0, "{what}: {got} for {want}");
         for (m, name, side) in [
-            (Walk, "tmu_wk2", false), (Run, "tmu_rn", false), (Back, "tmu_bk2", false),
+            (Walk, "tmu_wk2", false), (Run, "tmu_rn", false), (Back, "tmu_bk2", false), (RunBack, "wk2_bk", false),
             (StrafeLeft, "tms_l2", true), (StrafeRight, "tms_r2", true),
             (WalkLeft, "tms_l1", true), (WalkRight, "tms_r1", true),
         ] {
@@ -287,7 +290,7 @@ mod tests {
     #[test]
     fn the_animation_pace_is_the_speed_of_the_motion_drawn() {
         use Movement::*;
-        for m in [Walk, Run, Back, StrafeLeft, StrafeRight, WalkLeft, WalkRight] {
+        for m in [Walk, Run, Back, RunBack, StrafeLeft, StrafeRight, WalkLeft, WalkRight] {
             assert_eq!(animation_pace(m, false, false), ground_speed(m), "{m:?}");
             assert_eq!(animation_pace(m, false, true), limp_speed(m, false), "{m:?}");
             assert_eq!(animation_pace(m, true, false), crouched_speed(m), "{m:?}");

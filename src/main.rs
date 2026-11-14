@@ -1584,7 +1584,7 @@ fn main() {
                 step_phase = phase;
                 if walking && sim.players[me].player.on_ground {
                     if let Some(snd) = sound.as_mut() {
-                        snd.play(if movement == Movement::Run { "F_HRCON1.WAV" } else { "F_HWCON1.WAV" }, 1.0);
+                        snd.play(if matches!(movement, Movement::Run | Movement::RunBack) { "F_HRCON1.WAV" } else { "F_HWCON1.WAV" }, 1.0);
                     }
                 }
             }

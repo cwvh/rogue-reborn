@@ -1423,7 +1423,7 @@ impl Sim {
         let scale = self.speed_scale;
         let fwd_speed = scale * if w == s_ { 0.0 }
             else if w { speed(if run { movement::Movement::Run } else { movement::Movement::Walk }) }
-            else { -speed(movement::Movement::Back) };
+            else { -speed(if run { movement::Movement::RunBack } else { movement::Movement::Back }) };
         let side = |right: bool| speed(movement::movement_from_keys(false, false, !right, right, run));
         let side_speed = scale * if a == d { 0.0 } else if d { side(true) } else { -side(false) };
         // Forward or back with a side key, the original keeps the forward or back pace and turns
@@ -2281,7 +2281,7 @@ mod tests {
         assert_eq!(movement::pace(Walk, false, 0, 1), limp_speed(Walk, false));
         assert!((movement::pace(Walk, false, 1, 1) - limp_speed(Walk, false) / 1.05).abs() < 1e-3);
         assert_eq!(movement::pace(Run, false, 0, 1), limp_speed(Run, false));
-        for m in [WalkLeft, WalkRight, StrafeLeft, StrafeRight, Back] {
+        for m in [WalkLeft, WalkRight, StrafeLeft, StrafeRight, Back, RunBack] {
             assert!(movement::pace(m, false, 0, 1) <= ground_speed(m), "{m:?}");
         }
         assert_eq!(movement::pace(WalkLeft, false, 0, 1), ground_speed(WalkLeft));
@@ -2550,7 +2550,8 @@ mod tests {
         for (input, pace) in [
             (Input { forward: true, right: true, ..holding() }, ground_speed(movement::Movement::Run)),
             (Input { forward: true, left: true, run: false, ..holding() }, ground_speed(movement::Movement::Walk)),
-            (Input { back: true, right: true, ..holding() }, ground_speed(movement::Movement::Back)),
+            (Input { back: true, right: true, run: false, ..holding() }, ground_speed(movement::Movement::Back)),
+            (Input { back: true, right: true, ..holding() }, ground_speed(movement::Movement::RunBack)),
         ] {
             let mut sim = demo();
             let start = sim.players[0].player.pos;
@@ -2601,6 +2602,23 @@ mod tests {
         run(&mut sim, &holding(), 1.0);
         run(&mut sim, &Input { peek_right: true, ..holding() }, 1.0);
         assert!(sim.eye(0)[0] - eye[0] > 45.0, "{:?}", sim.eye(0));
+    }
+
+    #[test]
+    fn backing_up_with_run_goes_at_the_running_backpedal_unless_crouched_or_leg_wounded() {
+        let backing = |crouch: bool, leg_wounds: u8| {
+            let mut sim = demo();
+            sim.players[0].leg_wounds = leg_wounds;
+            let input = Input { back: true, crouch, ..holding() };
+            sim.tick(&[input], TICK);
+            let z = sim.players[0].player.pos[2];
+            run(&mut sim, &input, 0.25);
+            (sim.players[0].player.pos[2] - z).abs() / 0.25
+        };
+        for (crouch, leg_wounds, want) in [(false, 0, 296.0), (true, 0, 45.0), (false, 1, 189.0)] {
+            let got = backing(crouch, leg_wounds);
+            assert!((got - want).abs() < 10.0, "{got} for {want}");
+        }
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub struct PlayerMotions {
     pub walk: Option<Motion>,
     pub run: Option<Motion>,
     pub back: Option<Motion>,
+    pub run_back: Option<Motion>,
     pub left: Option<Motion>,
     pub right: Option<Motion>,
     /// Stepping to the side at a walk
@@ -65,7 +66,7 @@ impl PlayerMotions {
         let limping = limp.then(|| match (m, crouched) {
             (Movement::Run, false) => &self.limp_run,
             (Movement::Walk, false) => &self.limp_walk,
-            (Movement::Back, false) => &self.limp_back,
+            (Movement::Back | Movement::RunBack, false) => &self.limp_back,
             (Movement::StrafeLeft | Movement::WalkLeft, false) => &self.limp_left,
             (Movement::StrafeRight | Movement::WalkRight, false) => &self.limp_right,
             (Movement::Run, true) => &self.limp_crouch_run,
@@ -79,6 +80,7 @@ impl PlayerMotions {
             (Movement::Walk, false) => &self.walk,
             (Movement::Run, false) => &self.run,
             (Movement::Back, false) => &self.back,
+            (Movement::RunBack, false) => &self.run_back,
             (Movement::StrafeLeft, false) => &self.left,
             (Movement::StrafeRight, false) => &self.right,
             (Movement::WalkLeft, false) => &self.walk_left,
@@ -86,7 +88,7 @@ impl PlayerMotions {
             (Movement::Idle, true) => &self.crouch_idle,
             (Movement::Walk, true) => &self.crouch_walk,
             (Movement::Run, true) => &self.crouch_run,
-            (Movement::Back, true) => &self.crouch_back,
+            (Movement::Back | Movement::RunBack, true) => &self.crouch_back,
             (Movement::StrafeLeft | Movement::WalkLeft, true) => &self.crouch_left,
             (Movement::StrafeRight | Movement::WalkRight, true) => &self.crouch_right,
             (Movement::Fire, _) => &self.fire,
@@ -145,6 +147,7 @@ impl PlayerMotions {
             walk: pick("walk", "tmu_wk2"),
             run: pick("run", "tmu_rn"),
             back: pick("back", "tmu_bk2"),
+            run_back: pick("run_back", "wk2_bk"),
             left: pick("left", "tms_l2"),
             right: pick("right", "tms_r2"),
             walk_left: pick("walk_left", "tms_l1"),
@@ -184,7 +187,7 @@ impl PlayerMotions {
 
     pub fn moving(&self, movement: Movement, peek: Option<Peek>, flinch: bool) -> bool {
         let peeking = !flinch && peek.is_some_and(|k| self.peek(k.right, k.crouched).is_some());
-        !peeking && matches!(movement, Movement::Walk | Movement::Run | Movement::Back | Movement::StrafeLeft | Movement::StrafeRight | Movement::WalkLeft | Movement::WalkRight)
+        !peeking && matches!(movement, Movement::Walk | Movement::Run | Movement::Back | Movement::RunBack | Movement::StrafeLeft | Movement::StrafeRight | Movement::WalkLeft | Movement::WalkRight)
     }
 }
 

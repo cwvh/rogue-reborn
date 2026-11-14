@@ -102,7 +102,7 @@ impl Animators {
     /// How far a player's hips turn as they are seen to move, facing `yaw` (see
     /// `movement::hip_turn`): when walking or running forward or back, and to one side as well
     pub fn hip_turn(&self, slot: usize, yaw: f32) -> f32 {
-        let Some(s) = self.players.get(&slot).filter(|s| matches!(s.movement, Movement::Walk | Movement::Run | Movement::Back)) else {
+        let Some(s) = self.players.get(&slot).filter(|s| matches!(s.movement, Movement::Walk | Movement::Run | Movement::Back | Movement::RunBack)) else {
             return 0.0;
         };
         let (ahead, beside) = along(s.velocity, yaw);
@@ -128,7 +128,7 @@ fn locomotion(velocity: [f32; 2], yaw: f32, speed_scale: f32, pace: impl Fn(Move
     let (ahead, beside) = along(velocity, yaw);
     if ahead.abs() >= beside.abs() {
         if ahead < 0.0 {
-            Movement::Back
+            if speed > (pace(Movement::Back) + pace(Movement::RunBack)) / 2.0 { Movement::RunBack } else { Movement::Back }
         } else if speed > (pace(Movement::Walk) + pace(Movement::Run)) / 2.0 {
             Movement::Run
         } else {
@@ -198,6 +198,7 @@ mod tests {
             assert_eq!(watch(yaw, f, 300.0, 1.0), Movement::Walk, "yaw {yaw}");
             assert_eq!(watch(yaw, f, 494.0, 1.0), Movement::Run, "yaw {yaw}");
             assert_eq!(watch(yaw, back, 139.0, 1.0), Movement::Back, "yaw {yaw}");
+            assert_eq!(watch(yaw, back, 296.0, 1.0), Movement::RunBack, "yaw {yaw}");
             assert_eq!(watch(yaw, r, 264.0, 1.0), Movement::StrafeRight, "yaw {yaw}");
             assert_eq!(watch(yaw, r.map(|c| -c), 264.0, 1.0), Movement::StrafeLeft, "yaw {yaw}");
             assert_eq!(watch(yaw, r, 69.0, 1.0), Movement::WalkRight, "yaw {yaw}");
