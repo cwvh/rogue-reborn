@@ -110,7 +110,7 @@ pub fn map() -> Map {
                 filename: "bunker_slab_01.bmp".to_string(),
                 name: "slab".to_string(),
                 opacity: 1.0,
-                emissive_strength: 0,
+                emissive_strength: 0.0,
                 address_mode: TextureAddressMode::Wrap,
                 ambient: white(),
                 diffuse: white(),

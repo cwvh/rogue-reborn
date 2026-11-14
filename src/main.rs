@@ -14,7 +14,7 @@ use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 use std::rc::Rc;
 use std::net::ToSocketAddrs;
-use rogue_reborn::{map, rsb, actor, combat, crp, demo, grenade, blastlight, concussion, recording, skeleton, sim, sound, weapon, ambience, glass, casings};
+use rogue_reborn::{map, dmp, rsb, actor, combat, crp, demo, grenade, blastlight, concussion, recording, skeleton, sim, sound, weapon, ambience, glass, casings};
 use rogue_reborn::net::client::{Client, Seen, Status};
 use rogue_reborn::net::host::{HostedServer, STARTUP, new_key};
 use rogue_reborn::net::proto::LobbyCommand;
@@ -39,6 +39,8 @@ use crate::camera::{Camera, listener_of, apply_camera};
 use rogue_reborn::util::unit3;
 use crate::player::{BodyKey, BodyState};
 use rogue_reborn::body::{self, PlayerMotions};
+use rogue_reborn::lighting::{CharacterLight, Lighting};
+use rogue_reborn::visibility::Visibility;
 use crate::draw::{WeaponDraw, CharacterArrays, draw_weapon, FlashDraw, FlashPart, FlashSpot, Flashes, draw_flash, draw_flash_here, draw_character, draw_glass, draw_fracture, build_mesh, Which, draw_plan, wipe_opening, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
@@ -78,8 +80,20 @@ fn sprite_blend(m: &map::Material, map_num: &str) -> Option<bool> {
     if !textures::is_tga(&m.filename) || m.two_sided {
         return None;
     }
-    let glows = m.emissive_strength != 0;
+    let glows = m.emissive_strength > 0.0;
     (glows || textures::has_soft_alpha(map_num, &m.filename)).then_some(glows)
+}
+
+/// The light of the room at `room_at`, weighed at `weigh_at`, in the level's space
+fn room_light(lighting: &Lighting, level: &map::Map, visibility: &Visibility, room_at: [f32; 3], weigh_at: [f32; 3]) -> CharacterLight {
+    let room = level.rooms.locate(room_at, None).and_then(|i| visibility.number_of(i));
+    lighting.character(room, weigh_at)
+}
+
+/// The light on a character standing at `feet`: its room is found just above the floor, and
+/// the light is weighed at the chest
+fn standing_light(lighting: &Lighting, level: &map::Map, visibility: &Visibility, feet: [f32; 3]) -> CharacterLight {
+    room_light(lighting, level, visibility, [feet[0], feet[1] + 10.0, feet[2]], [feet[0], feet[1] + 100.0, feet[2]])
 }
 
 /// What a player wears: their side's uniform in a team game, or else the players' model
@@ -329,6 +343,25 @@ fn main() {
     let map_path = map_buf.as_path();
     let map_num = extract_map_num(map_path).unwrap_or_else(|| String::from("m00"));
     let level = Rc::new(if args.demo { demo::map() } else { map::read(map_path).expect("Failed to load map") });
+    // The level's lights (its .dmp file) and the light baked into every corner of it. The
+    // built-in room has none, and --flat-light leaves them out.
+    let lighting = (!args.flat_light && !args.demo).then(|| {
+        let file = map_path.with_extension("dmp");
+        rogue_reborn::lighting::Lighting::new(if file.exists() {
+            dmp::read(&file).unwrap_or_else(|e| {
+                eprintln!("{e:#}");
+                dmp::Dmp::none()
+            })
+        } else {
+            dmp::Dmp::none()
+        })
+    });
+    let baked = lighting.as_ref().map(|l| {
+        let start = Instant::now();
+        let baked = l.bake(&level);
+        println!("lit the level in {:.1} ms", start.elapsed().as_secs_f64() * 1000.0);
+        baked
+    });
 
     // Build a flattened mesh from the MAP geometry
     let mesh = build_mesh(&level);
@@ -793,6 +826,8 @@ fn main() {
     let coplanar_layers: Vec<rogue_reborn::coplanar::Layers> = level.geometries.objects.iter().map(rogue_reborn::coplanar::layers).collect();
     let pane_objects: Vec<bool> = level.geometries.objects.iter().map(|o| sim.panes.iter().any(|g| g.name == o.name)).collect();
     let sprite_blends: Vec<Option<bool>> = level.materials.materials.iter().map(|m| sprite_blend(m, &map_num)).collect();
+    // Lamps and the like are drawn as lit as they are, whatever light falls on them
+    let glowing: Vec<bool> = level.materials.materials.iter().map(|m| m.emissive_strength > 0.0).collect();
     let all_objects: Vec<usize> = (0..level.geometries.objects.len()).collect();
     // Doors: each leaf is drawn where its door is. Space or Backspace opens and closes the
     // one being looked at.
@@ -1806,6 +1841,13 @@ fn main() {
                                 continue;
                             }
 
+                            // Each face corner's light, baked at load; soft sprites and lamps are not lit
+                            let shades = baked.as_ref().filter(|_| textured && !room_debug && blend.is_none() && !glowing.get(mat_index).copied().unwrap_or(false))
+                                .map(|b| &b.colors[object_index][od_index]);
+                            if shades.is_none() && textured && !room_debug {
+                                glColor3f(1.0, 1.0, 1.0);
+                            }
+
                             // Faces over others in their plane come after, each layer nearer
                             let layers = &coplanar_layers[object_index];
                             for layer in 0..=layers.max {
@@ -1836,8 +1878,12 @@ fn main() {
                                 let uv2 = &od.texture_vertices.uv_coords[t2 as usize];
 
                                 if textured {
+                                    let c = shades.map_or([[1.0; 3]; 3], |s| s[i]);
+                                    if shades.is_some() { glColor3f(c[0][0], c[0][1], c[0][2]); }
                                     glTexCoord2f(uv0.u, uv0.v); glVertex3f(p0.x, p0.y, p0.z);
+                                    if shades.is_some() { glColor3f(c[1][0], c[1][1], c[1][2]); }
                                     glTexCoord2f(uv1.u, uv1.v); glVertex3f(p1.x, p1.y, p1.z);
+                                    if shades.is_some() { glColor3f(c[2][0], c[2][1], c[2][2]); }
                                     glTexCoord2f(uv2.u, uv2.v); glVertex3f(p2.x, p2.y, p2.z);
                                 } else {
                                     glVertex3f(p0.x, p0.y, p0.z);
@@ -1939,6 +1985,13 @@ fn main() {
                 sum
             };
 
+            // The level's light on a character standing at `feet`, turned `yaw` and scaled, in its own
+            // space: its room's ambient light and strongest lights. None with --flat-light.
+            let lit_at = |feet: [f32; 3], yaw: f32, scale: [f32; 3]| -> Option<CharacterLight> {
+                Some(standing_light(lighting.as_ref()?, &level, &sim.visibility, feet).local(feet, yaw, scale))
+            };
+            let tint = |lit: &Option<CharacterLight>| lit.as_ref().map_or([1.0; 3], |l| l.tint);
+
             let note_flash = |wd: &WeaponDraw| flash_spots.borrow_mut().push(FlashSpot::here(wd, flash_roll()));
             let note_casings = |owner: usize, ejector: &casings::Ejector| {
                 if casing_pending.borrow().contains_key(&owner) {
@@ -1989,7 +2042,8 @@ fn main() {
                     let face = npc_actor[i].map(|a| face_textures[a]).and_then(|(main, blink)| {
                         if blinking { blink.or(main) } else { main }
                     });
-                    draw_character(model, arrays, verts, textures, face, textured, glow_on([spot.pos[0], y, spot.pos[2]]));
+                    let lit = lit_at([spot.pos[0], y, spot.pos[2]], spot.yaw, spot.scale);
+                    draw_character(model, arrays, verts, textures, face, textured, glow_on([spot.pos[0], y, spot.pos[2]]), lit.as_ref());
                     // Their weapon in the right hand, as the players hold theirs, or on the
                     // floor once they have dropped it dying
                     let held = spot.weapon.and_then(|w| held_draws.get(w)).and_then(Option::as_ref);
@@ -2006,7 +2060,7 @@ fn main() {
                                 false
                             }
                         };
-                        draw_weapon(wd, textured);
+                        draw_weapon(wd, textured, tint(&lit));
                         if !lying && npc_flash.get(i).copied().unwrap_or(false) {
                             note_flash(wd);
                         }
@@ -2065,7 +2119,8 @@ fn main() {
                 // The body faces where the player looks (model forward is +Z)
                 glRotatef(yaw_deg, 0.0, 1.0, 0.0);
                 glScalef(scale[0], scale[1], scale[2]);
-                draw_character(model, arrays, &verts, textures, face, textured, glow_on(feet));
+                let lit = lit_at(feet, yaw_deg, scale);
+                draw_character(model, arrays, &verts, textures, face, textured, glow_on(feet), lit.as_ref());
                 // What bullets hit (B): the players' model posed alike, whatever the uniform,
                 // outlined over it
                 if show_hitboxes {
@@ -2094,7 +2149,7 @@ fn main() {
                     if grenade {
                         glTranslatef(-wd.center[0], -wd.center[1], -wd.center[2]);
                     }
-                    draw_weapon(wd, textured);
+                    draw_weapon(wd, textured, tint(&lit));
                     if flash {
                         note_flash(wd);
                     }
@@ -2176,7 +2231,8 @@ fn main() {
                     glPushMatrix();
                     glTranslatef(ghost.pos[0], ghost.pos[1], ghost.pos[2]);
                     glRotatef(ghost.yaw, 0.0, 1.0, 0.0);
-                    draw_character(model, arrays, verts, textures, face, textured, glow_on(ghost.pos));
+                    let lit = lit_at(ghost.pos, ghost.yaw, ghost.scale);
+                    draw_character(model, arrays, verts, textures, face, textured, glow_on(ghost.pos), lit.as_ref());
                     glPopMatrix();
                 }
                 glColor4f(1.0, 1.0, 1.0, 1.0);
@@ -2238,7 +2294,8 @@ fn main() {
                     glTranslatef(body.pos[0], body.pos[1], body.pos[2]);
                     glRotatef(body.yaw, 0.0, 1.0, 0.0);
                     glScalef(body.scale[0], body.scale[1], body.scale[2]);
-                    draw_character(model, arrays, verts, textures, face, textured, glow_on(body.pos));
+                    let lit = lit_at(body.pos, body.yaw, body.scale);
+                    draw_character(model, arrays, verts, textures, face, textured, glow_on(body.pos), lit.as_ref());
                     glPopMatrix();
                 }
                 glColor4f(1.0, 1.0, 1.0, 1.0);
@@ -2256,7 +2313,8 @@ fn main() {
                     glRotatef(spin, 1.0, 0.3, 0.0);
                     // Model space (forward -Y, up +Z) turned so its length runs the way it spins
                     glTranslatef(-gd.center[0], -gd.center[1], -gd.center[2]);
-                    draw_weapon(gd, textured);
+                    let light = lighting.as_ref().map_or([1.0; 3], |l| room_light(l, &level, &sim.visibility, pos, pos).tint);
+                    draw_weapon(gd, textured, light);
                     glPopMatrix();
                 }
                 glColor4f(1.0, 1.0, 1.0, 1.0);
@@ -2605,7 +2663,9 @@ fn main() {
                 glRotatef(-90.0, 1.0, 0.0, 0.0);
                 glTranslatef(-wd.center[0], -wd.center[1], -wd.center[2]);
                 if gun_shows {
-                    draw_weapon(wd, textured);
+                    // Lit by the room the player stands in
+                    let light = lighting.as_ref().map_or([1.0; 3], |l| standing_light(l, &level, &sim.visibility, sim.players[me].player.pos).tint);
+                    draw_weapon(wd, textured, light);
                     if let (true, Some(flash)) = (player_flash[me], flash_draw.as_ref().filter(|_| textured)) {
                         draw_flash_here(flash, &FlashSpot::here(wd, flash_roll()));
                     }

@@ -31,6 +31,7 @@ unsafe extern "C" {
     pub fn glDisableClientState(array: u32);
     pub fn glVertexPointer(size: i32, kind: u32, stride: i32, pointer: *const std::ffi::c_void);
     pub fn glTexCoordPointer(size: i32, kind: u32, stride: i32, pointer: *const std::ffi::c_void);
+    pub fn glColorPointer(size: i32, kind: u32, stride: i32, pointer: *const std::ffi::c_void);
     pub fn glDrawArrays(mode: u32, first: i32, count: i32);
     pub fn glPointSize(size: f32);
     pub fn glVertex3f(x: f32, y: f32, z: f32);

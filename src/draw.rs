@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use rogue_reborn::{map, crp, glass, visibility};
+use rogue_reborn::lighting::CharacterLight;
 use crate::opengl::*;
 use crate::textures::{ensure_texture, is_tga};
 
@@ -26,12 +27,13 @@ pub struct WeaponDraw {
     pub flash_scale: f32,
 }
 
-pub fn draw_weapon(wd: &WeaponDraw, textured: bool) {
+/// `light` is the color the level's light gives the gun
+pub fn draw_weapon(wd: &WeaponDraw, textured: bool, light: [f32; 3]) {
     unsafe {
         if let (true, Some(tex)) = (textured, wd.texture) {
             glEnable(0x0DE1);
             glBindTexture(0x0DE1, tex);
-            glColor4f(1.0, 1.0, 1.0, 1.0);
+            glColor4f(light[0], light[1], light[2], 1.0);
         } else {
             glDisable(0x0DE1);
             glColor4f(0.7, 0.7, 0.75, 1.0);
@@ -148,6 +150,8 @@ pub struct CharacterArrays {
     first: Box<[i32]>,
     // Scratch space for the corners' positions, three per corner, refilled by each draw
     positions: RefCell<Vec<f32>>,
+    // The same for the corners' colors, when the character is lit
+    colors: RefCell<Vec<f32>>,
 }
 
 impl CharacterArrays {
@@ -167,17 +171,24 @@ impl CharacterArrays {
             uvs: uvs.into(),
             first: first.into(),
             positions: RefCell::new(Vec::new()),
+            colors: RefCell::new(Vec::new()),
         }
     }
 }
 
 // Draw one posed character: `verts` are its (possibly animated) vertex
-// positions and `face` replaces the HRT placeholder face texture.
-pub fn draw_character(c: &crp::Crp, arrays: &CharacterArrays, verts: &[[f32; 3]], part_textures: &[Option<u32>], face: Option<u32>, textured: bool, glow: [f32; 3]) {
+// positions and `face` replaces the HRT placeholder face texture. `light` is the level's
+// light on it, in the character's own space; with none it is drawn as it is.
+pub fn draw_character(c: &crp::Crp, arrays: &CharacterArrays, verts: &[[f32; 3]], part_textures: &[Option<u32>], face: Option<u32>, textured: bool, glow: [f32; 3], light: Option<&CharacterLight>) {
     // The posed position of every corner, gathered once for all the parts
     let mut positions = arrays.positions.borrow_mut();
     positions.clear();
     positions.extend(arrays.corner_vertex.iter().flat_map(|&i| verts[i as usize]));
+    let mut colors = arrays.colors.borrow_mut();
+    let lit = textured && light.is_some();
+    if let (true, Some(light)) = (lit, light) {
+        light.corner_colors(c, verts, &mut colors);
+    }
     unsafe {
     glEnableClientState(0x8074); // GL_VERTEX_ARRAY
     glEnableClientState(0x8078); // GL_TEXTURE_COORD_ARRAY
@@ -199,8 +210,13 @@ pub fn draw_character(c: &crp::Crp, arrays: &CharacterArrays, verts: &[[f32; 3]]
             glEnable(0x0DE1); // GL_TEXTURE_2D
             glBindTexture(0x0DE1, id);
             glColor4f(1.0, 1.0, 1.0, 1.0);
+            if lit {
+                glEnableClientState(0x8076); // GL_COLOR_ARRAY
+                glColorPointer(3, 0x1406, 0, colors.as_ptr().cast());
+            }
         } else {
             glDisable(0x0DE1);
+            glDisableClientState(0x8076);
             if textured && has_alpha {
                 // See-through part with no texture file: faint tinted pane
                 glColor4f(0.45, 0.55, 0.65, 0.2);
@@ -215,6 +231,7 @@ pub fn draw_character(c: &crp::Crp, arrays: &CharacterArrays, verts: &[[f32; 3]]
         if has_alpha { glDisable(0x0BE2); }
     }
     }
+    glDisableClientState(0x8076);
     // A blast's light on the body: the opaque parts again, added over themselves
     if textured && glow.iter().any(|&g| g > 0.003) {
         glEnable(0x0BE2); // GL_BLEND

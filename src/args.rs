@@ -45,6 +45,8 @@ pub struct Args {
     pub pitch: Option<f32>,
     pub textured: bool,
     pub portals: bool,
+    /// Draw everything at full brightness, as before the level's light files were read
+    pub flat_light: bool,
     /// Color each room's geometry and report the rooms the player is in
     pub rooms: bool,
     /// Write the F2 debug dump on the first frame and exit
@@ -225,6 +227,7 @@ pub fn parse_args() -> Args {
                 Some(d) => args.difficulty = d,
                 None => eprintln!("--difficulty expects easy, medium or hard"),
             },
+            "--flat-light" => args.flat_light = true,
             "--first-person" => args.first_person = true,
             "--god" => args.god = true,
             "--walk" => {

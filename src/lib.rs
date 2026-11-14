@@ -1,4 +1,6 @@
 pub mod map;
+pub mod dmp;
+pub mod lighting;
 pub mod rsb;
 pub mod cxp;
 pub mod collision;

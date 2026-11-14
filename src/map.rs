@@ -183,7 +183,7 @@ pub struct Material {
     pub filename: String,
     pub name: String,
     pub opacity: f32,
-    pub emissive_strength: u32,
+    pub emissive_strength: f32,
     pub address_mode: TextureAddressMode,
     pub ambient: Color4f,
     pub diffuse: Color4f,
@@ -200,7 +200,7 @@ impl Material {
         let filename = buf.read_cstring().context("texture filename")?;
 
         let opacity = buf.read_f32::<LE>().context("opacity")?;
-        let emissive_strength = buf.read_u32::<LE>()
+        let emissive_strength = buf.read_f32::<LE>()
             .context("emissive strength")?;
 
         let address_mode = TextureAddressMode::read(buf)?;
