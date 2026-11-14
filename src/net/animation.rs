@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use crate::motion::MOTION_FPS;
 use crate::sim::movement::{Movement, Reloading, forward, hip_turn, pace as ground_pace, animation_pace, right};
 
 type V3 = [f32; 3];
@@ -89,10 +90,10 @@ impl Animators {
         let n = frames(now).max(1.0);
         s.frame = match (now, doing) {
             (Movement::Throw, Doing { throwing: Some(p), .. }) => p.clamp(0.0, 1.0) * (n - 1.0),
-            (Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw, _) => (s.frame + 30.0 * dt) % n,
+            (Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw, _) => (s.frame + MOTION_FPS * dt) % n,
             _ => {
                 let speed = s.velocity[0].hypot(s.velocity[1]) / speed_scale;
-                (s.frame + (speed / animation_pace(now, doing.crouched, doing.leg_wounds > 0)).clamp(0.5, 3.0) * anim_pace * 30.0 * dt) % n
+                (s.frame + (speed / animation_pace(now, doing.crouched, doing.leg_wounds > 0)).clamp(0.5, 3.0) * anim_pace * MOTION_FPS * dt) % n
             }
         };
         (now, s.frame)
@@ -194,13 +195,13 @@ mod tests {
         for yaw in [0.0, 90.0, 200.0] {
             let (f, r) = (forward(yaw, 0.0), right(yaw));
             let back = f.map(|c| -c);
-            assert_eq!(watch(yaw, f, 514.0, 1.0), Movement::Walk, "yaw {yaw}");
-            assert_eq!(watch(yaw, f, 735.0, 1.0), Movement::Run, "yaw {yaw}");
-            assert_eq!(watch(yaw, back, 378.0, 1.0), Movement::Back, "yaw {yaw}");
-            assert_eq!(watch(yaw, r, 348.0, 1.0), Movement::StrafeRight, "yaw {yaw}");
-            assert_eq!(watch(yaw, r.map(|c| -c), 348.0, 1.0), Movement::StrafeLeft, "yaw {yaw}");
-            assert_eq!(watch(yaw, r, 143.0, 1.0), Movement::WalkRight, "yaw {yaw}");
-            assert_eq!(watch(yaw, r.map(|c| -c), 143.0, 1.0), Movement::WalkLeft, "yaw {yaw}");
+            assert_eq!(watch(yaw, f, 300.0, 1.0), Movement::Walk, "yaw {yaw}");
+            assert_eq!(watch(yaw, f, 494.0, 1.0), Movement::Run, "yaw {yaw}");
+            assert_eq!(watch(yaw, back, 139.0, 1.0), Movement::Back, "yaw {yaw}");
+            assert_eq!(watch(yaw, r, 264.0, 1.0), Movement::StrafeRight, "yaw {yaw}");
+            assert_eq!(watch(yaw, r.map(|c| -c), 264.0, 1.0), Movement::StrafeLeft, "yaw {yaw}");
+            assert_eq!(watch(yaw, r, 69.0, 1.0), Movement::WalkRight, "yaw {yaw}");
+            assert_eq!(watch(yaw, r.map(|c| -c), 69.0, 1.0), Movement::WalkLeft, "yaw {yaw}");
             assert_eq!(watch(yaw, f, 0.0, 1.0), Movement::Idle, "yaw {yaw}");
         }
     }

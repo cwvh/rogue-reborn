@@ -6,7 +6,8 @@
 //! 304 bytes: `u32` bone count (18), the root bone's position as three
 //! `f32`s, and one rotation quaternion `[x, y, z, w]` per bone, indexed by
 //! animation index (see `skeleton`). After the key frames comes a
-//! length-prefixed motion name and a few floats that are not read.
+//! length-prefixed motion name and six floats: the root's travel per frame as three
+//! `f32`s, then three that are not read.
 
 use std::path::Path;
 
@@ -29,7 +30,12 @@ pub struct Motion {
     /// A key is stored every this many frames
     pub key_interval: u32,
     pub keys: Vec<Key>,
+    /// How far the root travels each frame (x, y, z), as the original moves a character
+    pub velocity: [f32; 3],
 }
+
+/// Motion frames per second, measured in the original
+pub const MOTION_FPS: f32 = 32.55;
 
 pub fn read(path: &Path) -> Result<Motion> {
     let data = std::fs::read(path)
@@ -68,14 +74,21 @@ pub fn parse(d: &[u8]) -> Result<Motion> {
 
     // Motion name after the keys
     let at = HEADER + key_count * KEY_SIZE;
-    let name = match u32_at(d, at) {
-        Ok(len) if (1..128).contains(&len) => d.get(at + 4..at + 4 + len as usize - 1)
-            .map(|b| String::from_utf8_lossy(b).into_owned())
-            .unwrap_or_default(),
-        _ => String::new(),
+    let (name, floats) = match u32_at(d, at) {
+        Ok(len) if (1..128).contains(&len) => (
+            d.get(at + 4..at + 4 + len as usize - 1)
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+                .unwrap_or_default(),
+            Some(at + 4 + len as usize),
+        ),
+        _ => (String::new(), None),
+    };
+    let velocity = match floats.map(|f| (f32_at(d, f), f32_at(d, f + 4), f32_at(d, f + 8))) {
+        Some((Ok(x), Ok(y), Ok(z))) => [x, y, z],
+        _ => [0.0; 3],
     };
 
-    Ok(Motion { name, frames, key_interval, keys })
+    Ok(Motion { name, frames, key_interval, keys, velocity })
 }
 
 impl Motion {

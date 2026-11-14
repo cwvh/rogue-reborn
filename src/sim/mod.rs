@@ -96,7 +96,7 @@ fn deflect(dir: V3, off: f32, round: f32) -> V3 {
 
 /// How players' bodies are animated as others see them: as fast against their feet as the
 /// viewer's default (its --anim-scale)
-const ANIM_PACE: f32 = 1.5;
+const ANIM_PACE: f32 = 1.0;
 
 /// What a living player's body was doing at the end of a tick, to shoot at it as the shooter
 /// saw it then
@@ -2201,7 +2201,7 @@ impl Sim {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use movement::{crouched_speed, ground_speed};
+    use movement::{crouched_speed, ground_speed, limp_speed};
 
     /// Whether `killer` killed `victim` this way, whatever they were called
     fn killed(events: &[Event], killer: Option<usize>, victim: usize, cause: Cause) -> bool {
@@ -2276,16 +2276,16 @@ mod tests {
     }
 
     #[test]
-    fn a_leg_wound_slows_a_walk_to_the_originals_ratio_and_never_speeds_a_strafe_up() {
+    fn a_leg_wound_slows_a_walk_to_the_wounded_motions_speed_and_never_speeds_a_strafe_up() {
         use movement::Movement::*;
-        assert!((movement::pace(Walk, false, 0, 1) - ground_speed(Walk) * 0.479).abs() < 1e-3);
-        assert!((movement::pace(Walk, false, 1, 1) - ground_speed(Walk) * 0.479 / 1.05).abs() < 1e-3);
-        assert!((movement::pace(Run, false, 0, 1) - ground_speed(Run) * 0.754).abs() < 1e-3);
+        assert_eq!(movement::pace(Walk, false, 0, 1), limp_speed(Walk, false));
+        assert!((movement::pace(Walk, false, 1, 1) - limp_speed(Walk, false) / 1.05).abs() < 1e-3);
+        assert_eq!(movement::pace(Run, false, 0, 1), limp_speed(Run, false));
         for m in [WalkLeft, WalkRight, StrafeLeft, StrafeRight, Back] {
             assert!(movement::pace(m, false, 0, 1) <= ground_speed(m), "{m:?}");
         }
         assert_eq!(movement::pace(WalkLeft, false, 0, 1), ground_speed(WalkLeft));
-        assert!((movement::pace(Run, true, 0, 1) - crouched_speed(Run) * 0.590).abs() < 1e-3);
+        assert_eq!(movement::pace(Run, true, 0, 1), limp_speed(Run, true));
         assert_eq!(movement::pace(Walk, true, 0, 1), crouched_speed(Walk));
         assert!((movement::pace(Run, false, 2, 0) - ground_speed(Run) / 1.1).abs() < 1e-3);
         assert!((movement::pace(Run, false, 20, 0) - ground_speed(Run) / 1.4).abs() < 1e-3);
@@ -2296,7 +2296,7 @@ mod tests {
         let z = sim.players[0].player.pos[2];
         run(&mut sim, &Input { forward: true, run: false, ..holding() }, 0.5);
         let gone = (sim.players[0].player.pos[2] - z).abs();
-        let expected = ground_speed(movement::Movement::Walk) * 0.479 / 1.05 * 0.5;
+        let expected = limp_speed(movement::Movement::Walk, false) / 1.05 * 0.5;
         assert!((gone - expected).abs() < 5.0, "{gone} against {expected}");
     }
 
@@ -2843,7 +2843,7 @@ mod tests {
         let strafe = |rewind: f32| {
             let mut sim = duel();
             let step = Input { right: true, ..holding() };
-            for _ in 0..12 {
+            for _ in 0..16 {
                 sim.tick(&[holding(), step], TICK);
             }
             assert!(sim.players[1].player.pos[0].abs() > 60.0, "the target has moved clear: {:?}", sim.players[1].player.pos);

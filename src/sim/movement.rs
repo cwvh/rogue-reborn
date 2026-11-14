@@ -21,102 +21,70 @@ pub enum Movement {
     Throw,
 }
 
-/// Measured with the planted-foot slip method described in `nominal_speed`.
-pub fn limp_nominal_speed(m: Movement, crouched: bool) -> f32 {
-    match (m, crouched) {
-        (Movement::Run, false) => 333.0,
-        (Movement::Run, true) => 158.0,
-        (_, true) => nominal_speed(m),
-        (Movement::Walk, false) => 102.0,
-        (Movement::Back, false) => 85.0,
-        (Movement::StrafeLeft | Movement::WalkLeft, false) => 103.0,
-        (Movement::StrafeRight | Movement::WalkRight, false) => 109.0,
-        _ => nominal_speed(m),
-    }
-}
-
-/// Ground speed (units per second) at which each animation plays at its own pace without
-/// the feet sliding. These are the speeds with the least slip of a planted foot, found with
-/// `SPEED=100 cargo run --release --example motion-info <motion>`. A planted foot is never
-/// perfectly still, so some slip is left.
-pub fn nominal_speed(m: Movement) -> f32 {
-    match m {
-        Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw => 1.0,
-        Movement::Walk => 257.0,
-        Movement::Run => 440.0,
-        Movement::Back => 126.0,
-        Movement::StrafeLeft => 139.0,
-        Movement::StrafeRight => 139.0,
-        // tms_l1 takes the same stride as tms_l2 in 34 frames instead of 14 (its feet give no
-        // clear least-slip speed)
-        Movement::WalkLeft | Movement::WalkRight => 57.0,
-    }
-}
-
-/// Ground speed the player actually moves at. Matches the game where known (tuned by the
-/// user with --speed-scale); otherwise the animation's own pace.
+/// Ground speed (units per second) of each movement: the travel per frame in the original's
+/// motion times `MOTION_FPS`. Standing and healthy: tmu_wk2, tmu_rn, tmu_bk2, tms_l2/r2 and
+/// (walking) tms_l1/r1.
 pub fn ground_speed(m: Movement) -> f32 {
     match m {
-        Movement::Run => 735.0,
-        Movement::Walk => 514.0,
-        Movement::Back => 378.0,
-        Movement::StrafeLeft | Movement::StrafeRight => 348.0,
-        // Not known; the running strafe slowed as its motion is to tms_l1's
-        Movement::WalkLeft | Movement::WalkRight => 143.0,
-        other => nominal_speed(other),
+        Movement::Walk => 300.0,
+        Movement::Run => 494.0,
+        Movement::Back => 139.0,
+        Movement::StrafeLeft => 263.0,
+        Movement::StrafeRight => 266.0,
+        Movement::WalkLeft => 69.0,
+        Movement::WalkRight => 61.0,
+        Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw => 1.0,
     }
 }
 
-/// Ground speed crouched. The original's are not known; these keep the feet of the crouched
-/// motions about as close to the ground's pace as the standing ones are.
+/// Crouched: rmc_rn, tmc_fd, tmc_bk and tmc_lf/rt. A crouched strafe has one motion a side,
+/// walking or running.
 pub fn crouched_speed(m: Movement) -> f32 {
     match m {
-        Movement::Run => 300.0,
-        Movement::Walk => 120.0,
-        Movement::Back => 90.0,
-        Movement::StrafeLeft | Movement::StrafeRight | Movement::WalkLeft | Movement::WalkRight => 115.0,
-        other => nominal_speed(other),
+        Movement::Run => 360.0,
+        Movement::Walk => 70.0,
+        Movement::Back => 45.0,
+        Movement::StrafeLeft | Movement::WalkLeft => 41.0,
+        Movement::StrafeRight | Movement::WalkRight => 55.0,
+        other => ground_speed(other),
     }
 }
 
-/// Limp motions need a different reference speed to preserve foot timing.
-/// Wound slowdown is excluded so wounds also slow the animation as in the original game.
+/// The speed of the original's wounded motion: rmu_wrn, tmu_wwk2, tmu_wbk2, tmu_wlf1/wrt1
+/// (walking or running) and, crouched, rmc_wrn. The wounded strafe is faster than a healthy
+/// walking strafe; `pace` keeps the slower one.
+pub fn limp_speed(m: Movement, crouched: bool) -> f32 {
+    match (m, crouched) {
+        (Movement::Run, false) => 373.0,
+        (Movement::Run, true) => 213.0,
+        (_, true) => crouched_speed(m),
+        (Movement::Walk, false) => 202.0,
+        (Movement::Back, false) => 189.0,
+        (Movement::StrafeLeft | Movement::WalkLeft, false) => 104.0,
+        (Movement::StrafeRight | Movement::WalkRight, false) => 123.0,
+        _ => ground_speed(m),
+    }
+}
+
+/// The ground speed at which a motion plays at its own pace, so the feet do not slide. The
+/// wound slowdown is left out, so wounds slow the animation too.
 pub fn animation_pace(m: Movement, crouched: bool, limp: bool) -> f32 {
-    let ground = if crouched { crouched_speed(m) } else { ground_speed(m) };
-    if !limp {
-        return ground;
+    match (limp, crouched) {
+        (true, _) => limp_speed(m, crouched),
+        (false, true) => crouched_speed(m),
+        (false, false) => ground_speed(m),
     }
-    // rmc_rn's least-slip speed from motion-info. Its feet slip more than most.
-    let healthy = if crouched && m == Movement::Run { 228.0 } else { nominal_speed(m) };
-    ground * limp_nominal_speed(m, crouched) / healthy
 }
 
-/// The original's wounded speed over its healthy speed for each movement.
-/// Its wounded walking strafes are faster, which we do not copy, so no ratio is above 1.
-pub fn limp_ratio(m: Movement, crouched: bool) -> f32 {
-    let ratio: f32 = match (m, crouched) {
-        (Movement::Run, false) => 0.754,
-        (Movement::Walk, false) => 0.479,
-        (Movement::Back, false) => 0.714,
-        (Movement::StrafeLeft, false) => 0.398,
-        (Movement::StrafeRight, false) => 0.462,
-        (Movement::WalkLeft, false) => 1.515,
-        (Movement::WalkRight, false) => 2.021,
-        (Movement::Run, true) => 0.590,
-        _ => 1.0,
-    };
-    ratio.min(1.0)
-}
-
-/// The original stretches every animation by 5% for each wound, up to 40%
+/// The original stretches every animation by 5% for each wound, up to 40% (0x5c78c0)
 pub fn wound_slowdown(wounds: u8) -> f32 {
     1.0 / (1.0 + 0.05 * wounds as f32).min(1.4)
 }
 
 pub fn pace(m: Movement, crouched: bool, wounds: u8, leg_wounds: u8) -> f32 {
     let base = if crouched { crouched_speed(m) } else { ground_speed(m) };
-    let limp = if leg_wounds > 0 { limp_ratio(m, crouched) } else { 1.0 };
-    base * limp * wound_slowdown(wounds)
+    let speed = if leg_wounds > 0 { limp_speed(m, crouched).min(base) } else { base };
+    speed * wound_slowdown(wounds)
 }
 
 /// Pick the movement from the held keys
@@ -282,19 +250,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_animation_pace_keeps_the_feet_in_proportion_to_the_ground_for_limp_motions() {
+    fn every_speed_is_its_motions_travel_per_frame_times_the_frame_rate() {
+        use Movement::*;
+        if !std::path::Path::new("data/motion").exists() { return; }
+        let speed = |name: &str, side: bool| {
+            let v = crate::motion::read(std::path::Path::new(&format!("data/motion/{name}.DAM"))).unwrap().velocity;
+            (if side { v[0] } else { v[2] }).abs() * crate::motion::MOTION_FPS
+        };
+        let near = |what: &str, got: f32, want: f32| assert!((got - want).abs() <= 1.0, "{what}: {got} for {want}");
+        for (m, name, side) in [
+            (Walk, "tmu_wk2", false), (Run, "tmu_rn", false), (Back, "tmu_bk2", false),
+            (StrafeLeft, "tms_l2", true), (StrafeRight, "tms_r2", true),
+            (WalkLeft, "tms_l1", true), (WalkRight, "tms_r1", true),
+        ] {
+            near(name, ground_speed(m), speed(name, side));
+        }
+        for (m, name, side) in [
+            (Walk, "tmc_fd", false), (Run, "rmc_rn", false), (Back, "tmc_bk", false),
+            (StrafeLeft, "tmc_lf", true), (StrafeRight, "tmc_rt", true),
+        ] {
+            near(name, crouched_speed(m), speed(name, side));
+        }
+        for (m, name, side) in [
+            (Walk, "tmu_wwk2", false), (Run, "rmu_wrn", false), (Back, "tmu_wbk2", false),
+            (StrafeLeft, "tmu_wlf1", true), (StrafeRight, "tmu_wrt1", true),
+            (WalkLeft, "tmu_wlf1", true), (WalkRight, "tmu_wrt1", true),
+        ] {
+            near(name, limp_speed(m, false), speed(name, side));
+        }
+        near("rmc_wrn", limp_speed(Run, true), speed("rmc_wrn", false));
+        near("rmu_wk2", crate::sim::terrorist::WALK_SPEED, speed("rmu_wk2", false));
+        near("rmu_wk3", crate::sim::terrorist::RUN_SPEED, speed("rmu_wk3", false));
+        near("rmu_wk1", crate::sim::terrorist::CREEP_SPEED, speed("rmu_wk1", false));
+    }
+
+    #[test]
+    fn the_animation_pace_is_the_speed_of_the_motion_drawn() {
         use Movement::*;
         for m in [Walk, Run, Back, StrafeLeft, StrafeRight, WalkLeft, WalkRight] {
             assert_eq!(animation_pace(m, false, false), ground_speed(m), "{m:?}");
-            let want = ground_speed(m) * limp_nominal_speed(m, false) / nominal_speed(m);
-            assert!((animation_pace(m, false, true) - want).abs() < 1e-3, "{m:?}");
+            assert_eq!(animation_pace(m, false, true), limp_speed(m, false), "{m:?}");
+            assert_eq!(animation_pace(m, true, false), crouched_speed(m), "{m:?}");
         }
-        assert!((animation_pace(Walk, false, true) - 514.0 * 102.0 / 257.0).abs() < 1e-3);
         for m in [Walk, Back, StrafeLeft, WalkRight] {
             assert_eq!(animation_pace(m, true, true), crouched_speed(m), "{m:?}");
         }
-        assert_ne!(animation_pace(Run, true, true), crouched_speed(Run));
-        assert_eq!(animation_pace(Run, true, false), crouched_speed(Run));
+        assert_eq!(animation_pace(Run, true, true), 213.0);
     }
 
     #[test]

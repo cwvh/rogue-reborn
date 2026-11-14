@@ -14,6 +14,7 @@ use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 use std::rc::Rc;
 use std::net::ToSocketAddrs;
+use rogue_reborn::motion::MOTION_FPS;
 use rogue_reborn::{map, dmp, rsb, actor, combat, crp, demo, grenade, blastlight, concussion, recording, skeleton, sim, sound, weapon, ambience, glass, casings};
 use rogue_reborn::net::client::{Client, Seen, Status};
 use rogue_reborn::net::host::{HostedServer, STARTUP, new_key};
@@ -1569,13 +1570,13 @@ fn main() {
             let crouched = sim.players[me].player.crouched;
             let limp = sim.players[me].leg_wounds > 0;
             let pace = animation_pace(movement, crouched, limp);
-            let rate = if matches!(movement, Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw) { 1.0 } else { (moved / (pace * args.speed_scale.unwrap_or(1.0))).clamp(0.5, 3.0) * args.anim_scale.unwrap_or(1.5) };
+            let rate = if matches!(movement, Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw) { 1.0 } else { (moved / (pace * args.speed_scale.unwrap_or(1.0))).clamp(0.5, 3.0) * args.anim_scale.unwrap_or(1.0) };
             let frames = player_motions.get(movement, crouched, limp).map_or(1, |m| m.frames.max(1)) as f32;
             // A reload's frame follows its progress, and is picked where the body is drawn
             player_frame = if let (Movement::Throw, Some(th)) = (movement, sim.players[me].throw) {
                 ((game_time - th.start) / sim::THROW_SECONDS).clamp(0.0, 1.0) * (frames - 1.0)
             } else {
-                (player_frame + rate * 30.0 * dt) % frames
+                (player_frame + rate * MOTION_FPS * dt) % frames
             };
             // A footstep at the start of each half of a walk or run cycle
             let phase = (player_frame / (frames / 2.0).max(1.0)) as i32;
@@ -2200,7 +2201,7 @@ fn main() {
                         };
                         let limp = p.leg_wounds > 0;
                         let frames = |m: Movement| player_motions.get(m, doing.crouched, limp).map_or(1, |m| m.frames.max(1)) as f32;
-                        let (movement, frame) = remote_anim.update(slot, pos, yaw, step_dt, doing, frames, args.speed_scale.unwrap_or(1.0), args.anim_scale.unwrap_or(1.5));
+                        let (movement, frame) = remote_anim.update(slot, pos, yaw, step_dt, doing, frames, args.speed_scale.unwrap_or(1.0), args.anim_scale.unwrap_or(1.0));
                         let scale = actors.get(slot % actors.len().max(1)).map_or([1.0; 3], |a| a.scale);
                         let hand = if p.equipped_grenade { p.throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
                         let flash = player_flash[slot];

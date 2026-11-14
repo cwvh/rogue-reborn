@@ -657,8 +657,9 @@ pub fn peek_with(tuning: Tuning, holder: Conditions, peeker: Conditions, seconds
     game.run(1.0);
     // Out to the right for a second, a moment in view, back, and a rest
     let p = game.join(|t| {
-        let phase = t % 160;
-        Input { right: phase < 60, left: (80..140).contains(&phase), run: true, ..Input::default() }
+        // The same stroll as at the old strafing speed of 348, at the original's 263
+        let phase = t % 213;
+        Input { right: phase < 80, left: (107..187).contains(&phase), run: true, ..Input::default() }
     });
     game.connect_over(p, peeker);
     game.run(1.0);

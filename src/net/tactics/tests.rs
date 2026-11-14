@@ -18,7 +18,7 @@ fn profile_rm08_navigation() {
 #[test]
 fn rm06_seed_99_does_not_repeat_the_intact_window_route() {
     if !std::path::Path::new("data/map/rm06/rm06.map").exists() { return; }
-    let reports = crate::net::lab::navigation::compare(std::path::Path::new("data/map/rm06/rm06.map"), 60.0, 99, false).unwrap();
+    let reports = crate::net::lab::navigation::compare(std::path::Path::new("data/map/rm06/rm06.map"), 75.0, 99, false).unwrap();
     let report = reports.iter().find(|r| r.behavior == crate::net::bot::Behavior::Navigate).unwrap();
     assert!(report.blocked < 8.0, "blocked={:.2}, patches={:.1}, rooms={:.1}", report.blocked, report.patches, report.rooms);
     assert!(report.patches > 43.5, "patches={:.1}, rooms={:.1}", report.patches, report.rooms);

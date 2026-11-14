@@ -101,7 +101,7 @@ fn a_full_game_fits_a_home_connection() {
 fn peeking_gives_the_one_moving_only_a_little_first_look() {
     let lan = Conditions::lan();
     for (holder, peeker, limit) in [(lan, lan, PEEK_LAN), (lan, internet(0.10), PEEK_FAR_100), (lan, internet(0.15), PEEK_FAR_150), (internet(0.10), lan, PEEK_HOLDER_FAR)] {
-        let p = peek(holder, peeker, 30.0);
+        let p = peek(holder, peeker, 40.0);
         assert!(p.advantage.len() >= 10, "{p:?}");
         assert!(mean(&p.advantage) <= limit, "{} against {limit}", mean(&p.advantage));
     }
@@ -111,7 +111,7 @@ fn peeking_gives_the_one_moving_only_a_little_first_look() {
 fn few_hits_land_behind_cover() {
     let lan = Conditions::lan();
     for (holder, peeker, limit) in [(lan, internet(0.10), BEHIND_PEEKER_FAR), (internet(0.10), lan, BEHIND_HOLDER_FAR)] {
-        let p = peek(holder, peeker, 30.0);
+        let p = peek(holder, peeker, 40.0);
         assert!(p.holder.agreement() >= AGREE_LAN, "agreement {}", p.holder.agreement());
         assert!(behind(&p.peeker) <= limit, "{} of hits behind cover", behind(&p.peeker));
     }

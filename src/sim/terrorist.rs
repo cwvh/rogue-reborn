@@ -79,10 +79,10 @@ pub fn arms(w: &crate::weapon::Weapon) -> Arms {
 pub const MUFFLED: f32 = 0.5;
 /// Seconds a terrorist who heard something keeps its weapon up toward it (a guess)
 pub const HEARD_SECONDS: f32 = 10.0;
-/// How fast they walk and run, as a player does (units a second), and creep, at half a walk
-pub const WALK_SPEED: f32 = 514.0;
-pub const RUN_SPEED: f32 = 735.0;
-pub const CREEP_SPEED: f32 = 257.0;
+/// How fast they walk and run (units a second): the original's rmu_wk2, rmu_wk3 and rmu_wk1
+pub const WALK_SPEED: f32 = 244.0;
+pub const RUN_SPEED: f32 = 466.0;
+pub const CREEP_SPEED: f32 = 166.0;
 /// A sound that carries this far is gunfire or a blast, not footsteps or a door
 const LOUD: f32 = 5000.0;
 
@@ -1694,7 +1694,7 @@ mod tests {
         let (mut east, mut west, mut turns) = (0.0f32, 0.0f32, 0);
         let mut last = sim.npcs[0].pos[0];
         let mut heading = 0.0f32;
-        for _ in 0..(3.0 / crate::sim::TICK) as usize {
+        for _ in 0..(6.0 / crate::sim::TICK) as usize {
             wait(&mut sim, crate::sim::TICK);
             let x = sim.npcs[0].pos[0];
             let now = (x - last).signum();
@@ -1892,7 +1892,7 @@ mod tests {
         sim.terrorists(0.1, &[([30828.8, 33332.0, 35006.4], 10_000.0, Noise::Sound)], &mut ev);
         assert!(!sim.npcs[0].mind.as_ref().unwrap().path.is_empty());
         let mut opened = false;
-        for _ in 0..(20.0 / crate::sim::TICK) as usize {
+        for _ in 0..(40.0 / crate::sim::TICK) as usize {
             wait(&mut sim, crate::sim::TICK);
             opened |= !shut(&sim);
             if sim.npcs[0].mind.as_ref().unwrap().target.is_some() {
@@ -2061,7 +2061,7 @@ mod tests {
         sim.god = true;
         wait(&mut sim, 0.1);
         sim.noises.push(([at[0], at[1] + 150.0, at[2]], 6000.0, Noise::Sound));
-        wait(&mut sim, 20.0);
+        wait(&mut sim, 40.0);
         let near: Vec<usize> = (0..sim.npcs.len()).filter(|&i| {
             let p = sim.npcs[i].pos;
             !sim.npcs[i].health.is_dead() && ((p[0] - at[0]).powi(2) + (p[2] - at[2]).powi(2)).sqrt() < 600.0

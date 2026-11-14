@@ -142,9 +142,9 @@ impl PlayerMotions {
         let planted = |slot: &str, default: &str| planted_at(slot, default, false);
         PlayerMotions {
             idle: planted("idle", "up_cyc_mp5k"),
-            walk: pick("walk", "tmu_wk1"),
+            walk: pick("walk", "tmu_wk2"),
             run: pick("run", "tmu_rn"),
-            back: pick("back", "tmu_bk1"),
+            back: pick("back", "tmu_bk2"),
             left: pick("left", "tms_l2"),
             right: pick("right", "tms_r2"),
             walk_left: pick("walk_left", "tms_l1"),
@@ -162,8 +162,8 @@ impl PlayerMotions {
             crouch_left: pick("crouch_left", "tmc_lf"),
             crouch_right: pick("crouch_right", "tmc_rt"),
             limp_run: pick("limp_run", "rmu_wrn"),
-            limp_walk: pick("limp_walk", "tmu_wwk1"),
-            limp_back: pick("limp_back", "tmu_wbk1"),
+            limp_walk: pick("limp_walk", "tmu_wwk2"),
+            limp_back: pick("limp_back", "tmu_wbk2"),
             limp_left: pick("limp_left", "tmu_wlf1"),
             limp_right: pick("limp_right", "tmu_wrt1"),
             limp_crouch_run: pick("limp_crouch_run", "rmc_wrn"),
