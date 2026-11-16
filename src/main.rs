@@ -2029,10 +2029,10 @@ fn main() {
                         None => (c, &character_arrays, part_textures.as_slice()),
                     };
                     let bones = chars.bones(spot, game_time, idle);
-                    let posed = match (&bones, chars.body(spot).1) {
-                        (Some(bones), Some(rig)) => rig.skin.apply(bones),
-                        (None, Some(_)) => model.vertices.clone(),
-                        (_, None) => Vec::new(),
+                    let (posed, turns) = match (&bones, chars.body(spot).1) {
+                        (Some(bones), Some(rig)) => (rig.skin.apply(bones), rig.skin.turns(bones)),
+                        (None, Some(_)) => (model.vertices.clone(), Vec::new()),
+                        (_, None) => (Vec::new(), Vec::new()),
                     };
                     let verts: &[[f32; 3]] = if posed.is_empty() { &model.vertices } else { &posed };
                     let y = if posed.is_empty() { spot.pos[1] } else { spot.floor };
@@ -2049,7 +2049,7 @@ fn main() {
                     let held = spot.weapon.and_then(|w| held_draws.get(w)).and_then(Option::as_ref);
                     let glowing = npc_flash.get(i).copied().unwrap_or(false) && held.is_some_and(|w| w.flash_scale > 0.0) && !spot.health.is_dead();
                     let lit = flashing(lit_at([spot.pos[0], y, spot.pos[2]], spot.yaw, spot.scale), glowing);
-                    draw_character(model, arrays, verts, textures, face, textured, glow_on([spot.pos[0], y, spot.pos[2]]), lit.as_ref());
+                    draw_character(model, arrays, verts, &turns, textures, face, textured, glow_on([spot.pos[0], y, spot.pos[2]]), lit.as_ref());
                     // Their weapon in the right hand, as the players hold theirs, or on the
                     // floor once they have dropped it dying
                     if let (Some(bones), Some(wd), Some((hand, off))) = (&bones, held, &weapon_attach) {
@@ -2119,6 +2119,7 @@ fn main() {
                 let pose = skel.pose([0.0, root[1], 0.0], &rots);
                 let (model, arrays, textures, worn) = dress(side, &side_dress, &chars.model, &character_arrays, &part_textures, Some(skin));
                 let verts = worn.unwrap_or(skin).apply(&pose);
+                let turns = worn.unwrap_or(skin).turns(&pose);
                 glPushMatrix();
                 glTranslatef(feet[0], feet[1], feet[2]);
                 // The body faces where the player looks (model forward is +Z)
@@ -2126,7 +2127,7 @@ fn main() {
                 glScalef(scale[0], scale[1], scale[2]);
                 let glowing = flash && hand.and_then(Option::as_ref).is_some_and(|w| w.flash_scale > 0.0);
                 let lit = flashing(lit_at(feet, yaw_deg, scale), glowing);
-                draw_character(model, arrays, &verts, textures, face, textured, glow_on(feet), lit.as_ref());
+                draw_character(model, arrays, &verts, &turns, textures, face, textured, glow_on(feet), lit.as_ref());
                 // What bullets hit (B): the players' model posed alike, whatever the uniform,
                 // outlined over it
                 if show_hitboxes {
@@ -2232,13 +2233,13 @@ fn main() {
                     };
                     let idle = game_time * 30.0 + ghost.stagger * 9.0;
                     let (model, arrays, textures, skin) = dress(p.side, &side_dress, &chars.model, &character_arrays, &part_textures, chars.rig.as_ref().map(|r| &r.skin));
-                    let posed = chars.bones(&ghost, view_time, idle).zip(skin).map(|(b, s)| s.apply(&b)).unwrap_or_default();
+                    let (posed, turns) = chars.bones(&ghost, view_time, idle).zip(skin).map(|(b, s)| (s.apply(&b), s.turns(&b))).unwrap_or_default();
                     let verts: &[[f32; 3]] = if posed.is_empty() { &model.vertices } else { &posed };
                     glPushMatrix();
                     glTranslatef(ghost.pos[0], ghost.pos[1], ghost.pos[2]);
                     glRotatef(ghost.yaw, 0.0, 1.0, 0.0);
                     let lit = lit_at(ghost.pos, ghost.yaw, ghost.scale);
-                    draw_character(model, arrays, verts, textures, face, textured, glow_on(ghost.pos), lit.as_ref());
+                    draw_character(model, arrays, verts, &turns, textures, face, textured, glow_on(ghost.pos), lit.as_ref());
                     glPopMatrix();
                 }
                 glColor4f(1.0, 1.0, 1.0, 1.0);
@@ -2294,14 +2295,14 @@ fn main() {
                     let face = (!actors.is_empty()).then(|| face_textures[slot % actors.len()].0).flatten();
                     let side = sim.players.get(slot).and_then(|p| p.side);
                     let (model, arrays, textures, skin) = dress(side, &side_dress, &chars.model, &character_arrays, &part_textures, chars.rig.as_ref().map(|r| &r.skin));
-                    let posed = chars.bones(body, now, 0.0).zip(skin).map(|(b, s)| s.apply(&b)).unwrap_or_default();
+                    let (posed, turns) = chars.bones(body, now, 0.0).zip(skin).map(|(b, s)| (s.apply(&b), s.turns(&b))).unwrap_or_default();
                     let verts: &[[f32; 3]] = if posed.is_empty() { &model.vertices } else { &posed };
                     glPushMatrix();
                     glTranslatef(body.pos[0], body.pos[1], body.pos[2]);
                     glRotatef(body.yaw, 0.0, 1.0, 0.0);
                     glScalef(body.scale[0], body.scale[1], body.scale[2]);
                     let lit = lit_at(body.pos, body.yaw, body.scale);
-                    draw_character(model, arrays, verts, textures, face, textured, glow_on(body.pos), lit.as_ref());
+                    draw_character(model, arrays, verts, &turns, textures, face, textured, glow_on(body.pos), lit.as_ref());
                     glPopMatrix();
                 }
                 glColor4f(1.0, 1.0, 1.0, 1.0);

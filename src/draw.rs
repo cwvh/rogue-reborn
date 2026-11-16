@@ -179,7 +179,7 @@ impl CharacterArrays {
 // Draw one posed character: `verts` are its (possibly animated) vertex
 // positions and `face` replaces the HRT placeholder face texture. `light` is the level's
 // light on it, in the character's own space; with none it is drawn as it is.
-pub fn draw_character(c: &crp::Crp, arrays: &CharacterArrays, verts: &[[f32; 3]], part_textures: &[Option<u32>], face: Option<u32>, textured: bool, glow: [f32; 3], light: Option<&CharacterLight>) {
+pub fn draw_character(c: &crp::Crp, arrays: &CharacterArrays, verts: &[[f32; 3]], turns: &[[f32; 4]], part_textures: &[Option<u32>], face: Option<u32>, textured: bool, glow: [f32; 3], light: Option<&CharacterLight>) {
     // The posed position of every corner, gathered once for all the parts
     let mut positions = arrays.positions.borrow_mut();
     positions.clear();
@@ -187,7 +187,7 @@ pub fn draw_character(c: &crp::Crp, arrays: &CharacterArrays, verts: &[[f32; 3]]
     let mut colors = arrays.colors.borrow_mut();
     let lit = textured && light.is_some();
     if let (true, Some(light)) = (lit, light) {
-        light.corner_colors(c, verts, &mut colors);
+        light.corner_colors(c, verts, turns, &mut colors);
     }
     unsafe {
     glEnableClientState(0x8074); // GL_VERTEX_ARRAY

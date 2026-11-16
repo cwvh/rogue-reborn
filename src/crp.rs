@@ -84,6 +84,11 @@ impl Skin {
             [t.pos[0] + r[0], t.pos[1] + r[1], t.pos[2] + r[2]]
         }).collect()
     }
+
+    /// The rotation each vertex has been turned by in a posed skeleton
+    pub fn turns(&self, pose: &[Transform]) -> Vec<[f32; 4]> {
+        self.bone.iter().map(|&b| pose[b].rot).collect()
+    }
 }
 
 impl Crp {
