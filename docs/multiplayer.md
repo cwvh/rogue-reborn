@@ -16,6 +16,115 @@ That is the hardest case to keep fair.
 
 There are no human playtests for now. Bots stand in for players until there are.
 
+## Playing over a network
+
+How to run a game. The sections below say why it works this way.
+
+### Hosting and joining
+
+```
+rrsrv --demo --max-players 4                  # the box room, or --level rm11 for a level
+rr --connect 127.0.0.1:27960 --first-person --textured
+rr --host --level citystreet_large --name "JOHN DOE" --first-person --textured
+rr --connect HOST:27960 --side blue --name "[RAINBOW] Pie4Foo" --first-person --textured
+```
+
+`rrsrv` listens on UDP port 27960 (`--port` changes it) for up to 16 players (`--max-players`).
+Build `rr` and `rrsrv` together, from the same commit. The server turns away a client built from
+another, because the two must move a player the same way.
+
+The server places a level's mission terrorists (medium difficulty) where it has a mission, or
+`--npcs` characters in the box room. Players can hurt each other (`--no-pvp` turns it off): a
+head shot kills, a body shot takes a fifth, a grenade by how close it is. Without rounds, a
+player who dies comes back after 3.7 seconds at the spawn point farthest from the others.
+
+`rr --host` starts a Team Survival server and joins it as the host. Closing the host's window
+ends the game. A dedicated server, `rrsrv --level citystreet_large --teams --rounds`, starts each
+round when everyone is ready. See [Lobby](#lobby-done) for the lobby.
+
+### Teams and rounds
+
+- `--teams` puts players on two sides, Blue and Gold, from a pair of the level's bases
+  (`--base-pair N`, or one the seed picks). `--side blue|gold` on `rr` and `rrbot` asks for a
+  side. A player goes to the smaller side if theirs has more.
+- Friendly fire is on, as in competitive play. `--no-friendly-fire` turns it off.
+- `--rounds` plays in rounds with one life each: Team Survival with `--teams`, last one standing
+  without. `--round-time SECONDS` sets the length (3 minutes by default, 0 for no limit).
+- `--name` on `rr` and `rrbot` asks for a name. Without one a player is "PLAYER n".
+- A team game has no terrorists.
+
+The round flow is under [Rounds](#rounds-done) and [Names and results](#names-and-results-done).
+
+### How it stays fair
+
+Your own movement happens at once on your screen, and the server checks it. Everything else is
+the server's word: shots, hits, grenades, doors, glass, kills. A shot is judged against where the
+others were when you saw them, so there is no need to lead a target by your ping.
+`rrsrv --no-lag-compensation` judges against where they are now instead.
+
+To see how the game copes with a poor connection, add `--sim-latency 80 --sim-jitter 30
+--sim-loss 5` to `rrsrv` or `rr` (milliseconds each way, milliseconds of jitter, percent lost).
+
+### The lag meter
+
+L shows the lag meter at the top left, over the last 4 seconds (`--lag-meter` starts with it
+shown):
+
+- **ping:** from sending an input until a snapshot says the server used it. This includes the
+  inputs the server holds back against late ones, so it is the lag you feel.
+- **jitter:** the spread of the snapshots' arrival times.
+- **loss:** snapshots that never came.
+- **view:** how far in the past the other players are shown.
+- **fixes:** how often the server moved you from where your computer predicted, and by how much
+  at most.
+- **in, out:** bytes a second.
+
+The graph's upper band is how much the view of the other players has in hand: blue, or yellow
+when it runs dry and they stall. The lower band has a bar for each snapshot: green to its ping,
+red for one lost, and yellow from the top for a fix.
+
+### Recording a network game
+
+`rrsrv --record match.rrs` records the match as the server ran it, and `rrsrv --check match.rrs`
+plays it back and says whether it comes out the same. `rr --record FILE` on a server records
+what that player saw, and M marks a moment in it. `rrsrv --check` plays those back too. See
+[Recording network games](#recording-network-games).
+
+### Bots
+
+To play alone against the computer, `scripts/mp.sh` starts a server, some bots and your own
+window, and stops them all when you close it:
+
+```
+scripts/mp.sh                              # the box room, three bots
+scripts/mp.sh rm11 --bots 5 --skill hard   # a level, five hard bots
+scripts/mp.sh rm08 --net bad               # your connection 90 ms each way, 30 ms jitter, 4% lost
+```
+
+`--net` is `clean`, `good`, `typical`, `bad` or `awful`, and makes only your own connection
+worse. `--skill` is `easy`, `normal` or `hard`. `--npcs N` and `--no-pvp` go to the server, and
+anything after `--` goes to `rr`.
+
+The bots are `rrbot --connect HOST:PORT --fight [--skill hard] [--side gold]`. They explore the
+level, opening doors along planned paths, and turn on whoever they see on the other side. They
+react after a moment, turn at a limited rate, fire in bursts with an aim that drifts and
+settles, sidestep and now and then throw a grenade. They see only what a player on the same
+computer would, so their shots are judged the same way. `--trace` prints movement and combat
+decisions.
+
+`rrbot` without `--fight` is a scripted client (`rrbot --connect HOST:PORT --keys WF --seconds
+10`). `scripts/net-test.sh` runs a server and two bots over real sockets and checks that the
+game stayed in agreement.
+
+### The lab
+
+`rrlab` plays bots against each other over pretend connections, in moments, and prints how fair
+and smooth it was: how often a shot's result on the shooter's screen matched the server's, how
+far the victim was from where the shot found them, how much sooner a player stepping round a
+corner sees the one waiting than they are seen, and the bytes sent. `rrlab --tune` tries the
+snapshot rate, the view delay and how far back shots are judged. Tests hold its figures, so a
+change that makes play less fair fails them. See [The test suite and the lab](#the-test-suite-and-the-lab) and [Tuning](#tuning).
+
 ## What we have
 
 - The server runs the game and the clients predict their own player (`net::server`,
