@@ -918,6 +918,9 @@ fn main() {
         (x >> 40) as f32 / (1u64 << 24) as f32
     };
     let mut third_person = args.third_person;
+    // Where the third-person view sits round the player: with --cinematic, Shift and the mouse
+    // move it, and it stays put when Shift is let go
+    let mut orbit = (args.view_orbit, 0.0f32);
     let mut movement = Movement::Idle;
     let mut player_frame = 0.0f32;
     let mut player_hip_turn = 0.0f32;
@@ -1060,6 +1063,12 @@ fn main() {
                     if let (Some((last_x, last_y)), None, false) = (last_cursor_pos, args.walk, playback.is_some()) {
                         let dx = xpos - last_x;
                         let dy = ypos - last_y;
+                        if args.cinematic && first_person && third_person && gate.held(Key::LeftShift) {
+                            orbit.0 -= dx as f32 * 0.2;
+                            orbit.1 = (orbit.1 - dy as f32 * 0.1).clamp(-60.0, 60.0);
+                            last_cursor_pos = Some((xpos, ypos));
+                            continue;
+                        }
                         camera.yaw -= dx as f32 * 0.1;
                         camera.pitch -= dy as f32 * 0.1;
                         camera.pitch = camera.pitch.clamp(-89.0, 89.0);
@@ -1683,8 +1692,8 @@ fn main() {
                 // Orbited round the player to see them from the side, if asked, and kept out
                 // of the walls as the camera behind a watched player is
                 let eye = [camera.position[0], camera.position[1], -camera.position[2]];
-                let from = Pose { eye, yaw: camera.yaw, pitch: camera.pitch };
-                let p = behind(&sim, from, args.view_dist.unwrap_or(BEHIND), RISE, args.view_orbit);
+                let from = Pose { eye, yaw: camera.yaw, pitch: (camera.pitch + orbit.1).clamp(-89.0, 89.0) };
+                let p = behind(&sim, from, args.view_dist.unwrap_or(BEHIND), RISE, orbit.0);
                 Camera { position: [p.eye[0], p.eye[1], -p.eye[2]], yaw: p.yaw, pitch: p.pitch }
             } else {
                 Camera { position: camera.position, yaw: camera.yaw, pitch: camera.pitch }
@@ -2791,7 +2800,10 @@ fn main() {
         if !demo_text.is_empty() {
             debug_lines.push(&demo_text);
         }
-        draw_debug_text(w, h, &debug_lines);
+        // With --cinematic, captured pictures leave it out; the dump's text has it
+        if !(args.cinematic && (args.screenshot.is_some() || dump_requested || clip.is_some())) {
+            draw_debug_text(w, h, &debug_lines);
+        }
 
         // The lobby or the results, over the whole window, and the chat, which notes what
         // happens all game long. What is clicked and said is sent with the next tick.

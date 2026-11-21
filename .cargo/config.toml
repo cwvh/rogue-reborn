@@ -9,7 +9,7 @@ rr = "run --release --target x86_64-pc-windows-gnu --bin rr --"
 wireframe = "rr"
 wtest = "test --target x86_64-pc-windows-gnu"
 wcheck = "check --target x86_64-pc-windows-gnu --all-targets"
-demo = "run --release --target x86_64-pc-windows-gnu --bin rr -- --first-person --textured --max-fps 144 --spawn 1 --realistic-decals"
+demo = "run --release --target x86_64-pc-windows-gnu --bin rr -- --level citystreet_large --first-person --textured --spawn 1 --grenades 30 --god"
 
 # CMake picks its "MSYS Makefiles" generator when a `sh` is on PATH, and w64devkit's `sh`
 # cannot resolve the /C/... paths it writes, so GLFW's build fails ("cmake.exe: not found").

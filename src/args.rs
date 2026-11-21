@@ -72,6 +72,8 @@ pub struct Args {
     pub first_person: bool,
     /// Take no harm from anything, but flinch at hits as usual
     pub god: bool,
+    /// For taking screenshots: Shift orbits the third-person view, and pictures leave out the debug text
+    pub cinematic: bool,
     pub info: bool,
     pub spawn_zone: Option<String>,
     pub seed: Option<u64>,
@@ -243,6 +245,7 @@ pub fn parse_args() -> Args {
             "--flat-light" => args.flat_light = true,
             "--first-person" => args.first_person = true,
             "--god" => args.god = true,
+            "--cinematic" => args.cinematic = true,
             "--walk" => {
                 args.walk = it.next().and_then(|v| v.parse().ok());
                 args.first_person = true;
