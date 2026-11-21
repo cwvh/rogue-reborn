@@ -146,8 +146,33 @@ pub fn ortho_2d(left: f32, right: f32, bottom: f32, top: f32) {
     unsafe { glMultMatrixf(m.as_ptr()); }
 }
 
-pub fn upload_rsb_to_gl(tex: &rsb::Rsb) -> Option<u32> {
-    upload_rgba_to_gl(tex.width, tex.height, &tex.to_rgba8())
+static WORLD_GAMMA: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
+
+/// Set once at startup: the brightening `upload_world_*` give to textures. Without it they change nothing.
+pub fn set_world_gamma(gamma: f32) {
+    if gamma != 1.0 {
+        let _ = WORLD_GAMMA.set(rogue_reborn::lighting::gamma_table(gamma));
+    }
+}
+
+/// Like `upload_rgba_to_gl`, for what is drawn in the 3D world: the gamma brightens its color
+pub fn upload_world_rgba_to_gl(width: u32, height: u32, rgba: &[u8]) -> Option<u32> {
+    match WORLD_GAMMA.get() {
+        Some(table) => {
+            let mut px = rgba.to_vec();
+            for p in px.chunks_exact_mut(4) {
+                for c in &mut p[..3] {
+                    *c = table[*c as usize];
+                }
+            }
+            upload_rgba_to_gl(width, height, &px)
+        }
+        None => upload_rgba_to_gl(width, height, rgba),
+    }
+}
+
+pub fn upload_world_rsb_to_gl(tex: &rsb::Rsb) -> Option<u32> {
+    upload_world_rgba_to_gl(tex.width, tex.height, &tex.to_rgba8())
 }
 
 pub fn upload_rgba_to_gl(width: u32, height: u32, rgba: &[u8]) -> Option<u32> {

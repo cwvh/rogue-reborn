@@ -124,6 +124,7 @@ On other platforms, or without the aliases:
 | `--difficulty easy\|medium\|hard` | which of the mission's difficulty files places its terrorists (medium by default). On the 18 RM levels the terrorists stand where the mission starts them, a team at one of its places picked at random (`--seed` fixes it), each in the model their kit names, holding its weapon and waiting in their stance. A terrorist who sees you turns and fires, and one who hears you comes to see; elsewhere, characters stand at the spawn points |
 | `--max-fps N` | cap the frame rate (turns vsync off); the default is vsync |
 | `--realistic-decals` | per-surface bullet holes with splinters, sparks and dust, instead of the game's sprites |
+| `--gamma N` | brighten the 3D world (1.0 changes nothing, 1.6 is a good start); the HUD and menus stay as they are |
 | `--no-sound`, `--volume 0.0-1.0` | sound off, master volume |
 | `--doors-open 0..1` | start with every door that far open (they start shut) |
 | `--god` | take no harm, but flinch at hits as usual (playing alone or a recording, not on a server) |

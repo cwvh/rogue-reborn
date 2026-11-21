@@ -62,4 +62,4 @@ Each corner of the posed model takes its triangle's normal. A directional light 
 
 ## Gamma
 
-The original runs the colors through a gamma table, which is the identity until the mission sets a gamma. We leave the colors as baked.
+The original runs the colors through a gamma table, which is the identity until the mission sets a gamma. We leave the colors as baked unless `--gamma` is given. Then each finished light color and each world texture is raised to 1/gamma. The HUD and menus are left alone.

@@ -49,21 +49,34 @@ fn level_light(light: &Light, p: [f32; 3], n: [f32; 3]) -> f32 {
     }
 }
 
+/// A color value brightened by `gamma` (higher is brighter), after clamping to 0..1
+pub fn curve(c: f32, gamma: f32) -> f32 {
+    let c = c.clamp(0.0, 1.0);
+    if gamma == 1.0 { c } else { c.powf(1.0 / gamma) }
+}
+
+/// The brightening of every 8-bit value, for textures
+pub fn gamma_table(gamma: f32) -> [u8; 256] {
+    std::array::from_fn(|i| (curve(i as f32 / 255.0, gamma) * 255.0).round() as u8)
+}
+
 pub struct Lighting {
     pub ambient: [f32; 3],
     rooms: HashMap<u32, Vec<Light>>,
+    /// Brightens each finished color; 1 leaves it be
+    gamma: f32,
 }
 
 impl Lighting {
     /// The lights by the number of the room they are in. Lights in a room that has no number are left out.
-    pub fn new(dmp: Dmp) -> Lighting {
+    pub fn new(dmp: Dmp, gamma: f32) -> Lighting {
         let mut rooms: HashMap<u32, Vec<Light>> = HashMap::new();
         for light in dmp.lights {
             if let Some(room) = object_room(&light.room) {
                 rooms.entry(room).or_default().push(light);
             }
         }
-        Lighting { ambient: dmp.ambient, rooms }
+        Lighting { ambient: dmp.ambient, rooms, gamma }
     }
 
     fn lights_of(&self, room: u32) -> &[Light] {
@@ -97,7 +110,8 @@ impl Lighting {
                 tint[k] += 0.5 * reach * l.diffuse[k];
             }
         }
-        CharacterLight { ambient, lights, tint: tint.map(|c| c.min(1.0)), muzzle: None }
+        let tint = tint.map(|c| c.min(1.0));
+        CharacterLight { ambient, lights, tint: tint.map(|c| curve(c, self.gamma)), raw_tint: tint, muzzle: None, gamma: self.gamma }
     }
 }
 
@@ -108,6 +122,9 @@ pub struct CharacterLight {
     lights: Vec<Light>,
     /// One color for the whole character, for what is drawn without normals
     pub tint: [f32; 3],
+    /// The tint before the gamma
+    raw_tint: [f32; 3],
+    gamma: f32,
     /// A white light with no falloff, where a gun is flashing
     muzzle: Option<[f32; 3]>,
 }
@@ -127,7 +144,7 @@ impl CharacterLight {
             ..l.clone()
         }).collect();
         let muzzle = self.muzzle.map(|m| turn(sub(m, feet)).map(|v| v / size));
-        CharacterLight { ambient: self.ambient, lights, tint: self.tint, muzzle }
+        CharacterLight { ambient: self.ambient, lights, tint: self.tint, raw_tint: self.raw_tint, muzzle, gamma: self.gamma }
     }
 
     /// The same light with a muzzle flash at `point`
@@ -140,7 +157,7 @@ impl CharacterLight {
     /// The gun's color while it flashes. It has no normals to light by angle, so it gets a flat
     /// boost. The 0.5 is our guess, not the original's.
     pub fn flash_tint(&self) -> [f32; 3] {
-        self.tint.map(|c| (c + 0.5).min(1.0))
+        self.raw_tint.map(|c| curve(c + 0.5, self.gamma))
     }
 
     fn at(&self, p: [f32; 3], n: [f32; 3]) -> [f32; 3] {
@@ -165,7 +182,7 @@ impl CharacterLight {
             let k = dot(unit(sub(m, p)), n).max(0.0);
             color = color.map(|c| c + k);
         }
-        color.map(|c| c.clamp(0.0, 1.0))
+        color.map(|c| curve(c, self.gamma))
     }
 
     /// A color for each corner of the posed model, three floats each, in the order the parts'
@@ -247,7 +264,7 @@ impl Lighting {
                                 color[c] += k * l.diffuse[c];
                             }
                         }
-                        color.map(|c| c.clamp(0.0, 1.0))
+                        color.map(|c| curve(c, self.gamma))
                     };
                     [corner(v0, t0), corner(v1, t1), corner(v2, t2)]
                 }).collect()
@@ -293,7 +310,7 @@ mod tests {
     fn a_character_takes_the_two_strongest_lights() {
         let mut dim = light(Kind::Point);
         dim.diffuse = [0.1; 3];
-        let mut lighting = Lighting { ambient: [0.1; 3], rooms: HashMap::new() };
+        let mut lighting = Lighting { ambient: [0.1; 3], rooms: HashMap::new(), gamma: 1.0 };
         lighting.rooms.insert(1, vec![dim.clone(), light(Kind::Point), dim.clone(), light(Kind::Directional)]);
         let lit = lighting.character(Some(1), [0.0, 80.0, 0.0]);
         assert_eq!(lit.lights.len(), 2);
@@ -304,7 +321,7 @@ mod tests {
 
     #[test]
     fn a_muzzle_light_adds_the_cosine_of_its_angle_and_clamps() {
-        let still = CharacterLight { ambient: [0.2; 3], lights: vec![], tint: [0.2; 3], muzzle: None };
+        let still = CharacterLight { ambient: [0.2; 3], lights: vec![], tint: [0.2; 3], raw_tint: [0.2; 3], muzzle: None, gamma: 1.0 };
         let lit = still.clone().with_muzzle([0.0, 0.0, 10.0]);
         let o = [0.0; 3];
         assert_eq!(still.at(o, [0.0, 0.0, 1.0]), [0.2; 3]);
@@ -317,6 +334,23 @@ mod tests {
     }
 
     #[test]
+    fn gamma_brightens_the_final_color_and_leaves_black_and_white() {
+        assert_eq!(curve(0.3, 1.0), 0.3);
+        assert!((curve(0.25, 2.0) - 0.5).abs() < 1e-6);
+        assert_eq!((curve(0.0, 2.0), curve(1.0, 2.0)), (0.0, 1.0));
+        let lit = CharacterLight { ambient: [0.25; 3], lights: vec![], tint: [0.0; 3], raw_tint: [0.0; 3], muzzle: None, gamma: 2.0 };
+        assert!((lit.at([0.0; 3], [0.0, 1.0, 0.0])[0] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_gamma_table_is_the_curve_in_bytes() {
+        assert!(gamma_table(1.0).iter().enumerate().all(|(i, &v)| v as usize == i));
+        let t = gamma_table(2.0);
+        assert_eq!((t[0], t[255]), (0, 255));
+        assert_eq!(t[64], 128);
+    }
+
+    #[test]
     fn corners_are_lit_by_their_own_normals_turned_with_their_bones() {
         let part = Part {
             material: String::new(),
@@ -325,7 +359,7 @@ mod tests {
             corner_normals: vec![[[0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [1.0, 0.0, 0.0]]],
         };
         let model = Crp { name: String::new(), vertices: vec![[0.0; 3]; 3], parts: vec![part], groups: vec![] };
-        let lit = CharacterLight { ambient: [0.0; 3], lights: vec![light(Kind::Directional)], tint: [0.0; 3], muzzle: None };
+        let lit = CharacterLight { ambient: [0.0; 3], lights: vec![light(Kind::Directional)], tint: [0.0; 3], raw_tint: [0.0; 3], muzzle: None, gamma: 1.0 };
         let verts = [[0.0; 3]; 3];
         let mut out = Vec::new();
         // The light shines down, so only the corner facing up is lit

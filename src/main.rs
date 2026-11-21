@@ -167,7 +167,7 @@ fn load_flash_draw() -> Option<FlashDraw> {
             let texture = find_file(Path::new("data/texture"), &stem, "rsb")
                 .or_else(|| find_file(Path::new("data/texture"), &format!("TGA{stem}"), "rsb"))
                 .and_then(|p| rsb::read(&p).ok())
-                .and_then(|t| upload_rsb_to_gl(&t))?;
+                .and_then(|t| upload_world_rsb_to_gl(&t))?;
             let (mut verts, mut uvs) = (Vec::new(), Vec::new());
             let n = od.faces.face_indices.len().min(od.faces.texture_indices.len());
             for k in 0..n {
@@ -362,8 +362,9 @@ fn main() {
             })
         } else {
             dmp::Dmp::none()
-        })
+        }, args.gamma)
     });
+    set_world_gamma(args.gamma);
     let baked = lighting.as_ref().map(|l| {
         let start = Instant::now();
         let baked = l.bake(&level);
@@ -493,7 +494,7 @@ fn main() {
         let stem = Path::new(&material).file_stem()?.to_string_lossy().to_string();
         let texture = find_file(Path::new("data/texture"), &stem, "rsb")
             .and_then(|p| rsb::read(&p).ok())
-            .and_then(|t| upload_rsb_to_gl(&t));
+            .and_then(|t| upload_world_rsb_to_gl(&t));
         println!("loaded {} ({} triangles, texture {})", file, verts.len() / 3, if texture.is_some() { "ok" } else { "missing" });
         let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
         for v in &verts {
@@ -520,7 +521,7 @@ fn main() {
             for v in 0..HOLE_VARIANTS {
                 let seed = 0x1000 + (v as u64) * 7919 + surface as u64 * 104729;
                 let px = impact::hole_texture(surface, seed);
-                if let Some(id) = upload_rgba_to_gl(impact::TEXTURE_SIZE as u32, impact::TEXTURE_SIZE as u32, &px) {
+                if let Some(id) = upload_world_rgba_to_gl(impact::TEXTURE_SIZE as u32, impact::TEXTURE_SIZE as u32, &px) {
                     hole_tex.insert((surface, v), id);
                 }
             }
@@ -531,28 +532,28 @@ fn main() {
             if let Some(t) = sprite {
                 let mut px = t.to_rgba8();
                 impact::key_alpha(&mut px, t.width as usize, t.height as usize);
-                if let Some(id) = upload_rgba_to_gl(t.width as u32, t.height as u32, &px) {
+                if let Some(id) = upload_world_rgba_to_gl(t.width as u32, t.height as u32, &px) {
                     hole_tex.insert((surface, 0), id);
                 }
             }
         }
     }
     // Soft clouds for dust and a bright sprite for the flash of a spark
-    let cloud_tex = find_file(Path::new("data/texture"), "TGAdirt_cloud", "rsb").and_then(|p| rsb::read(&p).ok()).and_then(|t| upload_rsb_to_gl(&t));
+    let cloud_tex = find_file(Path::new("data/texture"), "TGAdirt_cloud", "rsb").and_then(|p| rsb::read(&p).ok()).and_then(|t| upload_world_rsb_to_gl(&t));
     // The flash sprite sits on a flat color, which would show as a square, so key it out
     let flash_tex = find_file(Path::new("data/texture"), "Sparks1", "rsb").and_then(|p| rsb::read(&p).ok()).and_then(|t| {
         let mut px = t.to_rgba8();
         impact::key_alpha(&mut px, t.width as usize, t.height as usize);
-        upload_rgba_to_gl(t.width as u32, t.height as u32, &px)
+        upload_world_rgba_to_gl(t.width as u32, t.height as u32, &px)
     });
     // A blast: its flash, its smoke, the ring of its shockwave, and the soot it leaves
-    let sprite = |stem: &str| find_file(Path::new("data/texture"), stem, "rsb").and_then(|p| rsb::read(&p).ok()).and_then(|t| upload_rsb_to_gl(&t));
+    let sprite = |stem: &str| find_file(Path::new("data/texture"), stem, "rsb").and_then(|p| rsb::read(&p).ok()).and_then(|t| upload_world_rsb_to_gl(&t));
     let glare_tex = sprite("TGAgrenade_explosion_1");
     let smoke_tex = sprite("TGAgrenade_blast_03");
     let ring_tex = sprite("TGAgrenade_smoke_ring_1");
     for v in 0..SCORCH_VARIANTS {
         let px = impact::hole_texture(Surface::Scorch, 0x5C0 + v as u64 * 3571);
-        if let Some(id) = upload_rgba_to_gl(impact::TEXTURE_SIZE as u32, impact::TEXTURE_SIZE as u32, &px) {
+        if let Some(id) = upload_world_rgba_to_gl(impact::TEXTURE_SIZE as u32, impact::TEXTURE_SIZE as u32, &px) {
             hole_tex.insert((Surface::Scorch, v), id);
         }
     }
@@ -634,7 +635,7 @@ fn main() {
     // GL textures for each actor's HRT face: (main, blink)
     let faces_dir = Path::new("data/texture/faces");
     let face_textures: Vec<(Option<u32>, Option<u32>)> = actors.iter().map(|a| {
-        let load = |p: &Path| rsb::read(p).ok().and_then(|t| upload_rsb_to_gl(&t));
+        let load = |p: &Path| rsb::read(p).ok().and_then(|t| upload_world_rsb_to_gl(&t));
         let found = a.hrt_face.as_deref().and_then(|f| actor::find_face_textures(faces_dir, f));
         match found {
             Some((main, blink)) => (load(&main), blink.and_then(|b| load(&b))),

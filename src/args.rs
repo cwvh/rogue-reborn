@@ -47,6 +47,8 @@ pub struct Args {
     pub portals: bool,
     /// Draw everything at full brightness, as before the level's light files were read
     pub flat_light: bool,
+    /// Brightens the 3D world: each color is raised to 1/gamma (1 changes nothing)
+    pub gamma: f32,
     /// Color each room's geometry and report the rooms the player is in
     pub rooms: bool,
     /// Write the F2 debug dump on the first frame and exit
@@ -118,8 +120,18 @@ pub struct Args {
     pub walk: Option<u32>,
 }
 
+pub fn parse_gamma(value: Option<&str>) -> f32 {
+    match value.and_then(|v| v.parse::<f32>().ok()).filter(|g| g.is_finite() && *g > 0.0) {
+        Some(g) => g,
+        None => {
+            eprintln!("--gamma expects a number above 0, not {}; using 1.0", value.unwrap_or("nothing"));
+            1.0
+        }
+    }
+}
+
 pub fn parse_args() -> Args {
-    let mut args = Args::default();
+    let mut args = Args { gamma: 1.0, ..Args::default() };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -227,6 +239,7 @@ pub fn parse_args() -> Args {
                 Some(d) => args.difficulty = d,
                 None => eprintln!("--difficulty expects easy, medium or hard"),
             },
+            "--gamma" => args.gamma = parse_gamma(it.next().as_deref()),
             "--flat-light" => args.flat_light = true,
             "--first-person" => args.first_person = true,
             "--god" => args.god = true,
@@ -238,4 +251,18 @@ pub fn parse_args() -> Args {
         }
     }
     args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bad_gamma_falls_back_to_one() {
+        for bad in [None, Some("0"), Some("-1"), Some("NaN"), Some("inf"), Some("abc")] {
+            assert_eq!(parse_gamma(bad), 1.0, "{bad:?}");
+        }
+        assert_eq!(parse_gamma(Some("1.6")), 1.6);
+        assert_eq!(parse_gamma(Some("5")), 5.0);
+    }
 }

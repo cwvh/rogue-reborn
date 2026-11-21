@@ -26,9 +26,9 @@ pub fn load_character_texture(dir: &Path, material: &str) -> Option<u32> {
     })?;
     if is_tga {
         let t = tga::read(&path).ok()?;
-        upload_rgba_to_gl(t.width, t.height, &t.rgba)
+        upload_world_rgba_to_gl(t.width, t.height, &t.rgba)
     } else {
-        upload_rsb_to_gl(&rsb::read(&path).ok()?)
+        upload_world_rsb_to_gl(&rsb::read(&path).ok()?)
     }
 }
 
@@ -53,8 +53,8 @@ pub fn ensure_texture(
         .and_then(|resolved| rsb::read(&resolved).ok())
         .and_then(|rsb_tex| match key {
             // Drawn cut out, like the rest of the opaque pass
-            Some(key) => upload_rgba_to_gl(rsb_tex.width, rsb_tex.height, &rsb_tex.to_rgba8_keyed(key)),
-            None => upload_rsb_to_gl(&rsb_tex),
+            Some(key) => upload_world_rgba_to_gl(rsb_tex.width, rsb_tex.height, &rsb_tex.to_rgba8_keyed(key)),
+            None => upload_world_rsb_to_gl(&rsb_tex),
         });
     cache.insert(filename.clone(), tex_id);
     tex_id
