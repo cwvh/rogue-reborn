@@ -49,6 +49,13 @@ use rogue_reborn::levels::{find_zone_spawn, find_mission_spawns, pick_index, lis
 use rogue_reborn::util::find_file;
 use crate::textures::{load_character_texture, ensure_texture};
 
+// The first-person view's height in degrees. The width follows the screen shape.
+const VIEW_HIGH: f32 = 90.0;
+
+fn half_view_tan() -> f32 {
+    (VIEW_HIGH.to_radians() / 2.0).tan()
+}
+
 /// Soot marks a blast can leave
 const SCORCH_VARIANTS: usize = 4;
 
@@ -379,8 +386,8 @@ fn main() {
         return;
     }
 
-    const WIDTH: i32 = 1024;
-    const HEIGHT: i32 = 768;
+    const WIDTH: i32 = 1280;
+    const HEIGHT: i32 = 1024;
 
     // Initialize GLFW. The portal drawing masks the screen with the stencil buffer, so ask
     // for one rather than hope the default has it.
@@ -1658,7 +1665,7 @@ fn main() {
             glClear(0x00004000 | 0x00000100 | 0x00000400); // GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT
             glMatrixMode(0x1701); // GL_PROJECTION
             glLoadIdentity();
-            glu_perspective(60.0, aspect, z_near, z_far);
+            glu_perspective(VIEW_HIGH, aspect, z_near, z_far);
 
             glMatrixMode(0x1700); // GL_MODELVIEW
             glLoadIdentity();
@@ -2685,7 +2692,7 @@ fn main() {
                 if let (true, false, Some(e), Some(to_map)) = (casing_rounds > 0, gate.showing(), player_ejector.as_ref().filter(|_| !sim.players[me].equipped_grenade), &view_to_map) {
                     let mut gun = [0f32; 16];
                     glGetFloatv(0x0BA6, gun.as_mut_ptr()); // GL_MODELVIEW_MATRIX
-                    let widen = 30f32.to_radians().tan() / 22.5f32.to_radians().tan();
+                    let widen = half_view_tan() / 22.5f32.to_radians().tan();
                     for _ in 0..casing_rounds.min(MOST_CASINGS_A_FRAME) {
                         casings.eject(&gun, to_map, e, me, widen);
                     }
@@ -2751,9 +2758,9 @@ fn main() {
             let lines: Vec<(String, [f32; 3])> = feed.iter().map(|(_, text, color)| (text.clone(), *color)).collect();
             let dead = net.is_some() && sim.players[me].respawn_at.is_some();
             let meter = net.as_ref().filter(|_| lag_meter).map(|(client, _)| (&client.meter, net_clock.elapsed().as_secs_f64()));
-            // The crosshair opens as wide as the gun's spread, in a view 60 degrees high
+            // The crosshair opens as wide as the gun's spread, in the world view
             let p = &sim.players[me];
-            let spread = if p.equipped_grenade { 0.0 } else { p.aim.angle.tan() / 30f32.to_radians().tan() * h as f32 / 2.0 };
+            let spread = if p.equipped_grenade { 0.0 } else { p.aim.angle.tan() / half_view_tan() * h as f32 / 2.0 };
             // Watching, none of the player's own: no crosshair, red, whiteout or daze
             let own = watch_pose.is_none();
             let (veil, daze) = if own { (veil, concussion.daze()) } else { (0.0, 0.0) };
