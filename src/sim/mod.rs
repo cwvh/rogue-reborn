@@ -2079,6 +2079,9 @@ impl Sim {
                 p.leg_wounds = p.leg_wounds.saturating_add(1);
             }
         }
+        if self.god {
+            return;
+        }
         p.hit = Some(Struck { motion, start: now });
         ev.push(Event::Log(format!("t={now:.2} player {victim} {} with {motion}", if killed { "falls" } else { "flinches" })));
         if !killed {
@@ -2224,7 +2227,7 @@ mod tests {
     }
 
     #[test]
-    fn a_god_takes_no_harm_but_flinches() {
+    fn a_god_takes_no_harm_and_does_not_flinch() {
         let mut sim = demo();
         sim.god = true;
         let mut ev = Vec::new();
@@ -2232,7 +2235,7 @@ mod tests {
         sim.hurt_player(0, None, PLAYER_HP * 2.0, [0.0, 100.0, -350.0], wound, Cause::Terrorist, &mut ev);
         let p = &sim.players[0];
         assert_eq!(p.hp, PLAYER_HP);
-        assert!(p.respawn_at.is_none() && p.hit.is_some());
+        assert!(p.respawn_at.is_none() && p.hit.is_none());
     }
 
     fn shot_at(sim: &mut Sim, part: combat::BodyPart) {

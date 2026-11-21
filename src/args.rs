@@ -70,7 +70,7 @@ pub struct Args {
     /// How the level's soft sprites (shadows, light pools) are drawn: 0 as shipped, see `SPRITE_MODES`
     pub sprite_mode: u8,
     pub first_person: bool,
-    /// Take no harm from anything, but flinch at hits as usual
+    /// Take no harm from anything, and don't flinch
     pub god: bool,
     /// For taking screenshots: Shift orbits the third-person view, and pictures leave out the debug text
     pub cinematic: bool,
