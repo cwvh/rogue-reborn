@@ -1,10 +1,10 @@
 mod args;
 mod camera;
 mod debug;
-mod draw;
 mod hud;
 mod opengl;
 mod player;
+mod render;
 mod textures;
 mod ui_gl;
 
@@ -15,7 +15,7 @@ use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 use std::rc::Rc;
 use std::net::ToSocketAddrs;
 use rogue_reborn::motion::MOTION_FPS;
-use rogue_reborn::{map, dmp, rsb, actor, combat, crp, demo, grenade, blastlight, concussion, recording, skeleton, sim, sound, weapon, ambience, glass, casings};
+use rogue_reborn::{map, dmp, combat, crp, demo, grenade, blastlight, concussion, recording, sim, sound, ambience, glass, casings};
 use rogue_reborn::net::client::{Client, Seen, Status};
 use rogue_reborn::net::host::{HostedServer, STARTUP, new_key};
 use rogue_reborn::net::proto::LobbyCommand;
@@ -39,15 +39,15 @@ use crate::args::parse_args;
 use crate::camera::{Camera, listener_of, apply_camera};
 use rogue_reborn::util::unit3;
 use crate::player::{BodyKey, BodyState};
-use rogue_reborn::body::{self, PlayerMotions};
+use rogue_reborn::body;
 use rogue_reborn::lighting::{CharacterLight, Lighting};
 use rogue_reborn::visibility::Visibility;
-use crate::draw::{WeaponDraw, CharacterArrays, draw_weapon, FlashDraw, FlashPart, FlashSpot, Flashes, draw_flash, draw_flash_here, draw_character, draw_glass, draw_fracture, level_radius, Which, draw_plan, wipe_opening, room_color};
+use crate::render::assets::{Assets, Uniform, SCORCH_VARIANTS, HOLE_VARIANTS};
+use crate::render::draw::{WeaponDraw, CharacterArrays, draw_weapon, FlashSpot, Flashes, draw_flash, draw_flash_here, draw_character, draw_glass, draw_fracture, level_radius, Which, draw_plan, wipe_opening, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
 use rogue_reborn::levels::{find_zone_spawn, find_mission_spawns, pick_index, list_levels, find_level, extract_map_num};
-use rogue_reborn::util::find_file;
-use crate::textures::{load_character_texture, ensure_texture};
+use crate::textures::ensure_texture;
 
 // The first-person view's height in degrees. The width follows the screen shape.
 const VIEW_HIGH: f32 = 90.0;
@@ -55,9 +55,6 @@ const VIEW_HIGH: f32 = 90.0;
 fn half_view_tan() -> f32 {
     (VIEW_HIGH.to_radians() / 2.0).tan()
 }
-
-/// Soot marks a blast can leave
-const SCORCH_VARIANTS: usize = 4;
 
 /// Added to a terrorist's number so its casings are not taken for a player's
 const NPC_OWNERS: usize = 1000;
@@ -104,15 +101,6 @@ fn standing_light(lighting: &Lighting, level: &map::Map, visibility: &Visibility
     room_light(lighting, level, visibility, [feet[0], feet[1] + 10.0, feet[2]], [feet[0], feet[1] + 100.0, feet[2]])
 }
 
-/// What a player wears: their side's uniform in a team game, or else the players' model
-/// A side's uniform: its own mesh, skinned to the players' skeleton
-struct Uniform {
-    model: crp::Crp,
-    arrays: CharacterArrays,
-    textures: Vec<Option<u32>>,
-    skin: crp::Skin,
-}
-
 /// What a player on `side` is drawn with: their side's uniform, or else the players' model
 fn dress<'a>(side: Option<sim::Side>, sides: &'a [Option<Uniform>], model: &'a crp::Crp, arrays: &'a CharacterArrays,
              textures: &'a [Option<u32>], skin: Option<&'a crp::Skin>) -> (&'a crp::Crp, &'a CharacterArrays, &'a [Option<u32>], Option<&'a crp::Skin>) {
@@ -154,37 +142,6 @@ fn round_banner(r: &RoundState, now: f32, winner: Option<&str>) -> String {
         // The results screen is up
         (Phase::Results, None) | (Phase::Debrief, _) => String::new(),
     }
-}
-
-fn load_flash_draw() -> Option<FlashDraw> {
-    let model = map::read_model(Path::new("data/model/muzzle_flash.qob")).ok()?;
-    let mut parts = Vec::new();
-    for object in &model.geometries.objects {
-        for od in &object.object_datas {
-            let material = model.materials.materials.get(od.material as usize)?;
-            let stem = Path::new(&material.filename).file_stem()?.to_string_lossy().to_string();
-            // Some textures are named with a TGA prefix that the material's file name lacks
-            let texture = find_file(Path::new("data/texture"), &stem, "rsb")
-                .or_else(|| find_file(Path::new("data/texture"), &format!("TGA{stem}"), "rsb"))
-                .and_then(|p| rsb::read(&p).ok())
-                .and_then(|t| upload_world_rsb_to_gl(&t))?;
-            let (mut verts, mut uvs) = (Vec::new(), Vec::new());
-            let n = od.faces.face_indices.len().min(od.faces.texture_indices.len());
-            for k in 0..n {
-                let (i0, i1, i2) = od.faces.face_indices[k];
-                let (t0, t1, t2) = od.faces.texture_indices[k];
-                for (i, t) in [(i0, t0), (i1, t1), (i2, t2)] {
-                    let v = &object.vertices[i as usize];
-                    verts.push([v.x, v.y, v.z]);
-                    let uv = &od.texture_vertices.uv_coords[t as usize];
-                    uvs.push([uv.u, uv.v]);
-                }
-            }
-            parts.push(FlashPart { verts, uvs, texture });
-        }
-    }
-    println!("loaded muzzle_flash.qob ({} triangles)", parts.iter().map(|p| p.verts.len() / 3).sum::<usize>());
-    Some(FlashDraw { parts })
 }
 
 fn main() {
@@ -462,187 +419,15 @@ fn main() {
     // Motions other characters play: idle (or --anim), injury reactions and deaths
     let idle_name = args.anim.clone().unwrap_or_else(|| "up_none_cyc".to_string());
     let mut characters = Characters::load(&model_path, &idle_name);
-    let load_motion = rogue_reborn::sim::characters::load_motion;
-    // The player carries the MP5K, so uses the SMG-holding movement set
-    let slot_motion = |slot: &str, default: &str| {
-        let name = args.player_anims.iter().rev().find(|(k, _)| k == slot).map_or(default, |(_, m)| m.as_str());
-        load_motion(name)
-    };
-    let player_motions = PlayerMotions::load(characters.as_ref().and_then(|c| c.rig.as_ref()).map(|r| &r.skeleton), slot_motion);
-
-    // The MP5K: definition, model and texture
-    let weapon_def = weapon::read(Path::new("data/kit/pw_mp5k.wpn")).ok();
-    let load_model_draw = |file: &str, muzzle: [f32; 3], flash_scale: f32| -> Option<WeaponDraw> {
-        let model = map::read_model(&Path::new("data/model").join(file)).ok()?;
-        let mut verts = Vec::new();
-        let mut uvs = Vec::new();
-        for object in &model.geometries.objects {
-            for od in &object.object_datas {
-                let n = od.faces.face_indices.len().min(od.faces.texture_indices.len());
-                for k in 0..n {
-                    let (i0, i1, i2) = od.faces.face_indices[k];
-                    let (t0, t1, t2) = od.faces.texture_indices[k];
-                    for (i, t) in [(i0, t0), (i1, t1), (i2, t2)] {
-                        let v = &object.vertices[i as usize];
-                        verts.push([v.x, v.y, v.z]);
-                        let uv = &od.texture_vertices.uv_coords[t as usize];
-                        uvs.push([uv.u, uv.v]);
-                    }
-                }
-            }
-        }
-        let material = model.materials.materials.first()?.filename.clone();
-        let stem = Path::new(&material).file_stem()?.to_string_lossy().to_string();
-        let texture = find_file(Path::new("data/texture"), &stem, "rsb")
-            .and_then(|p| rsb::read(&p).ok())
-            .and_then(|t| upload_world_rsb_to_gl(&t));
-        println!("loaded {} ({} triangles, texture {})", file, verts.len() / 3, if texture.is_some() { "ok" } else { "missing" });
-        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
-        for v in &verts {
-            for a in 0..3 {
-                lo[a] = lo[a].min(v[a]);
-                hi[a] = hi[a].max(v[a]);
-            }
-        }
-        let center = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
-        let length = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f32::max).max(1.0);
-        Some(WeaponDraw { verts, uvs, texture, muzzle, center, length, flash_scale })
-    };
-    let weapon_draw = weapon_def.as_ref().and_then(|w| load_model_draw(&w.model, w.muzzle, w.flash_scale));
-    // The grenade in the hand (the original's grenade.qob is a flat inventory picture)
-    let grenade_draw = load_model_draw("rsw_smokegrenade.qob", [0.0; 3], 0.0);
-    // The original's flash model has crossed planes along the barrel and a four-point star
-    let flash_draw = load_flash_draw();
-
-    // Bullet holes: the game own sprites, or with --realistic-decals pictures drawn for each surface
-    const HOLE_VARIANTS: usize = 6;
-    let mut hole_tex: HashMap<(Surface, usize), u32> = HashMap::new();
-    if args.realistic_decals {
-        for surface in [Surface::Concrete, Surface::Wood, Surface::Metal, Surface::Earth, Surface::Soft] {
-            for v in 0..HOLE_VARIANTS {
-                let seed = 0x1000 + (v as u64) * 7919 + surface as u64 * 104729;
-                let px = impact::hole_texture(surface, seed);
-                if let Some(id) = upload_world_rgba_to_gl(impact::TEXTURE_SIZE as u32, impact::TEXTURE_SIZE as u32, &px) {
-                    hole_tex.insert((surface, v), id);
-                }
-            }
-        }
-    } else {
-        for (surface, stem) in [(Surface::Wood, "SP_wood_hit_1"), (Surface::Concrete, "Bullet_hole_simple_1")] {
-            let sprite = find_file(Path::new("data/texture"), stem, "rsb").and_then(|p| rsb::read(&p).ok());
-            if let Some(t) = sprite {
-                let mut px = t.to_rgba8();
-                impact::key_alpha(&mut px, t.width as usize, t.height as usize);
-                if let Some(id) = upload_world_rgba_to_gl(t.width as u32, t.height as u32, &px) {
-                    hole_tex.insert((surface, 0), id);
-                }
-            }
-        }
-    }
-    // Soft clouds for dust and a bright sprite for the flash of a spark
-    let cloud_tex = find_file(Path::new("data/texture"), "TGAdirt_cloud", "rsb").and_then(|p| rsb::read(&p).ok()).and_then(|t| upload_world_rsb_to_gl(&t));
-    // The flash sprite sits on a flat color, which would show as a square, so key it out
-    let flash_tex = find_file(Path::new("data/texture"), "Sparks1", "rsb").and_then(|p| rsb::read(&p).ok()).and_then(|t| {
-        let mut px = t.to_rgba8();
-        impact::key_alpha(&mut px, t.width as usize, t.height as usize);
-        upload_world_rgba_to_gl(t.width as u32, t.height as u32, &px)
-    });
-    // A blast: its flash, its smoke, the ring of its shockwave, and the soot it leaves
-    let sprite = |stem: &str| find_file(Path::new("data/texture"), stem, "rsb").and_then(|p| rsb::read(&p).ok()).and_then(|t| upload_world_rsb_to_gl(&t));
-    let glare_tex = sprite("TGAgrenade_explosion_1");
-    let smoke_tex = sprite("TGAgrenade_blast_03");
-    let ring_tex = sprite("TGAgrenade_smoke_ring_1");
-    for v in 0..SCORCH_VARIANTS {
-        let px = impact::hole_texture(Surface::Scorch, 0x5C0 + v as u64 * 3571);
-        if let Some(id) = upload_world_rgba_to_gl(impact::TEXTURE_SIZE as u32, impact::TEXTURE_SIZE as u32, &px) {
-            hole_tex.insert((Surface::Scorch, v), id);
-        }
-    }
+    let mut assets = Assets::load(&args, &characters, &model_path, &joined);
     let mut decals: Vec<impact::Decal> = Vec::new();
     let mut effects = impact::Effects::default();
-    // The light of a blast: a round patch of light, laid over each surface it reaches
-    let light_tex = upload_rgba_to_gl(blastlight::TEXTURE_SIZE as u32, blastlight::TEXTURE_SIZE as u32, &blastlight::texture());
-    if let Some(id) = light_tex {
-        unsafe {
-            glBindTexture(GL_TEXTURE_2D, id);
-            // The patch must not repeat where a surface runs on past it
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as i32);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as i32);
-        }
-    }
     let mut blast_lights: Vec<blastlight::BlastLight> = Vec::new();
     const MAX_DECALS: usize = 300;
     // A blast's embers: how wide they are, and the width of a pixel for each unit of distance
     // (a 60 degree view about a thousand pixels high)
     const EMBER_SIZE: f32 = 2.0;
     const ONE_PIXEL_PER_UNIT: f32 = 0.0012;
-
-    // Where the weapon sits relative to the right hand. The weapon models are made in the
-    // hand bone's own space: the origin is the wrist, forward (-Y) runs along the hand as
-    // it hangs in the bind pose, and up (+Z) is the way the body faces. So the gun goes on
-    // the hand as it is, and the motions aim it: low and ahead at the ready, level when
-    // firing. `--weapon-offset` shifts the gun, in the model's own axes.
-    let weapon_attach: Option<(usize, skeleton::Transform)> = (|| {
-        let skel = &characters.as_ref()?.rig.as_ref()?.skeleton;
-        let hand = skel.bones.iter().position(|b| b.name == "RightHand")?;
-        Some((hand, skeleton::Transform {
-            rot: [0.0, 0.0, 0.0, 1.0],
-            pos: args.weapon_offset.unwrap_or([0.0, 0.0, 0.0]),
-        }))
-    })();
-
-    // One GL texture per part, from the character's own directory
-    let textures_of = |c: &crp::Crp, dir: &Path| -> Vec<Option<u32>> {
-        let mut cache: HashMap<String, Option<u32>> = HashMap::new();
-        c.parts.iter().map(|part| {
-            *cache.entry(part.material.clone()).or_insert_with(|| {
-                let id = load_character_texture(dir, &part.material);
-                if id.is_none() {
-                    println!("no texture for {}", part.material);
-                }
-                id
-            })
-        }).collect()
-    };
-    let part_textures: Vec<Option<u32>> = characters.as_ref().map_or_else(Vec::new, |c| textures_of(&c.model, model_path.parent().unwrap_or(Path::new("."))));
-    // The model's triangle corners, laid out for glDrawArrays
-    let character_arrays = characters.as_ref().map_or_else(CharacterArrays::default, |c| CharacterArrays::new(&c.model));
-    // What each side wears in a team game, as the server says. Each uniform is its own mesh on
-    // the players' skeleton, so one posing dresses them all.
-    let side_dress: Vec<Option<Uniform>> = joined.iter()
-        .filter(|s| s.bases.iter().all(|b| !b.is_empty()))
-        .flat_map(|s| s.uniforms.clone())
-        .map(|path| {
-            let path = PathBuf::from(path);
-            let model = crp::read(&path).map_err(|e| eprintln!("could not load the uniform {}: {e:#}", path.display())).ok()?;
-            let skin = characters.as_ref().and_then(|c| c.rig.as_ref()).and_then(|r| model.skin(&r.skeleton));
-            let Some(skin) = skin else {
-                eprintln!("the uniform {} does not fit the players' skeleton", path.display());
-                return None;
-            };
-            let textures = textures_of(&model, path.parent().unwrap_or(Path::new(".")));
-            Some(Uniform { arrays: CharacterArrays::new(&model), textures, skin, model })
-        })
-        .collect();
-    // Team members whose faces the models wear: --actor picks one, otherwise
-    // they are dealt out in turn
-    let mut actors = actor::read_all(Path::new("data/actor"));
-    if let Some(name) = &args.actor {
-        actors.retain(|a| a.id.eq_ignore_ascii_case(name));
-        if actors.is_empty() {
-            eprintln!("no actor named {name}");
-        }
-    }
-    // GL textures for each actor's HRT face: (main, blink)
-    let faces_dir = Path::new("data/texture/faces");
-    let face_textures: Vec<(Option<u32>, Option<u32>)> = actors.iter().map(|a| {
-        let load = |p: &Path| rsb::read(p).ok().and_then(|t| upload_world_rsb_to_gl(&t));
-        let found = a.hrt_face.as_deref().and_then(|f| actor::find_face_textures(faces_dir, f));
-        match found {
-            Some((main, blink)) => (load(&main), blink.and_then(|b| load(&b))),
-            None => (None, None),
-        }
-    }).collect();
 
     // The mission whose terrorists stand in the level: the one a recording or the server names,
     // or else the level's own at the difficulty asked for
@@ -672,7 +457,7 @@ fn main() {
         ),
         // Characters at the spawn points
         // `--npcs` caps them in any level. 0 skips the terrorists and their walking grid.
-        (None, Some(c), false, None) => place_npcs(&mission_spawns[..args.npcs.unwrap_or(usize::MAX).min(mission_spawns.len())], own_spawn.as_slice(), &world, &c.model, &actors, &|i, p| {
+        (None, Some(c), false, None) => place_npcs(&mission_spawns[..args.npcs.unwrap_or(usize::MAX).min(mission_spawns.len())], own_spawn.as_slice(), &world, &c.model, &assets.actors, &|i, p| {
             args.model_yaw.unwrap_or_else(|| match mission_spawns.first() {
                 // In the demo room everyone faces the player
                 Some(player) if args.demo => (player[0] - p[0]).atan2(player[2] - p[2]).to_degrees(),
@@ -681,28 +466,7 @@ fn main() {
         }),
         _ => (Vec::new(), Vec::new()),
     };
-    // Each body a kit dresses its character in, as drawn: its corners laid out, and the texture
-    // each part wears
-    let body_draws: Vec<(CharacterArrays, Vec<Option<u32>>)> = characters.as_ref().map_or_else(Vec::new, |c| {
-        c.bodies.iter().map(|b| {
-            let mut cache: HashMap<String, Option<u32>> = HashMap::new();
-            let textures = b.textures.iter().map(|(dir, t)| {
-                *cache.entry(t.clone()).or_insert_with(|| {
-                    let id = load_character_texture(dir, t);
-                    if id.is_none() {
-                        println!("no texture for {t}");
-                    }
-                    id
-                })
-            }).collect();
-            (CharacterArrays::new(&b.model), textures)
-        }).collect()
-    });
-    // The weapons in the characters' hands
-    let held_draws: Vec<Option<WeaponDraw>> = characters.as_ref().map_or_else(Vec::new, |c| {
-        c.weapons.iter().map(|(_, w)| load_model_draw(&w.model, w.muzzle, w.flash_scale)).collect()
-    });
-    let held_ejectors: Vec<Option<casings::Ejector>> = characters.as_ref().map_or_else(Vec::new, |c| c.weapons.iter().map(|(_, w)| casings::Ejector::of(w)).collect());
+    assets.load_held(&characters);
 
     if let Some(p) = args.pos { camera.position = p; }
     if let Some(y) = args.yaw { camera.yaw = y; }
@@ -718,7 +482,7 @@ fn main() {
     let (mag_size, reserve) = match (&playback, &joined) {
         (Some(p), _) => (p.header().magazine, p.header().reserve),
         (_, Some(s)) => (s.magazine, s.reserve),
-        _ => weapon_def.as_ref().map_or((30, 900), |w| (w.magazine, w.reserve)),
+        _ => assets.weapon_def.as_ref().map_or((30, 900), |w| (w.magazine, w.reserve)),
     };
     // A scripted run can hold L to start with a short magazine and reload it, and E with it empty
     let scripted = |key| args.walk.is_some() && args.hold.as_deref().is_some_and(|h| h.to_ascii_uppercase().contains(key));
@@ -908,7 +672,7 @@ fn main() {
     let casing_pending: std::cell::RefCell<HashMap<usize, u32>> = Default::default();
     let casing_spots: std::cell::RefCell<Vec<(usize, casings::Ejector, [f32; 16])>> = Default::default();
     let mut shell_sound_at: HashMap<usize, f32> = HashMap::new();
-    let player_ejector = weapon_def.as_ref().and_then(casings::Ejector::of);
+    let player_ejector = assets.weapon_def.as_ref().and_then(casings::Ejector::of);
     let flash_rng = std::cell::Cell::new(0x9E37_79B9_7F4A_7C15u64);
     let flash_roll = || {
         let mut r = flash_rng.get();
@@ -1437,7 +1201,7 @@ fn main() {
                 sim::Event::CharacterShot { npc, .. } => {
                     if let Some(n) = sim.npcs.get_mut(npc) {
                         n.last_shot = game_time;
-                        if n.weapon.and_then(|w| held_ejectors.get(w)).is_some_and(Option::is_some) && !gate.showing() {
+                        if n.weapon.and_then(|w| assets.held_ejectors.get(w)).is_some_and(Option::is_some) && !gate.showing() {
                             *casing_pending.borrow_mut().entry(NPC_OWNERS + npc).or_default() += 1;
                         }
                     }
@@ -1456,7 +1220,7 @@ fn main() {
                         } else {
                             (if surface == Surface::Wood { Surface::Wood } else { Surface::Concrete }, 0)
                         };
-                        if hole_tex.contains_key(&(art, variant)) {
+                        if assets.hole_tex.contains_key(&(art, variant)) {
                             let roll = ((seed >> 20) & 0xFFFF) as f32 / 65536.0;
                             decals.push(impact::Decal::new(point, normal, art, args.realistic_decals, variant, roll));
                             if decals.len() > MAX_DECALS {
@@ -1587,7 +1351,7 @@ fn main() {
             let limp = sim.players[me].leg_wounds > 0;
             let pace = animation_pace(movement, crouched, limp);
             let rate = if matches!(movement, Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw) { 1.0 } else { (moved / (pace * args.speed_scale.unwrap_or(1.0))).clamp(0.5, 3.0) * args.anim_scale.unwrap_or(1.0) };
-            let frames = player_motions.get(movement, crouched, limp).map_or(1, |m| m.frames.max(1)) as f32;
+            let frames = assets.player_motions.get(movement, crouched, limp).map_or(1, |m| m.frames.max(1)) as f32;
             // A reload's frame follows its progress, and is picked where the body is drawn
             player_frame = if let (Movement::Throw, Some(th)) = (movement, sim.players[me].throw) {
                 ((game_time - th.start) / sim::THROW_SECONDS).clamp(0.0, 1.0) * (frames - 1.0)
@@ -2035,9 +1799,9 @@ fn main() {
                         continue;
                     }
                     let idle = args.anim_frame.unwrap_or_else(|| game_time * args.anim_fps.unwrap_or(30.0) + spot.stagger * 9.0);
-                    let (model, arrays, textures) = match spot.body.and_then(|b| chars.bodies.get(b).zip(body_draws.get(b))) {
+                    let (model, arrays, textures) = match spot.body.and_then(|b| chars.bodies.get(b).zip(assets.body_draws.get(b))) {
                         Some((b, (arrays, textures))) => (&b.model, arrays, textures.as_slice()),
-                        None => (c, &character_arrays, part_textures.as_slice()),
+                        None => (c, &assets.character_arrays, assets.part_textures.as_slice()),
                     };
                     let bones = chars.bones(spot, game_time, idle);
                     let (posed, turns) = match (&bones, chars.body(spot).1) {
@@ -2054,16 +1818,16 @@ fn main() {
                     // Eyes shut for 0.15 s every 4 s, staggered per model; the dead keep them shut
                     let blinking = args.eyes_closed || spot.health.is_dead()
                         || (blink_enabled && (clock + spot.stagger) % 4.0 < 0.15);
-                    let face = npc_actor[i].map(|a| face_textures[a]).and_then(|(main, blink)| {
+                    let face = npc_actor[i].map(|a| assets.face_textures[a]).and_then(|(main, blink)| {
                         if blinking { blink.or(main) } else { main }
                     });
-                    let held = spot.weapon.and_then(|w| held_draws.get(w)).and_then(Option::as_ref);
+                    let held = spot.weapon.and_then(|w| assets.held_draws.get(w)).and_then(Option::as_ref);
                     let glowing = npc_flash.get(i).copied().unwrap_or(false) && held.is_some_and(|w| w.flash_scale > 0.0) && !spot.health.is_dead();
                     let lit = flashing(lit_at([spot.pos[0], y, spot.pos[2]], spot.yaw, spot.scale), glowing);
                     draw_character(model, arrays, verts, &turns, textures, face, textured, glow_on([spot.pos[0], y, spot.pos[2]]), lit.as_ref());
                     // Their weapon in the right hand, as the players hold theirs, or on the
                     // floor once they have dropped it dying
-                    if let (Some(bones), Some(wd), Some((hand, off))) = (&bones, held, &weapon_attach) {
+                    if let (Some(bones), Some(wd), Some((hand, off))) = (&bones, held, &assets.weapon_attach) {
                         glPushMatrix();
                         let lying = match chars.dropped_weapon(spot, game_time, *hand, off) {
                             Some(lying) => {
@@ -2080,7 +1844,7 @@ fn main() {
                         if !lying && npc_flash.get(i).copied().unwrap_or(false) {
                             note_flash(wd);
                         }
-                        if let (false, Some(e)) = (lying, spot.weapon.and_then(|w| held_ejectors.get(w)).and_then(Option::as_ref)) {
+                        if let (false, Some(e)) = (lying, spot.weapon.and_then(|w| assets.held_ejectors.get(w)).and_then(Option::as_ref)) {
                             note_casings(NPC_OWNERS + i, e);
                         }
                         glPopMatrix();
@@ -2105,22 +1869,22 @@ fn main() {
                              firing: bool, crouched: bool, limp: bool, hip_turn: f32, flinch: Option<(&rogue_reborn::motion::Motion, f32, f32)>,
                              peek: Option<rogue_reborn::sim::peek::Peek>, body: &mut BodyState| -> bool {
                 let Some(Rig { skeleton: skel, skin }) = &chars.rig else { return false };
-                let moving = player_motions.moving(movement, peek, flinch.is_some());
+                let moving = assets.player_motions.moving(movement, peek, flinch.is_some());
                 // Crouching down or standing up plays in place, at its own pace; moving cuts it short
                 let since = body.since_stance_change(crouched, game_time);
                 let changing = since.filter(|_| !moving)
-                    .and_then(|t| player_motions.stance_change(crouched).map(|m| (m, t * 30.0)))
+                    .and_then(|t| assets.player_motions.stance_change(crouched).map(|m| (m, t * 30.0)))
                     .filter(|(m, f)| *f < m.frames.saturating_sub(1) as f32);
                 // Standing in place, the feet step round once the body has turned far enough
                 let shuffle = body.shuffle(yaw_deg, !moving && changing.is_none(), game_time)
-                    .and_then(|at| player_motions.turn(crouched).map(|m| (m, (game_time - at) * 30.0, at)))
+                    .and_then(|at| assets.player_motions.turn(crouched).map(|m| (m, (game_time - at) * 30.0, at)))
                     .filter(|(m, f, _)| *f < m.frames.saturating_sub(1) as f32);
                 let turn = body.turn_hips(if moving { hip_turn } else { 0.0 }, game_time);
                 let doing = body::Doing {
                     movement, frame, crouched, limp, reloading, firing, flinch: flinch.map(|(m, f, _)| (m, f)), peek, hip_turn: turn,
                     changing, shuffle: shuffle.map(|(m, f, _)| (m, f)), clock: game_time,
                 };
-                let Some(body::Pose { mut root, rotations: mut rots, aiming, peeking, shuffling }) = body::pose(&player_motions, skel, &doing) else { return false };
+                let Some(body::Pose { mut root, rotations: mut rots, aiming, peeking, shuffling }) = body::pose(&assets.player_motions, skel, &doing) else { return false };
                 // Raising the gun to fire is a cut, as in the original, so the first shots never
                 // leave a gun still on its way up. Once firing, the legs still ease.
                 let raising = aiming && !body.fade.key().is_some_and(|k| k.aiming);
@@ -2128,7 +1892,7 @@ fn main() {
                 let key = BodyKey { movement, reload: reloading.map(|r| r.empty), aiming, crouched, changing: changing.is_some(), flinch: flinch.map(|f| f.2.to_bits()), shuffle: shuffle.filter(|_| shuffling).map(|s| s.2.to_bits()), peek: peeking };
                 body.fade.apply(key, game_time, ease, &mut root, &mut rots);
                 let pose = skel.pose([0.0, root[1], 0.0], &rots);
-                let (model, arrays, textures, worn) = dress(side, &side_dress, &chars.model, &character_arrays, &part_textures, Some(skin));
+                let (model, arrays, textures, worn) = dress(side, &assets.side_dress, &chars.model, &assets.character_arrays, &assets.part_textures, Some(skin));
                 let verts = worn.unwrap_or(skin).apply(&pose);
                 let turns = worn.unwrap_or(skin).turns(&pose);
                 glPushMatrix();
@@ -2160,7 +1924,7 @@ fn main() {
                 }
 
                 // The MP5K in the right hand, or a grenade until it is thrown
-                if let (Some(Some(wd)), Some((hand, off))) = (hand, &weapon_attach) {
+                if let (Some(Some(wd)), Some((hand, off))) = (hand, &assets.weapon_attach) {
                     glPushMatrix();
                     glMultMatrixf(pose[*hand].matrix().as_ptr());
                     glMultMatrixf(off.matrix().as_ptr());
@@ -2200,7 +1964,7 @@ fn main() {
                     let visible = shown(pos);
                     let p = &sim.players[slot];
                     let yaw = sim::dequantize(look.0);
-                    let face = (!actors.is_empty()).then(|| face_textures[slot % actors.len()].0).flatten();
+                    let face = (!assets.actors.is_empty()).then(|| assets.face_textures[slot % assets.actors.len()].0).flatten();
                     if dead.is_none() {
                         let doing = Doing {
                             throwing: p.throw.map(|t| (game_time - t.start) / sim::THROW_SECONDS),
@@ -2212,10 +1976,10 @@ fn main() {
                             leg_wounds: p.leg_wounds,
                         };
                         let limp = p.leg_wounds > 0;
-                        let frames = |m: Movement| player_motions.get(m, doing.crouched, limp).map_or(1, |m| m.frames.max(1)) as f32;
+                        let frames = |m: Movement| assets.player_motions.get(m, doing.crouched, limp).map_or(1, |m| m.frames.max(1)) as f32;
                         let (movement, frame) = remote_anim.update(slot, pos, yaw, step_dt, doing, frames, args.speed_scale.unwrap_or(1.0), args.anim_scale.unwrap_or(1.0));
-                        let scale = actors.get(slot % actors.len().max(1)).map_or([1.0; 3], |a| a.scale);
-                        let hand = if p.equipped_grenade { p.throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
+                        let scale = assets.actors.get(slot % assets.actors.len().max(1)).map_or([1.0; 3], |a| a.scale);
+                        let hand = if p.equipped_grenade { p.throw.is_none_or(|t| !t.thrown).then_some(&assets.grenade_draw) } else { Some(&assets.weapon_draw) };
                         let flash = player_flash[slot];
                         // Hidden, the animation still follows them
                         let flinch = flinch_at(chars, p, view_time);
@@ -2243,7 +2007,7 @@ fn main() {
                         ..Npc::default()
                     };
                     let idle = game_time * 30.0 + ghost.stagger * 9.0;
-                    let (model, arrays, textures, skin) = dress(p.side, &side_dress, &chars.model, &character_arrays, &part_textures, chars.rig.as_ref().map(|r| &r.skin));
+                    let (model, arrays, textures, skin) = dress(p.side, &assets.side_dress, &chars.model, &assets.character_arrays, &assets.part_textures, chars.rig.as_ref().map(|r| &r.skin));
                     let (posed, turns) = chars.bones(&ghost, view_time, idle).zip(skin).map(|(b, s)| (s.apply(&b), s.turns(&b))).unwrap_or_default();
                     let verts: &[[f32; 3]] = if posed.is_empty() { &model.vertices } else { &posed };
                     glPushMatrix();
@@ -2260,12 +2024,12 @@ fn main() {
             if let (true, true, Some(chars)) = (first_person, third_person, &sim.characters) {
                 let clock = if fixed_step { game_time as f32 } else { start_time.elapsed().as_secs_f32() };
                 let blinking = args.eyes_closed || (blink_enabled && clock % 4.0 < 0.15);
-                let face = (!actors.is_empty()).then(|| face_textures[0]).and_then(|(main, blink)| {
+                let face = (!assets.actors.is_empty()).then(|| assets.face_textures[0]).and_then(|(main, blink)| {
                     if blinking { blink.or(main) } else { main }
                 });
-                let scale = actors.first().map_or([1.0; 3], |a| a.scale);
+                let scale = assets.actors.first().map_or([1.0; 3], |a| a.scale);
                 let mine = &sim.players[me];
-                let hand = if mine.equipped_grenade { mine.throw.is_none_or(|t| !t.thrown).then_some(&grenade_draw) } else { Some(&weapon_draw) };
+                let hand = if mine.equipped_grenade { mine.throw.is_none_or(|t| !t.thrown).then_some(&assets.grenade_draw) } else { Some(&assets.weapon_draw) };
                 let flash = player_flash[me];
                 if mine.respawn_at.is_none() {
                     let flinch = flinch_at(chars, mine, game_time);
@@ -2281,7 +2045,7 @@ fn main() {
                         if corpses.get(&slot).is_none_or(|(start, _)| (start - hit.start).abs() > 0.1) {
                             let health = combat::Health { hp: 0.0, state: combat::NpcState::Dead { motion: hit.motion, start: hit.start }, ..Default::default() };
                             let yaw = -sim::dequantize(p.look.0);
-                            let scale = actors.get(slot % actors.len().max(1)).map_or([1.0; 3], |a| a.scale);
+                            let scale = assets.actors.get(slot % assets.actors.len().max(1)).map_or([1.0; 3], |a| a.scale);
                             let pos = p.player.pos;
                             corpses.insert(slot, (hit.start, Npc { health, pos, floor: pos[1], yaw, scale, stagger: 0.0, body: None, ..Npc::default() }));
                         }
@@ -2303,9 +2067,9 @@ fn main() {
                     if (slot == me && !(first_person && third_person)) || now < *start || !shown(body.pos) {
                         continue;
                     }
-                    let face = (!actors.is_empty()).then(|| face_textures[slot % actors.len()].0).flatten();
+                    let face = (!assets.actors.is_empty()).then(|| assets.face_textures[slot % assets.actors.len()].0).flatten();
                     let side = sim.players.get(slot).and_then(|p| p.side);
-                    let (model, arrays, textures, skin) = dress(side, &side_dress, &chars.model, &character_arrays, &part_textures, chars.rig.as_ref().map(|r| &r.skin));
+                    let (model, arrays, textures, skin) = dress(side, &assets.side_dress, &chars.model, &assets.character_arrays, &assets.part_textures, chars.rig.as_ref().map(|r| &r.skin));
                     let (posed, turns) = chars.bones(body, now, 0.0).zip(skin).map(|(b, s)| (s.apply(&b), s.turns(&b))).unwrap_or_default();
                     let verts: &[[f32; 3]] = if posed.is_empty() { &model.vertices } else { &posed };
                     glPushMatrix();
@@ -2320,7 +2084,7 @@ fn main() {
             }
 
             // Grenades in the air
-            if let Some(gd) = &grenade_draw {
+            if let Some(gd) = &assets.grenade_draw {
                 let flying: Vec<([f32; 3], f32)> = match &view {
                     Some(v) => v.grenades.iter().map(|&(_, pos, spin)| (pos, spin)).collect(),
                     None => sim.thrown.iter().map(|t| (t.grenade.pos, t.grenade.spin)).collect(),
@@ -2343,7 +2107,7 @@ fn main() {
                 l.update(step_dt);
             }
             blast_lights.retain(|l| !l.done());
-            if let (true, Some(id)) = (textured && !blast_lights.is_empty(), light_tex) {
+            if let (true, Some(id)) = (textured && !blast_lights.is_empty(), assets.light_tex) {
                 set_clip_planes(&[]);
                 glEnable(GL_TEXTURE_2D);
                 glBindTexture(GL_TEXTURE_2D, id);
@@ -2385,7 +2149,7 @@ fn main() {
                 glDepthMask(0);
                 glColor4f(1.0, 1.0, 1.0, 1.0);
                 for d in &decals {
-                    let Some(&id) = hole_tex.get(&(d.surface, d.variant)) else { continue };
+                    let Some(&id) = assets.hole_tex.get(&(d.surface, d.variant)) else { continue };
                     glBindTexture(GL_TEXTURE_2D, id);
                     glBegin(GL_QUADS);
                     // The top row of the picture is its top edge
@@ -2406,11 +2170,11 @@ fn main() {
                 // Soft clouds and the flash of a spark, as sprites facing the camera
                 for puff in &effects.puffs {
                     let (tex, additive, strength) = match puff.kind {
-                        impact::PuffKind::Dust => (cloud_tex, false, 0.55),
-                        impact::PuffKind::Flash => (flash_tex, true, 1.0),
-                        impact::PuffKind::Glare => (glare_tex, true, 1.0),
-                        impact::PuffKind::Smoke => (smoke_tex, false, 0.6),
-                        impact::PuffKind::Ring => (ring_tex, false, 0.9),
+                        impact::PuffKind::Dust => (assets.cloud_tex, false, 0.55),
+                        impact::PuffKind::Flash => (assets.flash_tex, true, 1.0),
+                        impact::PuffKind::Glare => (assets.glare_tex, true, 1.0),
+                        impact::PuffKind::Smoke => (assets.smoke_tex, false, 0.6),
+                        impact::PuffKind::Ring => (assets.ring_tex, false, 0.9),
                     };
                     let Some(id) = tex else { continue };
                     glEnable(GL_TEXTURE_2D);
@@ -2528,7 +2292,7 @@ fn main() {
                     let weapon = if landing.owner >= NPC_OWNERS {
                         sim.npcs.get(landing.owner - NPC_OWNERS).and_then(|n| n.weapon).and_then(|w| sim.characters.as_ref()?.weapons.get(w)).map(|(_, w)| w)
                     } else {
-                        weapon_def.as_ref()
+                        assets.weapon_def.as_ref()
                     };
                     let last = shell_sound_at.entry(landing.owner).or_insert(f32::NEG_INFINITY);
                     if let (Some(name), Some(snd)) = (weapon.and_then(|w| w.shell_sound.as_deref()), sound.as_mut()) {
@@ -2558,7 +2322,7 @@ fn main() {
                 glColor4f(1.0, 1.0, 1.0, 1.0);
             }
 
-            if let Some(flash) = flash_draw.as_ref().filter(|_| textured) {
+            if let Some(flash) = assets.flash_draw.as_ref().filter(|_| textured) {
                 for spot in flash_spots.borrow().iter() {
                     draw_flash(flash, spot);
                 }
@@ -2639,7 +2403,7 @@ fn main() {
 
         // The held weapon in front of the camera, over the scene. A grenade is small, so it is held
         // further out in proportion, drawn back by the wind-up, and gone once it has been thrown.
-        let held = if sim.players[me].equipped_grenade { grenade_draw.as_ref().filter(|_| sim.players[me].throw.is_none_or(|t| !t.thrown)) } else { weapon_draw.as_ref() };
+        let held = if sim.players[me].equipped_grenade { assets.grenade_draw.as_ref().filter(|_| sim.players[me].throw.is_none_or(|t| !t.thrown)) } else { assets.weapon_draw.as_ref() };
         // Without the view model (the default) the gun is not drawn.
         // Its place still says where the casings leave, and only a firing gun needs it.
         let casing_rounds = casing_pending.borrow().get(&me).copied().unwrap_or(0);
@@ -2687,7 +2451,7 @@ fn main() {
                         if player_flash[me] && wd.flash_scale > 0.0 { lit.flash_tint() } else { lit.tint }
                     });
                     draw_weapon(wd, textured, light);
-                    if let (true, Some(flash)) = (player_flash[me], flash_draw.as_ref().filter(|_| textured)) {
+                    if let (true, Some(flash)) = (player_flash[me], assets.flash_draw.as_ref().filter(|_| textured)) {
                         draw_flash_here(flash, &FlashSpot::here(wd, flash_roll()));
                     }
                 }
