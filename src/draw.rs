@@ -7,13 +7,6 @@ use rogue_reborn::lighting::CharacterLight;
 use crate::opengl::*;
 use crate::textures::{ensure_texture, is_tga};
 
-pub struct Mesh {
-    pub vertices: Vec<[f32; 3]>,
-    pub indices: Vec<[u32; 3]>,
-    pub center: [f32; 3],
-    pub radius: f32,
-}
-
 // The weapon model as flat triangle corner arrays, ready to draw
 pub struct WeaponDraw {
     pub verts: Vec<[f32; 3]>,
@@ -348,68 +341,21 @@ pub fn material_color(name: &str) -> (f32, f32, f32) {
     (c(0), c(8), c(16))
 }
 
-pub fn build_mesh(level: &map::Map) -> Mesh {
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
-
+// Bounding radius of the level's geometry, for the clip planes
+pub fn level_radius(level: &map::Map) -> f32 {
     let mut min = [f32::INFINITY; 3];
     let mut max = [f32::NEG_INFINITY; 3];
-
-    for object in &level.geometries.objects {
-        let base = vertices.len() as u32;
-
-        // Append object vertices
-        for v in &object.vertices {
-            let p = [v.x, v.y, v.z];
-            for i in 0..3 {
-                if p[i] < min[i] {
-                    min[i] = p[i];
-                }
-                if p[i] > max[i] {
-                    max[i] = p[i];
-                }
-            }
-            vertices.push(p);
-        }
-
-        // Append triangle indices from all object data groups
-        for od in &object.object_datas {
-            for &(i0, i1, i2) in &od.faces.face_indices {
-                indices.push([
-                    base + i0 as u32,
-                    base + i1 as u32,
-                    base + i2 as u32,
-                ]);
-            }
+    for v in level.geometries.objects.iter().flat_map(|o| &o.vertices) {
+        for (i, c) in [v.x, v.y, v.z].into_iter().enumerate() {
+            min[i] = min[i].min(c);
+            max[i] = max[i].max(c);
         }
     }
-
-    // Fallback if empty
-    if vertices.is_empty() {
-        return Mesh {
-            vertices,
-            indices,
-            center: [0.0, 0.0, 0.0],
-            radius: 10.0,
-        };
+    if min[0] > max[0] {
+        return 10.0;
     }
-
-    let center = [
-        (min[0] + max[0]) * 0.5,
-        (min[1] + max[1]) * 0.5,
-        (min[2] + max[2]) * 0.5,
-    ];
-    let dx = max[0] - center[0];
-    let dy = max[1] - center[1];
-    let dz = max[2] - center[2];
-    let radius = (dx * dx + dy * dy + dz * dz).sqrt().max(1.0);
-
-    Mesh {
-        vertices,
-        indices,
-        center,
-        radius,
-    }
+    let d: f32 = (0..3).map(|i| (max[i] - min[i]) * 0.5).map(|h| h * h).sum();
+    d.sqrt().max(1.0)
 }
 
 /// Which of the level's objects to draw

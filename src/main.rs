@@ -42,7 +42,7 @@ use crate::player::{BodyKey, BodyState};
 use rogue_reborn::body::{self, PlayerMotions};
 use rogue_reborn::lighting::{CharacterLight, Lighting};
 use rogue_reborn::visibility::Visibility;
-use crate::draw::{WeaponDraw, CharacterArrays, draw_weapon, FlashDraw, FlashPart, FlashSpot, Flashes, draw_flash, draw_flash_here, draw_character, draw_glass, draw_fracture, build_mesh, Which, draw_plan, wipe_opening, room_color};
+use crate::draw::{WeaponDraw, CharacterArrays, draw_weapon, FlashDraw, FlashPart, FlashSpot, Flashes, draw_flash, draw_flash_here, draw_character, draw_glass, draw_fracture, level_radius, Which, draw_plan, wipe_opening, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
 use rogue_reborn::levels::{find_zone_spawn, find_mission_spawns, pick_index, list_levels, find_level, extract_map_num};
@@ -372,8 +372,7 @@ fn main() {
         baked
     });
 
-    // Build a flattened mesh from the MAP geometry
-    let mesh = build_mesh(&level);
+    let level_radius = level_radius(&level);
     // Collision world built from the render triangles (MAP space)
     let world = CollisionWorld::from_map(&level, Params::default());
     // The shards of broken glass fall for a moment afterwards
@@ -812,7 +811,6 @@ fn main() {
     // Hosting, the server we joined must name us its host, or it is someone else's
     let mut host_checked = hosted.is_none();
 
-    let mut render_time = Instant::now();
     let mut last_step = Instant::now();
 
     let mut textures = HashMap::new();
@@ -855,7 +853,6 @@ fn main() {
     // What the player did in the last tick, which the animation follows
     let mut shown;
     let mut was_free = false;
-    let mut drawn_rooms: Vec<String> = Vec::new();
     let mut blink_enabled = !args.no_blink;
     let mut show_hitboxes = false;
     // Sound is optional: no output device just means silence
@@ -1656,8 +1653,8 @@ fn main() {
         // distance at which a doorway counts as one the player stands in: past it, the wall
         // is cut open, or the doorway's opening is cut and the room beyond goes missing
         const MAX_Z_NEAR: f32 = 4.0;
-        let z_near = (mesh.radius / 1000.0).clamp(0.05, MAX_Z_NEAR);
-        let z_far = (mesh.radius * 10.0 + 100.0).max(z_near + 1.0);
+        let z_near = (level_radius / 1000.0).clamp(0.05, MAX_Z_NEAR);
+        let z_far = (level_radius * 10.0 + 100.0).max(z_near + 1.0);
 
         // Frame timing for FPS
         let fps = if raw_dt > 0.0 { 1.0 / raw_dt } else { 0.0 };
@@ -1668,8 +1665,9 @@ fn main() {
         let player_flash: Vec<bool> = sim.players.iter().enumerate().map(|(slot, p)| player_flashes.shows(slot, shot_at(p.flash_until), game_time) && !p.equipped_grenade).collect();
         let npc_flash: Vec<bool> = sim.npcs.iter().enumerate().map(|(i, n)| npc_flashes.shows(i, n.last_shot, game_time)).collect();
 
-        render_time = Instant::now();
+        let render_time = Instant::now();
         let view_to_map: Option<casings::Mat4>;
+        let drawn_rooms: Vec<String>;
         unsafe {
             glClearStencil(1);
             glClear(0x00004000 | 0x00000100 | 0x00000400); // GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT
