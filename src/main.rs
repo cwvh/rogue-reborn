@@ -25,7 +25,7 @@ use rogue_reborn::lobby::{self, LobbyView};
 use rogue_reborn::results::ResultsView;
 use rogue_reborn::ui::{Canvas, Pointer};
 use rogue_reborn::net::animation::Doing;
-use rogue_reborn::net::round::{Outcome, Phase, RoundState};
+use rogue_reborn::net::round::Phase;
 use rogue_reborn::net::watch::{BEHIND, Pose, RISE, WatchContext, WatchMode, behind};
 use rogue_reborn::sim::characters::{Characters, Npc, Rig};
 use rogue_reborn::sim::movement::{Movement, Reloading, animation_pace, hip_turn, movement_from_keys};
@@ -42,13 +42,12 @@ use crate::render::assets::{Uniform, SCORCH_VARIANTS, HOLE_VARIANTS};
 use crate::render::level::LevelDraw;
 use crate::render::window;
 use crate::audio::Audio;
-use crate::overlay::Overlay;
+use crate::overlay::{HudPass, Overlay};
 use crate::scene::Scene;
 use crate::session::{Game, Session};
 use crate::view::PlayerView;
 use crate::state::{Pressed, Timing, Toggles};
 use crate::render::draw::{WeaponDraw, CharacterArrays, draw_weapon, FlashSpot, draw_flash, draw_flash_here, draw_character, draw_glass, draw_fracture, level_radius, Which, draw_plan, wipe_opening, room_color};
-use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
 use crate::textures::ensure_texture;
 
@@ -97,40 +96,6 @@ fn dress<'a>(side: Option<sim::Side>, sides: &'a [Option<Uniform>], model: &'a c
     match side.and_then(|s| sides.get(s.index())).and_then(Option::as_ref) {
         Some(u) => (&u.model, &u.arrays, &u.textures, Some(&u.skin)),
         None => (model, arrays, textures, skin),
-    }
-}
-
-#[cfg(test)]
-mod banner_tests {
-    use super::*;
-
-    #[test]
-    fn the_last_one_standing_is_named_as_the_results_have_them() {
-        let r = RoundState { phase: Phase::Results, number: 1, ends: None, wins: [0, 0], last: Some(Outcome::Survived(0)) };
-        // Whoever has slot 0 now, the banner names the winner the results kept
-        assert_eq!(round_banner(&r, 0.0, Some("OriginalWinner")), "OriginalWinner WINS");
-        // Before the results come, the slot
-        assert_eq!(round_banner(&r, 0.0, None), "PLAYER 1 WINS");
-    }
-}
-
-/// The line on screen for where the rounds are, or none while one is played. `winner` is the
-/// last one standing in Survival, named as the round's results have them, whoever has their
-/// slot by now.
-fn round_banner(r: &RoundState, now: f32, winner: Option<&str>) -> String {
-    let left = r.ends.map_or(0.0, |e| (e - now).max(0.0));
-    match (r.phase, r.last) {
-        (Phase::Open | Phase::Live, _) => String::new(),
-        (Phase::Lobby, _) => "WAITING FOR THE ROUND TO START".to_string(),
-        (Phase::Countdown, _) => format!("ROUND {} STARTS IN {}", r.number + 1, left.ceil() as u32),
-        (Phase::Loading, _) => "WAITING FOR EVERYONE TO LOAD".to_string(),
-        (Phase::Hold, _) => "GET READY".to_string(),
-        (Phase::Results, Some(Outcome::Won(s))) => format!("{} WINS", format!("{s:?}").to_uppercase()),
-        (Phase::Results, Some(Outcome::Survived(p))) => format!("{} WINS", winner.map_or_else(|| format!("PLAYER {}", p + 1), str::to_string)),
-        (Phase::Results, Some(Outcome::Draw)) => "EVERYBODY LOST".to_string(),
-        (Phase::Results, Some(Outcome::CalledOff)) => "ROUND CALLED OFF".to_string(),
-        // The results screen is up
-        (Phase::Results, None) | (Phase::Debrief, _) => String::new(),
     }
 }
 
@@ -1954,94 +1919,9 @@ fn main() {
         scene.casing_pending.borrow_mut().clear();
         scene.casing_spots.borrow_mut().clear();
 
-        // Draw simple debug text overlay (upper-right)
-        let render_ms = (render_time.elapsed().as_secs_f64() * 1000.0) as f32;
-        let level_text = if !level.planning_levels.levels.is_empty() {
-            format!("LEVEL: {}", toggles.planning_level_index)
-        } else {
-            String::from("LEVEL: -")
-        };
-        // Fixed steps with a screenshot show fixed numbers, so the picture repeats
-        let steady = timing.fixed_step && args.screenshot.is_some();
-        let fps_text = format!("FPS: {:.1}", if steady { 0.0 } else { fps });
-        let render_text = format!("RENDER: {:.2} MS", if steady { 0.0 } else { render_ms });
-        if toggles.first_person {
-            let mut status = vec![
-                format!("KILLS: {}", sim.players[me].kills),
-                if sim.players[me].equipped_grenade { format!("GRENADES: {}", sim.players[me].grenades_left) }
-                    else if sim.players[me].reload_until.is_some() { "RELOADING".to_string() } else { format!("AMMO: {}/{}", sim.players[me].ammo, sim.players[me].reserve) },
-            ];
-            if let Some(from) = sim.players[me].charge_from {
-                status.insert(0, format!("POWER: {:.0}", ((game_time - from) / grenade::CHARGE_SECONDS).clamp(0.0, 1.0) * 100.0));
-            }
-            if let Some(hp) = sim.players[me].target_hp {
-                status.insert(0, format!("TARGET: {hp:.0}"));
-            }
-            if session.net.is_some() {
-                let p = &sim.players[me];
-                status.insert(0, if p.respawn_at.is_some() { "DEAD".to_string() } else { format!("HEALTH: {:.0}", p.hp.ceil()) });
-                status.insert(1, format!("DEATHS: {}", p.deaths));
-            }
-            // Watching, who it is and how they are, in place of the player's own
-            if pview.watch.watching() {
-                status = vec![match pview.watch.target() {
-                    Some(t) => format!("WATCHING {}  HEALTH: {:.0}", session.net.as_ref().map_or_else(|| format!("PLAYER {}", t + 1), |(c, _)| c.name_of(t)), sim.players[t].hp.ceil()),
-                    None if watch_pose.is_some() => "WATCHING".to_string(),
-                    None => "NO ONE TO WATCH".to_string(),
-                }];
-            }
-            let round = session.net.as_ref().map(|(c, _)| c.round).unwrap_or_default();
-            if round.phase != Phase::Open {
-                status.insert(0, format!("ROUND {}  BLUE {}  GOLD {}", round.number.max(1), round.wins[0], round.wins[1]));
-                if let (Phase::Live, Some(ends)) = (round.phase, round.ends) {
-                    let left = (ends - game_time).max(0.0).ceil() as u32;
-                    status.insert(1, format!("TIME: {}:{:02}", left / 60, left % 60));
-                }
-            }
-            let results = session.net.as_ref().and_then(|(c, _)| c.results.as_ref());
-            let winner = results.and_then(|r| r.rows.get(r.winner? as usize)).map(|row| row.name.as_str());
-            let banner = round_banner(&round, game_time, winner);
-            let msg = if game_time < sim.players[me].message.1 { sim.players[me].message.0.as_str() } else { banner.as_str() };
-            let marker = game_time < pview.hit_marker_until;
-            let lines: Vec<(String, [f32; 3])> = overlay.feed.iter().map(|(_, text, color)| (text.clone(), *color)).collect();
-            let dead = session.net.is_some() && sim.players[me].respawn_at.is_some();
-            let meter = session.net.as_ref().filter(|_| toggles.lag_meter).map(|(client, _)| (&client.meter, session.net_clock.elapsed().as_secs_f64()));
-            // The crosshair opens as wide as the gun's spread, in the world view
-            let p = &sim.players[me];
-            let spread = if p.equipped_grenade { 0.0 } else { p.aim.angle.tan() / half_view_tan() * h as f32 / 2.0 };
-            // Watching, none of the player's own: no crosshair, red, whiteout or daze
-            let own = watch_pose.is_none();
-            let (veil, daze) = if own { (pview.veil, pview.concussion.daze()) } else { (0.0, 0.0) };
-            draw_hud(w, h, &status, msg, marker && own, spread, veil, daze, &lines, dead && own, own, meter);
-        }
-        let rooms_text = if sim.culling {
-            format!("ROOM: {} DRAWN: {}", current_rooms.join(" "), drawn_rooms.join(" "))
-        } else {
-            format!("ROOM: {} (CULLING OFF)", current_rooms.join(" "))
-        };
-        let demo_text = match (&session.recorder, &session.playback) {
-            (Some(r), _) => format!("REC {:.0} S", r.ticks() as f32 * sim::TICK),
-            (_, Some(p)) => {
-                let (done, all) = p.progress();
-                format!("DEMO {:.0}/{:.0} S", done as f32 * sim::TICK, all as f32 * sim::TICK)
-            }
-            _ => String::new(),
-        };
-        let net_text = session.net.as_ref().map_or(String::new(), |(c, _)| format!("NET: {:?} {} PLAYERS", c.status, sim.players.iter().filter(|p| p.active).count()).to_uppercase());
-        let mut debug_lines: Vec<&str> = vec![&level_text, &fps_text, &render_text];
-        if !net_text.is_empty() {
-            debug_lines.push(&net_text);
-        }
-        if toggles.room_debug {
-            debug_lines.push(&rooms_text);
-        }
-        if !demo_text.is_empty() {
-            debug_lines.push(&demo_text);
-        }
-        // With --cinematic, captured pictures leave it out; the dump's text has it
-        if !(args.cinematic && (args.screenshot.is_some() || toggles.dump_requested || toggles.clip.is_some())) {
-            draw_debug_text(w, h, &debug_lines);
-        }
+        // Debug text and the HUD
+        let hud = HudPass { args: &args, level: &level, sim: &sim, me, game_time, w, h, fps, render_time, watch_pose, current_rooms: &current_rooms, drawn_rooms: &drawn_rooms };
+        let render_ms = overlay.draw_hud_and_debug(hud, &toggles, &timing, &pview, &session);
 
         // The lobby or the results, over the whole window, and the chat, which notes what
         // happens all game long. What is clicked and said is sent with the next tick.
