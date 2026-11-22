@@ -37,6 +37,7 @@ use rogue_reborn::lighting::{CharacterLight, Lighting};
 use rogue_reborn::visibility::Visibility;
 use crate::render::assets::{Uniform, SCORCH_VARIANTS, HOLE_VARIANTS};
 use crate::render::level::LevelDraw;
+use crate::render::window;
 use crate::session::{Game, Session};
 use crate::render::draw::{WeaponDraw, CharacterArrays, draw_weapon, FlashSpot, Flashes, draw_flash, draw_flash_here, draw_character, draw_glass, draw_fracture, level_radius, Which, draw_plan, wipe_opening, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
@@ -133,44 +134,7 @@ fn main() {
     // The shards of broken glass fall for a moment afterwards
     let mut fractures: Vec<glass::Fracture> = Vec::new();
 
-    const WIDTH: i32 = 1280;
-    const HEIGHT: i32 = 1024;
-
-    // Initialize GLFW. The portal drawing masks the screen with the stencil buffer, so ask
-    // for one rather than hope the default has it.
-    let mut glfw = glfw::init_no_callbacks().unwrap();
-    glfw.window_hint(glfw::WindowHint::StencilBits(Some(8)));
-    glfw.window_hint(glfw::WindowHint::DepthBits(Some(24)));
-    // A screenshot run draws into a window that never shows, so it doesn't cover the desktop
-    glfw.window_hint(glfw::WindowHint::Visible(args.screenshot.is_none() && !args.dump));
-    let (mut window, events) = glfw
-        .create_window(WIDTH as _, HEIGHT as _, "Wireframe Viewer", glfw::WindowMode::Windowed)
-        .expect("Failed to create GLFW window");
-    window.make_current();
-    {
-        let mut stencil_bits = 0;
-        unsafe { glGetIntegerv(GL_STENCIL_BITS, &mut stencil_bits) };
-        if stencil_bits == 0 {
-            eprintln!("warning: no stencil buffer, so rooms seen through doorways will not be masked (use --no-cull)");
-        }
-    }
-    // vsync gives steady pacing; --max-fps replaces it with an explicit cap
-    glfw.set_swap_interval(if args.max_fps.is_some() { glfw::SwapInterval::None } else { glfw::SwapInterval::Sync(1) });
-    window.set_key_polling(true);
-    window.set_cursor_pos_polling(true);
-    window.set_framebuffer_size_polling(true);
-    window.set_scroll_polling(true);
-    window.set_mouse_button_polling(true);
-    window.set_char_polling(true);
-    gl::load_with(|s| window.get_proc_address(s) as *const _);
-
-    // OpenGL setup
-    unsafe {
-        glViewport(0, 0, WIDTH, HEIGHT);
-        glClearColor(0.1, 0.1, 0.1, 1.0);
-        glEnable(GL_DEPTH_TEST);
-        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-    }
+    let (mut glfw, mut window, events) = window::open(&args);
 
     let Game { mut camera, assets, mut sim, me, npc_actor, eye_height, crouch_eye_height } = session.start_game(&args, world);
     let mut decals: Vec<impact::Decal> = Vec::new();
