@@ -1,3 +1,4 @@
+use std::time::Instant;
 use crate::args::Args;
 
 // What the keys switch on and off, and the dumps and the restart they ask for
@@ -44,5 +45,24 @@ impl Toggles {
             show_hitboxes: false,
             orbit: (args.view_orbit, 0.0),
         }
+    }
+}
+
+// The frame clock and the count of frames
+pub struct Timing {
+    pub start_time: Instant,
+    pub last_step: Instant,
+    // A scripted run, or a replay, takes one tick a frame instead of keeping time
+    pub fixed_step: bool,
+    // Time the sim has yet to run
+    pub tick_budget: f32,
+    pub frames_drawn: u32,
+    // Frames timed, summed render ms and summed whole-frame ms
+    pub bench: (u32, f64, f64),
+}
+
+impl Timing {
+    pub fn new(fixed_step: bool) -> Timing {
+        Timing { start_time: Instant::now(), last_step: Instant::now(), fixed_step, tick_budget: 0.0, frames_drawn: 0, bench: (0, 0.0, 0.0) }
     }
 }

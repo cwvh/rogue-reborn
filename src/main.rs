@@ -40,7 +40,7 @@ use crate::render::assets::{Uniform, SCORCH_VARIANTS, HOLE_VARIANTS};
 use crate::render::level::LevelDraw;
 use crate::render::window;
 use crate::session::{Game, Session};
-use crate::state::Toggles;
+use crate::state::{Timing, Toggles};
 use crate::render::draw::{WeaponDraw, CharacterArrays, draw_weapon, FlashSpot, Flashes, draw_flash, draw_flash_here, draw_character, draw_glass, draw_fracture, level_radius, Which, draw_plan, wipe_opening, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
@@ -175,15 +175,13 @@ fn main() {
     // Hosting, the server we joined must name us its host, or it is someone else's
     let mut host_checked = session.hosted.is_none();
 
-    let mut last_step = Instant::now();
-
     let mut textures = HashMap::new();
     let mut toggles = Toggles::new(&args);
+    // A scripted run, or a replay, takes one tick a frame instead of keeping time
+    let mut timing = Timing::new(args.walk.is_some() || (session.playback.is_some() && args.screenshot.is_some()));
     let level_draw = LevelDraw::new(&level, &sim, &session.map_num);
     // Keys pressed since the sim last ticked, which counts once
     let (mut use_pressed, mut reload_pressed, mut gun_pressed, mut grenade_pressed, mut culling_pressed) = (false, false, false, false, false);
-    // A scripted run, or a replay, takes one tick a frame instead of keeping time
-    let fixed_step = args.walk.is_some() || (session.playback.is_some() && args.screenshot.is_some());
     // What the player did in the last tick, which the animation follows
     let mut shown;
     let mut was_free = false;
@@ -249,14 +247,9 @@ fn main() {
     let mut movement = Movement::Idle;
     let mut player_frame = 0.0f32;
     let mut player_hip_turn = 0.0f32;
-    let start_time = Instant::now();
-    // Time the sim has yet to run, and where the player stood a tick ago, to draw between ticks
-    let mut tick_budget = 0.0f32;
+    // Where the player stood a tick ago, to draw between ticks
     let mut prev_feet = sim.players[me].player.pos;
     let base_speed = 7.5;
-    let mut frames_drawn = 0u32;
-    // Frames timed, summed render ms and summed whole-frame ms
-    let mut bench = (0u32, 0f64, 0f64);
 
     while !window.should_close() {
         glfw.poll_events();
@@ -437,41 +430,41 @@ fn main() {
             // --hold picks the keys to press: W A S D, and R for walk (right mouse button)
             let held = args.hold.as_deref().unwrap_or("W").to_ascii_uppercase();
             // B fires a single round at frame 60, once the others are in view, to see one hit land
-            trigger = (frames_drawn < n && held.contains('F')) || (held.contains('B') && (60..64).contains(&frames_drawn));
+            trigger = (timing.frames_drawn < n && held.contains('F')) || (held.contains('B') && (60..64).contains(&timing.frames_drawn));
             // T takes out a grenade and throws it after holding for half a second
             if held.contains('T') {
                 grenade_pressed = true;
-                trigger = frames_drawn < 30;
+                trigger = timing.frames_drawn < 30;
             }
             // U presses the use key (Space) on frame 5, to open or close the door in front
-            if held.contains('U') && frames_drawn == 5 {
+            if held.contains('U') && timing.frames_drawn == 5 {
                 use_pressed = true;
             }
             // L starts a reload on the first frame (for testing the animation)
-            if held.contains('L') && frames_drawn == 0 {
+            if held.contains('L') && timing.frames_drawn == 0 {
                 reload_pressed = true;
             }
-            walk_held = frames_drawn < n && held.contains('R');
+            walk_held = timing.frames_drawn < n && held.contains('R');
             // Y turns to the right, 2 degrees a frame, to see the feet step round
-            if frames_drawn < n && held.contains('Y') {
+            if timing.frames_drawn < n && held.contains('Y') {
                 camera.yaw -= 2.0;
             }
             // C crouches for the whole run; K switches stance at frame 30, to see the change
-            crouch_wanted = held.contains('C') != (held.contains('K') && frames_drawn >= 30);
+            crouch_wanted = held.contains('C') != (held.contains('K') && timing.frames_drawn >= 30);
             for (ch, key) in [('W', Key::W), ('A', Key::A), ('S', Key::S), ('D', Key::D)] {
-                gate.set(key, frames_drawn < n && held.contains(ch));
+                gate.set(key, timing.frames_drawn < n && held.contains(ch));
             }
-            if frames_drawn % 10 == 0 {
+            if timing.frames_drawn % 10 == 0 {
                 println!("frame {frames_drawn:4} crouch_wanted={crouch_wanted} crouched={} feet=({:.1}, {:.1}, {:.1}) on_ground={} movement={movement:?} anim_frame={player_frame:.1}",
-                    sim.players[me].player.crouched, sim.players[me].player.pos[0], sim.players[me].player.pos[1], sim.players[me].player.pos[2], sim.players[me].player.on_ground);
+                    sim.players[me].player.crouched, sim.players[me].player.pos[0], sim.players[me].player.pos[1], sim.players[me].player.pos[2], sim.players[me].player.on_ground, frames_drawn = timing.frames_drawn);
             }
         }
 
         // Time since the previous step, measured here so it covers render and vsync
-        let raw_dt = last_step.elapsed().as_secs_f32();
+        let raw_dt = timing.last_step.elapsed().as_secs_f32();
         let real_dt = raw_dt.min(0.05);
-        last_step = Instant::now();
-        let step_dt = if fixed_step { sim::TICK } else { real_dt };
+        timing.last_step = Instant::now();
+        let step_dt = if timing.fixed_step { sim::TICK } else { real_dt };
 
         // Free-fly: WASD moves the view (hold LeftShift to move faster)
         if !toggles.first_person && session.playback.is_none() {
@@ -532,10 +525,10 @@ fn main() {
         };
         input.set_look(camera.yaw, camera.pitch);
         shown = input;
-        tick_budget += step_dt;
+        timing.tick_budget += step_dt;
         let mut events: Vec<sim::Event> = Vec::new();
         let mut ticks = 0;
-        while tick_budget >= sim::TICK && ticks < 5 {
+        while timing.tick_budget >= sim::TICK && ticks < 5 {
             // What the player does comes from the keys, or from the recording
             let tick_input = match session.playback.as_mut() {
                 Some(pb) => match pb.next_input() {
@@ -581,15 +574,15 @@ fn main() {
             shown = tick_input;
             // A key press counts once
             (input.use_key, input.reload, input.gun, input.grenade, input.toggle_culling) = (false, false, false, false, false);
-            tick_budget -= sim::TICK;
+            timing.tick_budget -= sim::TICK;
             ticks += 1;
         }
         if ticks > 0 {
             (use_pressed, reload_pressed, gun_pressed, grenade_pressed, culling_pressed) = (false, false, false, false, false);
         }
         // Past the limit the rest is dropped rather than caught up
-        if tick_budget >= sim::TICK {
-            tick_budget = 0.0;
+        if timing.tick_budget >= sim::TICK {
+            timing.tick_budget = 0.0;
         }
         let game_time = sim.time;
         // On a server, what moves is shown a little in the past, between its snapshots, so that
@@ -624,7 +617,7 @@ fn main() {
 
         // The view is at the player's eyes, between where they were a tick ago and now
         let draw_feet = if toggles.first_person {
-            let alpha = if fixed_step { 1.0 } else { (tick_budget / sim::TICK).clamp(0.0, 1.0) };
+            let alpha = if timing.fixed_step { 1.0 } else { (timing.tick_budget / sim::TICK).clamp(0.0, 1.0) };
             let (a, b) = (prev_feet, sim.players[me].player.pos);
             let feet = [a[0] * (1.0 - alpha) + b[0] * alpha, a[1] * (1.0 - alpha) + b[1] * alpha, a[2] * (1.0 - alpha) + b[2] * alpha];
             let eye_target = if sim.players[me].player.crouched { crouch_eye_height } else { eye_height };
@@ -1346,7 +1339,7 @@ fn main() {
             if let Some(chars) = &sim.characters {
                 let c = &chars.model;
                 glDisable(GL_TEXTURE_2D);
-                let clock = if fixed_step { game_time as f32 } else { start_time.elapsed().as_secs_f32() };
+                let clock = if timing.fixed_step { game_time as f32 } else { timing.start_time.elapsed().as_secs_f32() };
                 for (i, spot) in sim.npcs.iter().enumerate() {
                     let mut moved;
                     let spot = match view.as_ref().and_then(|v| v.npcs.get(i)) {
@@ -1584,7 +1577,7 @@ fn main() {
 
             // The player's own body, shown in third person
             if let (true, true, Some(chars)) = (toggles.first_person, toggles.third_person, &sim.characters) {
-                let clock = if fixed_step { game_time as f32 } else { start_time.elapsed().as_secs_f32() };
+                let clock = if timing.fixed_step { game_time as f32 } else { timing.start_time.elapsed().as_secs_f32() };
                 let blinking = args.eyes_closed || (toggles.blink_enabled && clock % 4.0 < 0.15);
                 let face = (!assets.actors.is_empty()).then(|| assets.face_textures[0]).and_then(|(main, blink)| {
                     if blinking { blink.or(main) } else { main }
@@ -2045,7 +2038,7 @@ fn main() {
             String::from("LEVEL: -")
         };
         // Fixed steps with a screenshot show fixed numbers, so the picture repeats
-        let steady = fixed_step && args.screenshot.is_some();
+        let steady = timing.fixed_step && args.screenshot.is_some();
         let fps_text = format!("FPS: {:.1}", if steady { 0.0 } else { fps });
         let render_text = format!("RENDER: {:.2} MS", if steady { 0.0 } else { render_ms });
         if toggles.first_person {
@@ -2168,7 +2161,7 @@ fn main() {
         }
 
         // F2: a screenshot and a text log of where the player is and what they see
-        if (toggles.dump_requested && (!args.dump || frames_drawn >= 2)) || toggles.clip.is_some() {
+        if (toggles.dump_requested && (!args.dump || timing.frames_drawn >= 2)) || toggles.clip.is_some() {
             let one_dump = std::mem::take(&mut toggles.dump_requested);
             let stem = toggles.clip.as_mut().map(|(_, dir, n)| {
                 *n += 1;
@@ -2225,10 +2218,10 @@ fn main() {
 
         // Screenshot mode: capture after a couple of frames so textures are
         // uploaded and the context has settled, then exit.
-        frames_drawn += 1;
+        timing.frames_drawn += 1;
         // Timing for benchmarks (--walk N --hold X --max-fps 10000), after a warm-up
-        if frames_drawn > BENCH_WARMUP {
-            bench = (bench.0 + 1, bench.1 + render_ms as f64, bench.2 + raw_dt as f64 * 1000.0);
+        if timing.frames_drawn > BENCH_WARMUP {
+            timing.bench = (timing.bench.0 + 1, timing.bench.1 + render_ms as f64, timing.bench.2 + raw_dt as f64 * 1000.0);
         }
         // A replay ends when the recording does
         let replay_over = session.playback.as_ref().is_some_and(|p| p.finished());
@@ -2236,10 +2229,10 @@ fn main() {
             window.set_should_close(true);
         }
         if let Some(path) = &args.screenshot {
-            let done = if session.playback.is_some() { replay_over } else { frames_drawn >= args.walk.map_or(3, |n| n.max(3)) };
+            let done = if session.playback.is_some() { replay_over } else { timing.frames_drawn >= args.walk.map_or(3, |n| n.max(3)) };
             if done {
-                if bench.0 > 0 {
-                    println!("timing over {} frames: render {:.3} ms, whole frame {:.3} ms", bench.0, bench.1 / bench.0 as f64, bench.2 / bench.0 as f64);
+                if timing.bench.0 > 0 {
+                    println!("timing over {} frames: render {:.3} ms, whole frame {:.3} ms", timing.bench.0, timing.bench.1 / timing.bench.0 as f64, timing.bench.2 / timing.bench.0 as f64);
                 }
                 let (fw, fh) = window.get_framebuffer_size();
                 let rgb = read_framebuffer(fw, fh);
@@ -2268,7 +2261,7 @@ fn main() {
             // Sleep most of the remaining frame time, then spin for accuracy
             let target = std::time::Duration::from_secs_f32(1.0 / max);
             loop {
-                let left = target.saturating_sub(last_step.elapsed());
+                let left = target.saturating_sub(timing.last_step.elapsed());
                 if left.is_zero() {
                     break;
                 }
