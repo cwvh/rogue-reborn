@@ -2,13 +2,14 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::time::Instant;
 use glfw::Key;
-use rogue_reborn::lobby::{self, Chat, Gate};
+use rogue_reborn::lobby::{self, Chat, Gate, LobbyView};
 use rogue_reborn::{grenade, map, sim};
+use rogue_reborn::net::client::Status;
 use rogue_reborn::net::round::{Outcome, Phase, RoundState};
 use rogue_reborn::net::watch::Pose;
 use rogue_reborn::net::proto::{LobbyCommand, Setup};
-use rogue_reborn::results::Picked;
-use rogue_reborn::ui::Ui;
+use rogue_reborn::results::{Picked, ResultsView};
+use rogue_reborn::ui::{Canvas, Pointer, Ui};
 use crate::args::Args;
 use crate::half_view_tan;
 use crate::hud::{draw_hud, draw_debug_text};
@@ -182,6 +183,50 @@ impl Overlay {
             draw_debug_text(w, h, &debug_lines);
         }
         render_ms
+    }
+
+    pub fn draw_lobby(&mut self, session: &mut Session, sim: &sim::Sim, me: usize, game_time: f32, window: &glfw::Window) {
+        let overlay = self;
+        // The lobby or the results, over the whole window, and the chat, which notes what
+        // happens all game long. What is clicked and said is sent with the next tick.
+        if let Some((client, _)) = session.net.as_mut().filter(|(c, _)| c.status == Status::Connected && c.snapshots > 0) {
+            let players: Vec<lobby::Player> = sim.players.iter().enumerate().filter(|(_, p)| p.active)
+                .map(|(i, p)| lobby::Player { slot: i, joined: p.joined, side: p.side, name: client.name_of(i) })
+                .collect();
+            let ready = client.ready.clone();
+            let mine = (me, sim.players[me].joined);
+            let view = LobbyView {
+                round: client.round, time: game_time, session: client.session, me, players: &players, continued: client.continued.contains(&mine),
+                ready: &ready, level: &overlay.level_name, base_pairs: &overlay.pair_names, uniforms: [&overlay.uniform_names[0], &overlay.uniform_names[1]], results: client.results.as_ref(),
+            };
+            overlay.chat.watch(&view);
+            let mut commands = std::mem::take(&mut overlay.typed);
+            if overlay.gate.showing() {
+                let (fw, fh) = window.get_framebuffer_size();
+                let (ww, wh) = window.get_size();
+                let (cx, cy) = window.get_cursor_pos();
+                let at = Canvas::fit([fw as f32, fh as f32]).pointer([cx, cy], [ww, wh], [fw, fh]);
+                overlay.ui.begin(Pointer { at, down: overlay.pointer_down, wheel: std::mem::take(&mut overlay.wheel) }, client.session.generation);
+                match client.results.as_ref().filter(|_| client.round.phase == Phase::Debrief) {
+                    Some(table) => {
+                        let results = ResultsView {
+                            results: table, time: game_time, me: mine, host: client.session.host == Some(me as u8), continued: &client.continued,
+                            sent: !client.may_continue(), mission: &overlay.mission,
+                        };
+                        commands.extend(rogue_reborn::results::results(&mut overlay.ui, &results, &mut overlay.chat, &mut overlay.picked));
+                    }
+                    None => commands.extend(lobby::lobby(&mut overlay.ui, &view, &mut overlay.chat)),
+                }
+                let draws = overlay.ui.finish();
+                overlay.ui_gl.draw(&overlay.ui, &draws, [fw, fh]);
+            }
+            for command in commands {
+                if let Some(rec) = session.net_recorder.as_mut() {
+                    rec.lobby(session.net_clock.elapsed().as_secs_f64(), command.clone());
+                }
+                client.lobby(command);
+            }
+        }
     }
 }
 

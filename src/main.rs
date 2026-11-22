@@ -21,11 +21,8 @@ use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 use rogue_reborn::motion::MOTION_FPS;
 use rogue_reborn::{map, combat, crp, grenade, blastlight, sim, sound, glass, casings};
 use rogue_reborn::net::client::{Seen, Status};
-use rogue_reborn::lobby::{self, LobbyView};
-use rogue_reborn::results::ResultsView;
-use rogue_reborn::ui::{Canvas, Pointer};
+use rogue_reborn::lobby;
 use rogue_reborn::net::animation::Doing;
-use rogue_reborn::net::round::Phase;
 use rogue_reborn::net::watch::{BEHIND, Pose, RISE, WatchContext, WatchMode, behind};
 use rogue_reborn::sim::characters::{Characters, Npc, Rig};
 use rogue_reborn::sim::movement::{Movement, Reloading, animation_pace, hip_turn, movement_from_keys};
@@ -1923,46 +1920,8 @@ fn main() {
         let hud = HudPass { args: &args, level: &level, sim: &sim, me, game_time, w, h, fps, render_time, watch_pose, current_rooms: &current_rooms, drawn_rooms: &drawn_rooms };
         let render_ms = overlay.draw_hud_and_debug(hud, &toggles, &timing, &pview, &session);
 
-        // The lobby or the results, over the whole window, and the chat, which notes what
-        // happens all game long. What is clicked and said is sent with the next tick.
-        if let Some((client, _)) = session.net.as_mut().filter(|(c, _)| c.status == Status::Connected && c.snapshots > 0) {
-            let players: Vec<lobby::Player> = sim.players.iter().enumerate().filter(|(_, p)| p.active)
-                .map(|(i, p)| lobby::Player { slot: i, joined: p.joined, side: p.side, name: client.name_of(i) })
-                .collect();
-            let ready = client.ready.clone();
-            let mine = (me, sim.players[me].joined);
-            let view = LobbyView {
-                round: client.round, time: game_time, session: client.session, me, players: &players, continued: client.continued.contains(&mine),
-                ready: &ready, level: &overlay.level_name, base_pairs: &overlay.pair_names, uniforms: [&overlay.uniform_names[0], &overlay.uniform_names[1]], results: client.results.as_ref(),
-            };
-            overlay.chat.watch(&view);
-            let mut commands = std::mem::take(&mut overlay.typed);
-            if overlay.gate.showing() {
-                let (fw, fh) = window.get_framebuffer_size();
-                let (ww, wh) = window.get_size();
-                let (cx, cy) = window.get_cursor_pos();
-                let at = Canvas::fit([fw as f32, fh as f32]).pointer([cx, cy], [ww, wh], [fw, fh]);
-                overlay.ui.begin(Pointer { at, down: overlay.pointer_down, wheel: std::mem::take(&mut overlay.wheel) }, client.session.generation);
-                match client.results.as_ref().filter(|_| client.round.phase == Phase::Debrief) {
-                    Some(table) => {
-                        let results = ResultsView {
-                            results: table, time: game_time, me: mine, host: client.session.host == Some(me as u8), continued: &client.continued,
-                            sent: !client.may_continue(), mission: &overlay.mission,
-                        };
-                        commands.extend(rogue_reborn::results::results(&mut overlay.ui, &results, &mut overlay.chat, &mut overlay.picked));
-                    }
-                    None => commands.extend(lobby::lobby(&mut overlay.ui, &view, &mut overlay.chat)),
-                }
-                let draws = overlay.ui.finish();
-                overlay.ui_gl.draw(&overlay.ui, &draws, [fw, fh]);
-            }
-            for command in commands {
-                if let Some(rec) = session.net_recorder.as_mut() {
-                    rec.lobby(session.net_clock.elapsed().as_secs_f64(), command.clone());
-                }
-                client.lobby(command);
-            }
-        }
+        // The lobby, the results and the chat, over the game
+        overlay.draw_lobby(&mut session, &sim, me, game_time, &window);
 
         // F2: a screenshot and a text log of where the player is and what they see
         if (toggles.dump_requested && (!args.dump || timing.frames_drawn >= 2)) || toggles.clip.is_some() {
