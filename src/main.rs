@@ -42,7 +42,7 @@ use crate::audio::Audio;
 use crate::capture::{CLIP_SECONDS, CapturePass, capture_frame};
 use crate::events::{EventPass, handle_events};
 use crate::overlay::{HudPass, Overlay};
-use crate::scene::Scene;
+use crate::scene::{NPC_OWNERS, Scene};
 use crate::session::{Game, Session};
 use crate::view::PlayerView;
 use crate::state::{Pressed, Timing, Toggles};
@@ -56,8 +56,6 @@ fn half_view_tan() -> f32 {
     (VIEW_HIGH.to_radians() / 2.0).tan()
 }
 
-/// Added to a terrorist's number so its casings are not taken for a player's
-const NPC_OWNERS: usize = 1000;
 const MOST_CASINGS_A_FRAME: u32 = 4;
 const SHELL_SOUND_GAP: f32 = 0.2;
 const SHELL_SOUND_GAIN: f32 = 0.5;

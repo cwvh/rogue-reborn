@@ -6,6 +6,9 @@ use rogue_reborn::sim::characters::Npc;
 use crate::player::BodyState;
 use crate::render::draw::{FlashSpot, Flashes};
 
+/// Added to a terrorist's number so its casings are not taken for a player's
+pub const NPC_OWNERS: usize = 1000;
+
 // What the world holds that the frames draw and keep: marks, effects, shards, shells, bodies
 #[derive(Default)]
 pub struct Scene {

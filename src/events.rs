@@ -2,13 +2,12 @@ use rogue_reborn::{blastlight, casings, glass, impact, lobby, sim, sound};
 use rogue_reborn::impact::Surface;
 use rogue_reborn::net::watch::Pose;
 use rogue_reborn::util::unit3;
-use crate::NPC_OWNERS;
 use crate::args::Args;
 use crate::audio::Audio;
 use crate::camera::listener_of;
 use crate::overlay::Overlay;
 use crate::render::assets::{Assets, SCORCH_VARIANTS, HOLE_VARIANTS};
-use crate::scene::Scene;
+use crate::scene::{NPC_OWNERS, Scene};
 use crate::view::PlayerView;
 
 const MAX_DECALS: usize = 300;
