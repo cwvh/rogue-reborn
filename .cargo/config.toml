@@ -6,6 +6,8 @@
 #   cargo wcheck
 [alias]
 rr = "run --release --target x86_64-pc-windows-gnu --bin rr --"
+rf = "run --profile fast --target x86_64-pc-windows-gnu --bin rr --"
+rr0 = "run --target x86_64-pc-windows-gnu --bin rr --"
 wireframe = "rr"
 wtest = "test --target x86_64-pc-windows-gnu"
 wcheck = "check --target x86_64-pc-windows-gnu --all-targets"

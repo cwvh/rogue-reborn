@@ -21,6 +21,16 @@ required-features = ["serde"]
 name = "map-stats"
 required-features = ["get-size"]
 
+# Quick-building optimized profile for iterating: cargo rf
+[profile.fast]
+inherits = "release"
+opt-level = 1
+codegen-units = 256
+incremental = true
+
+[profile.fast.package."*"]
+opt-level = 3
+
 [profile.dev]
 opt-level = 1
 debug = 1
