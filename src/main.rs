@@ -806,41 +806,8 @@ fn main() {
             }
         }
 
-        // Reload sound when a reload starts (by key or running dry)
-        if sim.players[me].reload_until.is_some() && !audio.was_reloading {
-            if let Some(snd) = audio.sound.as_mut() {
-                snd.play("C_SBMAG1.WAV", 1.0);
-            }
-        }
-        audio.was_reloading = sim.players[me].reload_until.is_some();
-
-        // Full auto: the firing sound runs while the trigger is held with rounds to fire,
-        // then stops with a closing crack
-        let firing = sim.firing(me);
-        if let Some(snd) = audio.sound.as_mut() {
-            if overlay.gate.showing() {
-                audio.firing_sound = None;
-            } else if firing && audio.firing_sound.is_none() {
-                audio.firing_sound = snd.play_loop("C_SB5KB.WAV", 1.0);
-            } else if !firing && audio.firing_sound.take().is_some() {
-                snd.play("C_SB5KR.WAV", 1.0);
-            }
-        }
-
-        // Ambient sound for the rooms around the player's feet
-        if let (Some(snd), Some(amb)) = (audio.sound.as_mut(), audio.ambience.as_mut()) {
-            let listener = listener_of(&pview.camera);
-            let feet = [listener.pos[0], listener.pos[1] - pview.eye_now, listener.pos[2]];
-            let rooms: Vec<&str> = level.rooms.rooms.iter()
-                .filter(|r| r.contains(feet, 50.0))
-                .map(|r| r.section_name.as_str())
-                .collect();
-            if overlay.gate.showing() {
-                amb.silence();
-            } else {
-                amb.update(snd, &rooms, listener, game_time, step_dt);
-            }
-        }
+        // Reload, firing and ambient sound
+        audio.play_frame(&sim, me, &level, &pview, overlay.gate.showing(), game_time, step_dt);
 
         let current_rooms: Vec<&str> = sim.players[me].current_room.map(|i| level.rooms.rooms[i].section_name.as_str()).into_iter().collect();
         if toggles.room_debug && current_rooms != toggles.last_rooms {
