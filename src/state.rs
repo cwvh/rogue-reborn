@@ -1,0 +1,48 @@
+use crate::args::Args;
+
+// What the keys switch on and off, and the dumps and the restart they ask for
+pub struct Toggles {
+    pub textured: bool,
+    pub first_person: bool,
+    pub third_person: bool,
+    pub planning_level_index: usize,
+    pub lag_meter: bool,
+    pub show_portals: bool,
+    pub show_collisions: bool,
+    pub sprite_mode: u8,
+    pub room_debug: bool,
+    pub last_rooms: Vec<String>,
+    pub dump_requested: bool,
+    // F4: a dump of every frame for CLIP_SECONDS, in debug/clip-<time>/: when it started, the folder, the frames so far
+    pub clip: Option<(std::time::Instant, String, u32)>,
+    // F3 closes the window and starts the viewer again with the same options
+    pub reload: bool,
+    pub blink_enabled: bool,
+    pub show_hitboxes: bool,
+    // Where the third-person view sits round the player: with --cinematic, Shift and the mouse
+    // move it, and it stays put when Shift is let go
+    pub orbit: (f32, f32),
+}
+
+impl Toggles {
+    pub fn new(args: &Args) -> Toggles {
+        Toggles {
+            textured: args.textured,
+            first_person: args.first_person,
+            third_person: args.third_person,
+            planning_level_index: 0,
+            lag_meter: args.lag_meter,
+            show_portals: args.portals,
+            show_collisions: args.collisions,
+            sprite_mode: args.sprite_mode % crate::SPRITE_MODES.len() as u8,
+            room_debug: args.rooms,
+            last_rooms: Vec::new(),
+            dump_requested: args.dump,
+            clip: None,
+            reload: false,
+            blink_enabled: !args.no_blink,
+            show_hitboxes: false,
+            orbit: (args.view_orbit, 0.0),
+        }
+    }
+}

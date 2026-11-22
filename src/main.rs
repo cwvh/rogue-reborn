@@ -6,6 +6,7 @@ mod opengl;
 mod player;
 mod render;
 mod session;
+mod state;
 mod textures;
 mod ui_gl;
 
@@ -39,6 +40,7 @@ use crate::render::assets::{Uniform, SCORCH_VARIANTS, HOLE_VARIANTS};
 use crate::render::level::LevelDraw;
 use crate::render::window;
 use crate::session::{Game, Session};
+use crate::state::Toggles;
 use crate::render::draw::{WeaponDraw, CharacterArrays, draw_weapon, FlashSpot, Flashes, draw_flash, draw_flash_here, draw_character, draw_glass, draw_fracture, level_radius, Which, draw_plan, wipe_opening, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
@@ -176,20 +178,7 @@ fn main() {
     let mut last_step = Instant::now();
 
     let mut textures = HashMap::new();
-    let mut textured = args.textured;
-    let mut first_person = args.first_person;
-    let mut planning_level_index = 0;
-    let mut lag_meter = args.lag_meter;
-    let mut show_portals = args.portals;
-    let mut show_collisions = args.collisions;
-    let mut sprite_mode = args.sprite_mode % SPRITE_MODES.len() as u8;
-    let mut room_debug = args.rooms;
-    let mut last_rooms: Vec<String> = Vec::new();
-    let mut dump_requested = args.dump;
-    // F4: a dump of every frame for CLIP_SECONDS, in debug/clip-<time>/: when it started, the folder, the frames so far
-    let mut clip: Option<(std::time::Instant, String, u32)> = None;
-    // F3 closes the window and starts the viewer again with the same options
-    let mut reload = false;
+    let mut toggles = Toggles::new(&args);
     let level_draw = LevelDraw::new(&level, &sim, &session.map_num);
     // Keys pressed since the sim last ticked, which counts once
     let (mut use_pressed, mut reload_pressed, mut gun_pressed, mut grenade_pressed, mut culling_pressed) = (false, false, false, false, false);
@@ -198,8 +187,6 @@ fn main() {
     // What the player did in the last tick, which the animation follows
     let mut shown;
     let mut was_free = false;
-    let mut blink_enabled = !args.no_blink;
-    let mut show_hitboxes = false;
     // Sound is optional: no output device just means silence
     let mut sound = if args.no_sound { None } else { sound::Sound::open("data/sound") };
     if let Some(snd) = sound.as_mut() {
@@ -259,10 +246,6 @@ fn main() {
         flash_rng.set(r);
         (x >> 40) as f32 / (1u64 << 24) as f32
     };
-    let mut third_person = args.third_person;
-    // Where the third-person view sits round the player: with --cinematic, Shift and the mouse
-    // move it, and it stays put when Shift is let go
-    let mut orbit = (args.view_orbit, 0.0f32);
     let mut movement = Movement::Idle;
     let mut player_frame = 0.0f32;
     let mut player_hip_turn = 0.0f32;
@@ -311,10 +294,10 @@ fn main() {
                             }
                         }
                         (Key::T, Action::Press) => {
-                            textured = !textured;
+                            toggles.textured = !toggles.textured;
                         }
                         (Key::L, Action::Press) if session.net.is_some() => {
-                            lag_meter = !lag_meter;
+                            toggles.lag_meter = !toggles.lag_meter;
                         }
                         (Key::M, Action::Press) if session.net_recorder.is_some() => {
                             let now = session.net_clock.elapsed().as_secs_f64();
@@ -323,26 +306,26 @@ fn main() {
                         }
                         (Key::L, Action::Press) => {
                             if !level.planning_levels.levels.is_empty() {
-                                planning_level_index = (planning_level_index + 1) % level.planning_levels.levels.len();
+                                toggles.planning_level_index = (toggles.planning_level_index + 1) % level.planning_levels.levels.len();
                             }
                         }
                         (Key::P, Action::Press) => {
-                            show_portals = !show_portals;
+                            toggles.show_portals = !toggles.show_portals;
                         }
                         (Key::H, Action::Press) => {
-                            sprite_mode = (sprite_mode + 1) % SPRITE_MODES.len() as u8;
-                            println!("sprite mode {sprite_mode}: {}", SPRITE_MODES[sprite_mode as usize]);
+                            toggles.sprite_mode = (toggles.sprite_mode + 1) % SPRITE_MODES.len() as u8;
+                            println!("sprite mode {}: {}", toggles.sprite_mode, SPRITE_MODES[toggles.sprite_mode as usize]);
                         }
                         (Key::F2, Action::Press) => {
-                            dump_requested = true;
+                            toggles.dump_requested = true;
                         }
-                        (Key::F4, Action::Press) if clip.is_none() => {
+                        (Key::F4, Action::Press) if toggles.clip.is_none() => {
                             let dir = format!("debug/clip-{}", crate::debug::stamp());
                             println!("recording {CLIP_SECONDS} seconds to {dir}");
-                            clip = Some((std::time::Instant::now(), dir, 0));
+                            toggles.clip = Some((std::time::Instant::now(), dir, 0));
                         }
                         (Key::F3, Action::Press) => {
-                            reload = true;
+                            toggles.reload = true;
                             window.set_should_close(true);
                         }
                         (Key::Space, Action::Press) | (Key::Backspace, Action::Press) => {
@@ -352,17 +335,17 @@ fn main() {
                             culling_pressed = true;
                         }
                         (Key::G, Action::Press) => {
-                            room_debug = !room_debug;
-                            last_rooms.clear();
+                            toggles.room_debug = !toggles.room_debug;
+                            toggles.last_rooms.clear();
                         }
                         (Key::C, Action::Press) => {
-                            show_collisions = !show_collisions;
+                            toggles.show_collisions = !toggles.show_collisions;
                         }
                         (Key::B, Action::Press) => {
-                            show_hitboxes = !show_hitboxes;
+                            toggles.show_hitboxes = !toggles.show_hitboxes;
                         }
                         (Key::N, Action::Press) => {
-                            blink_enabled = !blink_enabled;
+                            toggles.blink_enabled = !toggles.blink_enabled;
                         }
                         // Dead in a round, F goes between their eyes and behind them once
                         // watching, and leaves the player's own view as it was
@@ -370,7 +353,7 @@ fn main() {
                             watch_mode |= watch.watching();
                         }
                         (Key::F, Action::Press) => {
-                            third_person = !third_person;
+                            toggles.third_person = !toggles.third_person;
                         }
                         (Key::Num1, Action::Press) => {
                             gun_pressed = true;
@@ -386,7 +369,7 @@ fn main() {
                         }
                         (Key::F1, Action::Press) if session.playback.is_none() && session.net.is_none() => {
                             // Into the player's body, who drops in from wherever the view is, and out again
-                            first_person = !first_person;
+                            toggles.first_person = !toggles.first_person;
                         }
                         (k, Action::Press) => {
                             gate.press(k);
@@ -405,9 +388,9 @@ fn main() {
                     if let (Some((last_x, last_y)), None, false) = (last_cursor_pos, args.walk, session.playback.is_some()) {
                         let dx = xpos - last_x;
                         let dy = ypos - last_y;
-                        if args.cinematic && first_person && third_person && gate.held(Key::LeftShift) {
-                            orbit.0 -= dx as f32 * 0.2;
-                            orbit.1 = (orbit.1 - dy as f32 * 0.1).clamp(-60.0, 60.0);
+                        if args.cinematic && toggles.first_person && toggles.third_person && gate.held(Key::LeftShift) {
+                            toggles.orbit.0 -= dx as f32 * 0.2;
+                            toggles.orbit.1 = (toggles.orbit.1 - dy as f32 * 0.1).clamp(-60.0, 60.0);
                             last_cursor_pos = Some((xpos, ypos));
                             continue;
                         }
@@ -435,7 +418,7 @@ fn main() {
                     watch_previous |= action == Action::Press && watch.watching();
                 }
                 WindowEvent::Scroll(_x, y) => {
-                    if !first_person {
+                    if !toggles.first_person {
                         let scroll = y as f32;
                         if scroll != 0.0 {
                             let dir = camera.get_forward();
@@ -491,7 +474,7 @@ fn main() {
         let step_dt = if fixed_step { sim::TICK } else { real_dt };
 
         // Free-fly: WASD moves the view (hold LeftShift to move faster)
-        if !first_person && session.playback.is_none() {
+        if !toggles.first_person && session.playback.is_none() {
             let mut speed = base_speed;
             if gate.held(Key::LeftShift) {
                 speed *= 5.0;
@@ -523,7 +506,7 @@ fn main() {
         }
 
         // Held before and after a round, the view stays where the game has it
-        if session.net.is_some() && sim.frozen && first_person && sim.players[me].respawn_at.is_none() {
+        if session.net.is_some() && sim.frozen && toggles.first_person && sim.players[me].respawn_at.is_none() {
             let (yaw, pitch) = sim.players[me].look;
             (camera.yaw, camera.pitch) = sim::Input { yaw, pitch, ..sim::Input::default() }.look();
         }
@@ -544,7 +527,7 @@ fn main() {
             gun: gun_pressed,
             grenade: grenade_pressed,
             toggle_culling: culling_pressed,
-            observer: (!first_person).then(|| [camera.position[0], camera.position[1], -camera.position[2]]),
+            observer: (!toggles.first_person).then(|| [camera.position[0], camera.position[1], -camera.position[2]]),
             ..sim::Input::default()
         };
         input.set_look(camera.yaw, camera.pitch);
@@ -585,7 +568,7 @@ fn main() {
                 }
                 // The view follows the recorded player
                 (camera.yaw, camera.pitch) = tick_input.look();
-                first_person = tick_input.observer.is_none();
+                toggles.first_person = tick_input.observer.is_none();
                 if let Some(o) = tick_input.observer {
                     camera.position = [o[0], o[1], -o[2]];
                 }
@@ -640,7 +623,7 @@ fn main() {
         }
 
         // The view is at the player's eyes, between where they were a tick ago and now
-        let draw_feet = if first_person {
+        let draw_feet = if toggles.first_person {
             let alpha = if fixed_step { 1.0 } else { (tick_budget / sim::TICK).clamp(0.0, 1.0) };
             let (a, b) = (prev_feet, sim.players[me].player.pos);
             let feet = [a[0] * (1.0 - alpha) + b[0] * alpha, a[1] * (1.0 - alpha) + b[1] * alpha, a[2] * (1.0 - alpha) + b[2] * alpha];
@@ -667,7 +650,7 @@ fn main() {
         // Dead on a server: the view sinks to the floor and turns to whoever did it, and is given
         // back the way it was when the player comes back
         match session.net.as_ref().and_then(|_| sim.players[me].respawn_at) {
-            Some(until) if first_person => {
+            Some(until) if toggles.first_person => {
                 let (yaw0, pitch0) = *alive_look.get_or_insert((camera.yaw, camera.pitch));
                 let fall = ((game_time - (until - sim::RESPAWN_SECONDS)) / 0.6).clamp(0.0, 1.0);
                 camera.position[1] -= (eye_now - 25.0) * fall * fall * (3.0 - 2.0 * fall);
@@ -902,7 +885,7 @@ fn main() {
             }
         }
 
-        if first_person {
+        if toggles.first_person {
             // The animation follows what the player is trying to do, and plays at the pace
             // they actually move (a wall stops it)
             let dt = step_dt;
@@ -986,9 +969,9 @@ fn main() {
         }
 
         let current_rooms: Vec<&str> = sim.players[me].current_room.map(|i| level.rooms.rooms[i].section_name.as_str()).into_iter().collect();
-        if room_debug && current_rooms != last_rooms {
+        if toggles.room_debug && current_rooms != toggles.last_rooms {
             println!("in rooms: {current_rooms:?}");
-            last_rooms = current_rooms.iter().map(|s| s.to_string()).collect();
+            toggles.last_rooms = current_rooms.iter().map(|s| s.to_string()).collect();
         }
 
         // Compute dynamic aspect and clip planes
@@ -1033,12 +1016,12 @@ fn main() {
                 glRotatef(2.5 * s * (t * 39.0 + 3.0).sin(), 1.0, 0.0, 0.0);
             }
             // Third person: pull the view back behind and above the player's eyes
-            let view = if first_person && third_person && watch_pose.is_none() {
+            let view = if toggles.first_person && toggles.third_person && watch_pose.is_none() {
                 // Orbited round the player to see them from the side, if asked, and kept out
                 // of the walls as the camera behind a watched player is
                 let eye = [camera.position[0], camera.position[1], -camera.position[2]];
-                let from = Pose { eye, yaw: camera.yaw, pitch: (camera.pitch + orbit.1).clamp(-89.0, 89.0) };
-                let p = behind(&sim, from, args.view_dist.unwrap_or(BEHIND), RISE, orbit.0);
+                let from = Pose { eye, yaw: camera.yaw, pitch: (camera.pitch + toggles.orbit.1).clamp(-89.0, 89.0) };
+                let p = behind(&sim, from, args.view_dist.unwrap_or(BEHIND), RISE, toggles.orbit.0);
                 Camera { position: [p.eye[0], p.eye[1], -p.eye[2]], yaw: p.yaw, pitch: p.pitch }
             } else {
                 Camera { position: camera.position, yaw: camera.yaw, pitch: camera.pitch }
@@ -1089,17 +1072,17 @@ fn main() {
             // Combined
             {
                 // Textured mode
-                if textured {
+                if toggles.textured {
                     glEnable(GL_TEXTURE_2D);
                     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
                 } else {
                     glDisable(GL_TEXTURE_2D);
                     glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
                 }
-                let level_mode = if textured { GL_FILL } else { GL_LINE };
+                let level_mode = if toggles.textured { GL_FILL } else { GL_LINE };
 
                 // Iterate map geometry by material groups
-                if room_debug {
+                if toggles.room_debug {
                     glDisable(GL_TEXTURE_2D);
                 }
 
@@ -1136,13 +1119,13 @@ fn main() {
                             glPushMatrix();
                             glMultMatrixf(sim.doors[d].matrix(sim.door_states[d].open).as_ptr());
                         }
-                        if room_debug {
+                        if toggles.room_debug {
                             let [r, g, b] = room_color(&object.name, current_rooms.iter().any(|n| *n == object.name));
                             glColor3f(r, g, b);
                         }
                     for (od_index, od) in object.object_datas.iter().enumerate() {
                         let mat_index = od.material as usize;
-                        let blend = if textured { level_draw.sprite_blends.get(mat_index).copied().flatten() } else { None };
+                        let blend = if toggles.textured { level_draw.sprite_blends.get(mat_index).copied().flatten() } else { None };
                         if blend.is_some() != (pass == 1) {
                             continue;
                         }
@@ -1156,12 +1139,12 @@ fn main() {
                                 glAlphaFunc(GL_GREATER, 0.02);
                                 glEnable(GL_BLEND);
                                 glBlendFunc(GL_SRC_ALPHA, if additive { GL_ONE } else { GL_ONE_MINUS_SRC_ALPHA });
-                                glDepthMask(u8::from(sprite_mode != 2));
+                                glDepthMask(u8::from(toggles.sprite_mode != 2));
                             }
                             None => {
                                 glDepthMask(1);
                                 glDisable(GL_BLEND);
-                                if textured {
+                                if toggles.textured {
                                     glEnable(GL_ALPHA_TEST);
                                     glAlphaFunc(GL_GREATER, 0.5);
                                 }
@@ -1183,10 +1166,10 @@ fn main() {
                             }
                         }
                         // Room colors replace the textures, so they show even where textures are missing
-                        let tex_id = if room_debug { Some(0) } else { ensure_texture(&level.materials, mat_index, &session.map_num, &mut textures) };
+                        let tex_id = if toggles.room_debug { Some(0) } else { ensure_texture(&level.materials, mat_index, &session.map_num, &mut textures) };
                         if let Some(tex_id) = tex_id {
                             // TODO put all faces with same tex-id together so I can bind once
-                            if !room_debug {
+                            if !toggles.room_debug {
                                 glBindTexture(GL_TEXTURE_2D, tex_id);
                             }
 
@@ -1197,9 +1180,9 @@ fn main() {
                             }
 
                             // Each face corner's light, baked at load; soft sprites and lamps are not lit
-                            let shades = session.baked.as_ref().filter(|_| textured && !room_debug && blend.is_none() && !level_draw.glowing.get(mat_index).copied().unwrap_or(false))
+                            let shades = session.baked.as_ref().filter(|_| toggles.textured && !toggles.room_debug && blend.is_none() && !level_draw.glowing.get(mat_index).copied().unwrap_or(false))
                                 .map(|b| &b.colors[object_index][od_index]);
-                            if shades.is_none() && textured && !room_debug {
+                            if shades.is_none() && toggles.textured && !toggles.room_debug {
                                 glColor3f(1.0, 1.0, 1.0);
                             }
 
@@ -1211,7 +1194,7 @@ fn main() {
                                 continue;
                             }
                             // A sprite's faces come nearer than the surface they lie on
-                            let offset = f32::from(layer) + if blend.is_some() && sprite_mode == 0 { 2.0 } else { 0.0 };
+                            let offset = f32::from(layer) + if blend.is_some() && toggles.sprite_mode == 0 { 2.0 } else { 0.0 };
                             if offset > 0.0 {
                                 glEnable(GL_POLYGON_OFFSET_FILL);
                                 glPolygonOffset(-offset, -offset);
@@ -1232,7 +1215,7 @@ fn main() {
                                 let uv1 = &od.texture_vertices.uv_coords[t1 as usize];
                                 let uv2 = &od.texture_vertices.uv_coords[t2 as usize];
 
-                                if textured {
+                                if toggles.textured {
                                     let c = shades.map_or([[1.0; 3]; 3], |s| s[i]);
                                     if shades.is_some() { glColor3f(c[0][0], c[0][1], c[0][2]); }
                                     glTexCoord2f(uv0.u, uv0.v); glVertex3f(p0.x, p0.y, p0.z);
@@ -1277,7 +1260,7 @@ fn main() {
                     glEnable(GL_STENCIL_TEST);
                     for node in &plan {
                         node.rooms(&mut cut_rooms);
-                        draw_plan(node, 1, level_mode, textured && !room_debug, &mut |room, planes| draw_objects(Which::Room(room), planes));
+                        draw_plan(node, 1, level_mode, toggles.textured && !toggles.room_debug, &mut |room, planes| draw_objects(Which::Room(room), planes));
                     }
                     glDisable(GL_STENCIL_TEST);
                     set_clip_planes(&[]);
@@ -1294,7 +1277,7 @@ fn main() {
                         // Through the player's room's own doorways, as the original engine does
                         for &(p, plan) in &rr.doorways {
                             let height = sim.visibility.height(rr.room);
-                            wipe_opening(sim.visibility.polygon(p), plan, height, cam_eye, level_mode, textured && !room_debug);
+                            wipe_opening(sim.visibility.polygon(p), plan, height, cam_eye, level_mode, toggles.textured && !toggles.room_debug);
                         }
                         draw_objects(Which::Room(rr.room), &[]);
                     }
@@ -1306,7 +1289,7 @@ fn main() {
                     draw_objects(Which::Unowned, &[]);
                     glEnable(GL_STENCIL_TEST);
                     for node in &plan {
-                        draw_plan(node, 1, level_mode, textured && !room_debug, &mut |room, planes| draw_objects(Which::Room(room), planes));
+                        draw_plan(node, 1, level_mode, toggles.textured && !toggles.room_debug, &mut |room, planes| draw_objects(Which::Room(room), planes));
                     }
                     glDisable(GL_STENCIL_TEST);
                 }
@@ -1396,14 +1379,14 @@ fn main() {
                     glScalef(spot.scale[0], spot.scale[1], spot.scale[2]);
                     // Eyes shut for 0.15 s every 4 s, staggered per model; the dead keep them shut
                     let blinking = args.eyes_closed || spot.health.is_dead()
-                        || (blink_enabled && (clock + spot.stagger) % 4.0 < 0.15);
+                        || (toggles.blink_enabled && (clock + spot.stagger) % 4.0 < 0.15);
                     let face = npc_actor[i].map(|a| assets.face_textures[a]).and_then(|(main, blink)| {
                         if blinking { blink.or(main) } else { main }
                     });
                     let held = spot.weapon.and_then(|w| assets.held_draws.get(w)).and_then(Option::as_ref);
                     let glowing = npc_flash.get(i).copied().unwrap_or(false) && held.is_some_and(|w| w.flash_scale > 0.0) && !spot.health.is_dead();
                     let lit = flashing(lit_at([spot.pos[0], y, spot.pos[2]], spot.yaw, spot.scale), glowing);
-                    draw_character(model, arrays, verts, &turns, textures, face, textured, glow_on([spot.pos[0], y, spot.pos[2]]), lit.as_ref());
+                    draw_character(model, arrays, verts, &turns, textures, face, toggles.textured, glow_on([spot.pos[0], y, spot.pos[2]]), lit.as_ref());
                     // Their weapon in the right hand, as the players hold theirs, or on the
                     // floor once they have dropped it dying
                     if let (Some(bones), Some(wd), Some((hand, off))) = (&bones, held, &assets.weapon_attach) {
@@ -1419,7 +1402,7 @@ fn main() {
                                 false
                             }
                         };
-                        draw_weapon(wd, textured, tint(&lit));
+                        draw_weapon(wd, toggles.textured, tint(&lit));
                         if !lying && npc_flash.get(i).copied().unwrap_or(false) {
                             note_flash(wd);
                         }
@@ -1481,10 +1464,10 @@ fn main() {
                 glScalef(scale[0], scale[1], scale[2]);
                 let glowing = flash && hand.and_then(Option::as_ref).is_some_and(|w| w.flash_scale > 0.0);
                 let lit = flashing(lit_at(feet, yaw_deg, scale), glowing);
-                draw_character(model, arrays, &verts, &turns, textures, face, textured, glow_on(feet), lit.as_ref());
+                draw_character(model, arrays, &verts, &turns, textures, face, toggles.textured, glow_on(feet), lit.as_ref());
                 // What bullets hit (B): the players' model posed alike, whatever the uniform,
                 // outlined over it
-                if show_hitboxes {
+                if toggles.show_hitboxes {
                     let verts = skin.apply(&pose);
                     glDisable(GL_TEXTURE_2D);
                     glDisable(GL_DEPTH_TEST);
@@ -1510,7 +1493,7 @@ fn main() {
                     if grenade {
                         glTranslatef(-wd.center[0], -wd.center[1], -wd.center[2]);
                     }
-                    draw_weapon(wd, textured, tint(&lit));
+                    draw_weapon(wd, toggles.textured, tint(&lit));
                     if flash {
                         note_flash(wd);
                     }
@@ -1593,16 +1576,16 @@ fn main() {
                     glTranslatef(ghost.pos[0], ghost.pos[1], ghost.pos[2]);
                     glRotatef(ghost.yaw, 0.0, 1.0, 0.0);
                     let lit = lit_at(ghost.pos, ghost.yaw, ghost.scale);
-                    draw_character(model, arrays, verts, &turns, textures, face, textured, glow_on(ghost.pos), lit.as_ref());
+                    draw_character(model, arrays, verts, &turns, textures, face, toggles.textured, glow_on(ghost.pos), lit.as_ref());
                     glPopMatrix();
                 }
                 glColor4f(1.0, 1.0, 1.0, 1.0);
             }
 
             // The player's own body, shown in third person
-            if let (true, true, Some(chars)) = (first_person, third_person, &sim.characters) {
+            if let (true, true, Some(chars)) = (toggles.first_person, toggles.third_person, &sim.characters) {
                 let clock = if fixed_step { game_time as f32 } else { start_time.elapsed().as_secs_f32() };
-                let blinking = args.eyes_closed || (blink_enabled && clock % 4.0 < 0.15);
+                let blinking = args.eyes_closed || (toggles.blink_enabled && clock % 4.0 < 0.15);
                 let face = (!assets.actors.is_empty()).then(|| assets.face_textures[0]).and_then(|(main, blink)| {
                     if blinking { blink.or(main) } else { main }
                 });
@@ -1643,7 +1626,7 @@ fn main() {
                 for (&slot, (start, body)) in &corpses {
                     // The player's own body only from outside it
                     let now = now_for(slot);
-                    if (slot == me && !(first_person && third_person)) || now < *start || !shown(body.pos) {
+                    if (slot == me && !(toggles.first_person && toggles.third_person)) || now < *start || !shown(body.pos) {
                         continue;
                     }
                     let face = (!assets.actors.is_empty()).then(|| assets.face_textures[slot % assets.actors.len()].0).flatten();
@@ -1656,7 +1639,7 @@ fn main() {
                     glRotatef(body.yaw, 0.0, 1.0, 0.0);
                     glScalef(body.scale[0], body.scale[1], body.scale[2]);
                     let lit = lit_at(body.pos, body.yaw, body.scale);
-                    draw_character(model, arrays, verts, &turns, textures, face, textured, glow_on(body.pos), lit.as_ref());
+                    draw_character(model, arrays, verts, &turns, textures, face, toggles.textured, glow_on(body.pos), lit.as_ref());
                     glPopMatrix();
                 }
                 glColor4f(1.0, 1.0, 1.0, 1.0);
@@ -1675,7 +1658,7 @@ fn main() {
                     // Model space (forward -Y, up +Z) turned so its length runs the way it spins
                     glTranslatef(-gd.center[0], -gd.center[1], -gd.center[2]);
                     let light = session.lighting.as_ref().map_or([1.0; 3], |l| room_light(l, &level, &sim.visibility, pos, pos).tint);
-                    draw_weapon(gd, textured, light);
+                    draw_weapon(gd, toggles.textured, light);
                     glPopMatrix();
                 }
                 glColor4f(1.0, 1.0, 1.0, 1.0);
@@ -1686,7 +1669,7 @@ fn main() {
                 l.update(step_dt);
             }
             blast_lights.retain(|l| !l.done());
-            if let (true, Some(id)) = (textured && !blast_lights.is_empty(), assets.light_tex) {
+            if let (true, Some(id)) = (toggles.textured && !blast_lights.is_empty(), assets.light_tex) {
                 set_clip_planes(&[]);
                 glEnable(GL_TEXTURE_2D);
                 glBindTexture(GL_TEXTURE_2D, id);
@@ -1719,7 +1702,7 @@ fn main() {
 
             // Bullet holes on the walls, then the debris thrown from them
             effects.update(step_dt);
-            if textured && !decals.is_empty() {
+            if toggles.textured && !decals.is_empty() {
                 glEnable(GL_TEXTURE_2D);
                 glEnable(GL_BLEND);
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -1851,10 +1834,10 @@ fn main() {
             let pane_shows = |pane: &glass::Pane| plan.is_empty()
                 || map::object_room(&pane.name).is_none_or(|n| visible_rooms.contains(&n));
             for (pane, _) in sim.panes.iter().zip(&sim.broken_at).filter(|(p, b)| b.is_none() && pane_shows(p)) {
-                draw_glass(&level.materials, pane.material, &session.map_num, &mut textures, textured, pane.opacity, pane.tris.iter().map(|t| (t.p, t.uv)));
+                draw_glass(&level.materials, pane.material, &session.map_num, &mut textures, toggles.textured, pane.opacity, pane.tris.iter().map(|t| (t.p, t.uv)));
             }
             for f in &fractures {
-                draw_fracture(&level.materials, &session.map_num, &mut textures, textured, f);
+                draw_fracture(&level.materials, &session.map_num, &mut textures, toggles.textured, f);
             }
 
             if !gate.showing() {
@@ -1886,7 +1869,7 @@ fn main() {
                 glDisable(GL_CULL_FACE);
                 glBegin(GL_QUADS);
                 // In first person our own casings are only heard, not seen
-                let own_hidden = first_person && !third_person;
+                let own_hidden = toggles.first_person && !toggles.third_person;
                 for c in casings.iter().filter(|c| shown(c.pos) && !(own_hidden && c.owner == me)) {
                     for (corners, normal) in c.faces() {
                         // Brass, darker on faces that look down
@@ -1901,7 +1884,7 @@ fn main() {
                 glColor4f(1.0, 1.0, 1.0, 1.0);
             }
 
-            if let Some(flash) = assets.flash_draw.as_ref().filter(|_| textured) {
+            if let Some(flash) = assets.flash_draw.as_ref().filter(|_| toggles.textured) {
                 for spot in flash_spots.borrow().iter() {
                     draw_flash(flash, spot);
                 }
@@ -1910,7 +1893,7 @@ fn main() {
             glColor4f(1.0, 1.0, 1.0, 1.0);
 
             // Render portals overlay when toggled
-            if show_portals {
+            if toggles.show_portals {
                 glDisable(GL_TEXTURE_2D);
                 glColor3f(0.0, 1.0, 0.0);
                 for portal in &level.portals.portals {
@@ -1928,12 +1911,12 @@ fn main() {
             // What bullets hit of each player, as yellow outlines: the player's own only when
             // their body is seen, in third person or flying free. With the players' model, that
             // is the posed body, outlined where it is drawn; without, these cylinders.
-            if show_hitboxes && sim.characters.as_ref().is_none_or(|c| c.rig.is_none()) {
+            if toggles.show_hitboxes && sim.characters.as_ref().is_none_or(|c| c.rig.is_none()) {
                 glDisable(GL_TEXTURE_2D);
                 glColor3f(1.0, 0.85, 0.0);
                 let others = view.as_ref().map_or(&[][..], |v| &v.players[..]);
                 let mut standing: Vec<(usize, [f32; 3])> = others.iter().filter(|s| s.slot != me && s.dead.is_none()).map(|s| (s.slot, s.feet)).collect();
-                if sim.players[me].respawn_at.is_none() && (third_person || !first_person) {
+                if sim.players[me].respawn_at.is_none() && (toggles.third_person || !toggles.first_person) {
                     standing.push((me, draw_feet));
                 }
                 const SIDES: usize = 24;
@@ -1965,7 +1948,7 @@ fn main() {
             }
 
             // Brushes and some collision hints that augment level geometry
-            if show_collisions {
+            if toggles.show_collisions {
                 glDisable(GL_TEXTURE_2D);
                 glColor3f(1.0, 0.0, 0.0);
                 for object in &level.geometries.objects {
@@ -1987,7 +1970,7 @@ fn main() {
         // Its place still says where the casings leave, and only a firing gun needs it.
         let casing_rounds = casing_pending.borrow().get(&me).copied().unwrap_or(0);
         let gun_shows = args.viewmodel;
-        if let (true, true, false, Some(wd)) = ((gun_shows || (casing_rounds > 0 && !sim.players[me].equipped_grenade)) && sim.players[me].respawn_at.is_none(), first_person, third_person, held) {
+        if let (true, true, false, Some(wd)) = ((gun_shows || (casing_rounds > 0 && !sim.players[me].equipped_grenade)) && sim.players[me].respawn_at.is_none(), toggles.first_person, toggles.third_person, held) {
             let l = wd.length;
             let [ox, oy, oz] = if sim.players[me].equipped_grenade {
                 let held_for = sim.players[me].charge_from.map_or(0.0, |from| ((game_time - from) / grenade::CHARGE_SECONDS).clamp(0.0, 1.0));
@@ -2029,8 +2012,8 @@ fn main() {
                         let lit = standing_light(l, &level, &sim.visibility, sim.players[me].player.pos);
                         if player_flash[me] && wd.flash_scale > 0.0 { lit.flash_tint() } else { lit.tint }
                     });
-                    draw_weapon(wd, textured, light);
-                    if let (true, Some(flash)) = (player_flash[me], assets.flash_draw.as_ref().filter(|_| textured)) {
+                    draw_weapon(wd, toggles.textured, light);
+                    if let (true, Some(flash)) = (player_flash[me], assets.flash_draw.as_ref().filter(|_| toggles.textured)) {
                         draw_flash_here(flash, &FlashSpot::here(wd, flash_roll()));
                     }
                 }
@@ -2057,7 +2040,7 @@ fn main() {
         // Draw simple debug text overlay (upper-right)
         let render_ms = (render_time.elapsed().as_secs_f64() * 1000.0) as f32;
         let level_text = if !level.planning_levels.levels.is_empty() {
-            format!("LEVEL: {}", planning_level_index)
+            format!("LEVEL: {}", toggles.planning_level_index)
         } else {
             String::from("LEVEL: -")
         };
@@ -2065,7 +2048,7 @@ fn main() {
         let steady = fixed_step && args.screenshot.is_some();
         let fps_text = format!("FPS: {:.1}", if steady { 0.0 } else { fps });
         let render_text = format!("RENDER: {:.2} MS", if steady { 0.0 } else { render_ms });
-        if first_person {
+        if toggles.first_person {
             let mut status = vec![
                 format!("KILLS: {}", sim.players[me].kills),
                 if sim.players[me].equipped_grenade { format!("GRENADES: {}", sim.players[me].grenades_left) }
@@ -2105,7 +2088,7 @@ fn main() {
             let marker = game_time < hit_marker_until;
             let lines: Vec<(String, [f32; 3])> = feed.iter().map(|(_, text, color)| (text.clone(), *color)).collect();
             let dead = session.net.is_some() && sim.players[me].respawn_at.is_some();
-            let meter = session.net.as_ref().filter(|_| lag_meter).map(|(client, _)| (&client.meter, session.net_clock.elapsed().as_secs_f64()));
+            let meter = session.net.as_ref().filter(|_| toggles.lag_meter).map(|(client, _)| (&client.meter, session.net_clock.elapsed().as_secs_f64()));
             // The crosshair opens as wide as the gun's spread, in the world view
             let p = &sim.players[me];
             let spread = if p.equipped_grenade { 0.0 } else { p.aim.angle.tan() / half_view_tan() * h as f32 / 2.0 };
@@ -2132,14 +2115,14 @@ fn main() {
         if !net_text.is_empty() {
             debug_lines.push(&net_text);
         }
-        if room_debug {
+        if toggles.room_debug {
             debug_lines.push(&rooms_text);
         }
         if !demo_text.is_empty() {
             debug_lines.push(&demo_text);
         }
         // With --cinematic, captured pictures leave it out; the dump's text has it
-        if !(args.cinematic && (args.screenshot.is_some() || dump_requested || clip.is_some())) {
+        if !(args.cinematic && (args.screenshot.is_some() || toggles.dump_requested || toggles.clip.is_some())) {
             draw_debug_text(w, h, &debug_lines);
         }
 
@@ -2185,9 +2168,9 @@ fn main() {
         }
 
         // F2: a screenshot and a text log of where the player is and what they see
-        if (dump_requested && (!args.dump || frames_drawn >= 2)) || clip.is_some() {
-            let one_dump = std::mem::take(&mut dump_requested);
-            let stem = clip.as_mut().map(|(_, dir, n)| {
+        if (toggles.dump_requested && (!args.dump || frames_drawn >= 2)) || toggles.clip.is_some() {
+            let one_dump = std::mem::take(&mut toggles.dump_requested);
+            let stem = toggles.clip.as_mut().map(|(_, dir, n)| {
                 *n += 1;
                 format!("{dir}/{:04}", *n)
             });
@@ -2201,7 +2184,7 @@ fn main() {
                 let material = hit.material.and_then(|m| level.materials.materials.get(m)).map_or("?", |m| m.filename.as_str());
                 (hit, point, material)
             });
-            let feet = [eye[0], eye[1] - if first_person { eye_now } else { 0.0 }, eye[2]];
+            let feet = [eye[0], eye[1] - if toggles.first_person { eye_now } else { 0.0 }, eye[2]];
             let nearby_doors: Vec<String> = sim.doors.iter().zip(&sim.door_states)
                 .filter_map(|(d, s)| {
                     let c = d.center(s.open);
@@ -2217,7 +2200,7 @@ fn main() {
             };
             let report = DebugReport {
                 map_path: &session.map_path, map_num: &session.map_num, level: &level, eye, feet, yaw: camera.yaw, pitch: camera.pitch, dir,
-                hit, first_person, third_person, textured, room_debug, show_portals, show_collisions, sprite_mode, depth_bits,
+                hit, first_person: toggles.first_person, third_person: toggles.third_person, textured: toggles.textured, room_debug: toggles.room_debug, show_portals: toggles.show_portals, show_collisions: toggles.show_collisions, sprite_mode: toggles.sprite_mode, depth_bits,
                 fps, render_ms, culling: sim.culling, portal_paths: args.portal_paths, room: current_rooms.first().copied(), drawn: &drawn_rooms, collision: &sim.players[me].collision_rooms, player_rooms: &sim.players[me].player_rooms, render_rooms: &sim.players[me].render_rooms, doors: &nearby_doors,
                 terrorists: &sim.terrorist_report(me), log: recent_log.make_contiguous(),
             };
@@ -2230,8 +2213,8 @@ fn main() {
                 Ok(_) => {}
                 Err(e) => eprintln!("debug dump failed: {e:#}"),
             }
-            if clip.as_ref().is_some_and(|(start, ..)| start.elapsed().as_secs_f32() >= CLIP_SECONDS) {
-                if let Some((_, dir, n)) = clip.take() {
+            if toggles.clip.as_ref().is_some_and(|(start, ..)| start.elapsed().as_secs_f32() >= CLIP_SECONDS) {
+                if let Some((_, dir, n)) = toggles.clip.take() {
                     println!("recorded {n} frames in {dir}");
                 }
             }
@@ -2299,6 +2282,6 @@ fn main() {
     }
 
     // Let go of the window and the sound device first when restarting, so the new one has them to itself
-    let release = if reload { Some((window, sound)) } else { None };
+    let release = if toggles.reload { Some((window, sound)) } else { None };
     session.finish(&args, &sim, release);
 }
