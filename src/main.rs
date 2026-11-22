@@ -2028,7 +2028,7 @@ fn main() {
             if let Some(chars) = &sim.characters {
                 let c = &chars.model;
                 glDisable(0x0DE1); // GL_TEXTURE_2D
-                let clock = start_time.elapsed().as_secs_f32();
+                let clock = if fixed_step { game_time as f32 } else { start_time.elapsed().as_secs_f32() };
                 for (i, spot) in sim.npcs.iter().enumerate() {
                     let mut moved;
                     let spot = match view.as_ref().and_then(|v| v.npcs.get(i)) {
@@ -2266,7 +2266,7 @@ fn main() {
 
             // The player's own body, shown in third person
             if let (true, true, Some(chars)) = (first_person, third_person, &sim.characters) {
-                let clock = start_time.elapsed().as_secs_f32();
+                let clock = if fixed_step { game_time as f32 } else { start_time.elapsed().as_secs_f32() };
                 let blinking = args.eyes_closed || (blink_enabled && clock % 4.0 < 0.15);
                 let face = (!actors.is_empty()).then(|| face_textures[0]).and_then(|(main, blink)| {
                     if blinking { blink.or(main) } else { main }
@@ -2727,8 +2727,10 @@ fn main() {
         } else {
             String::from("LEVEL: -")
         };
-        let fps_text = format!("FPS: {:.1}", fps);
-        let render_text = format!("RENDER: {:.2} MS", render_ms);
+        // Fixed steps with a screenshot show fixed numbers, so the picture repeats
+        let steady = fixed_step && args.screenshot.is_some();
+        let fps_text = format!("FPS: {:.1}", if steady { 0.0 } else { fps });
+        let render_text = format!("RENDER: {:.2} MS", if steady { 0.0 } else { render_ms });
         if first_person {
             let mut status = vec![
                 format!("KILLS: {}", sim.players[me].kills),
@@ -2926,7 +2928,10 @@ fn main() {
                 let rgb = read_framebuffer(fw, fh);
                 match rogue_reborn::png::write_png(path, fw as u32, fh as u32, &rgb) {
                     Ok(()) => println!("wrote {} ({fw}x{fh})", path.display()),
-                    Err(e) => eprintln!("failed to write screenshot: {e}"),
+                    Err(e) => {
+                        eprintln!("failed to write screenshot: {e}");
+                        std::process::exit(1);
+                    }
                 }
                 break;
             }

@@ -5,13 +5,10 @@
 #
 # Each run stands still for 330 frames with vsync off and prints the average render time
 # and whole-frame time after a 30-frame warm-up. Needs the game data (see the README) and
-# the MinGW target on Windows; set TARGET for another one.
-cd "$(dirname "$0")/.." || exit 1
-TARGET="${TARGET:-x86_64-pc-windows-gnu}"
-cargo build -q --release --target "$TARGET" --bin rr 2>&1 | grep -E "^error" -A6
-EXE="target/$TARGET/release/rr"
-[ -f "$EXE.exe" ] && EXE="$EXE.exe"
-COMMON="--first-person --textured --max-fps 10000 --walk 330 --hold X --doors-open 1"
+# the MinGW target on Windows. See common.sh for PROFILE and TARGET.
+source "$(dirname "$0")/common.sh"
+build
+COMMON="--first-person --textured --seed 1 --cinematic --max-fps 10000 --walk 330 --hold X --doors-open 1"
 OUT="${TMPDIR:-${TEMP:-/tmp}}/bench.png"
 
 run() {
