@@ -5,6 +5,7 @@ mod hud;
 mod opengl;
 mod player;
 mod render;
+mod scene;
 mod session;
 mod state;
 mod textures;
@@ -39,9 +40,10 @@ use rogue_reborn::visibility::Visibility;
 use crate::render::assets::{Uniform, SCORCH_VARIANTS, HOLE_VARIANTS};
 use crate::render::level::LevelDraw;
 use crate::render::window;
+use crate::scene::Scene;
 use crate::session::{Game, Session};
 use crate::state::{Pressed, Timing, Toggles};
-use crate::render::draw::{WeaponDraw, CharacterArrays, draw_weapon, FlashSpot, Flashes, draw_flash, draw_flash_here, draw_character, draw_glass, draw_fracture, level_radius, Which, draw_plan, wipe_opening, room_color};
+use crate::render::draw::{WeaponDraw, CharacterArrays, draw_weapon, FlashSpot, draw_flash, draw_flash_here, draw_character, draw_glass, draw_fracture, level_radius, Which, draw_plan, wipe_opening, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
 use crate::textures::ensure_texture;
@@ -133,15 +135,11 @@ fn main() {
     let Some((mut session, world)) = Session::start(&mut args) else { return };
     let level = session.level.clone();
     let level_radius = level_radius(&level);
-    // The shards of broken glass fall for a moment afterwards
-    let mut fractures: Vec<glass::Fracture> = Vec::new();
 
     let (mut glfw, mut window, events) = window::open(&args);
 
     let Game { mut camera, assets, mut sim, me, npc_actor, eye_height, crouch_eye_height } = session.start_game(&args, world);
-    let mut decals: Vec<impact::Decal> = Vec::new();
-    let mut effects = impact::Effects::default();
-    let mut blast_lights: Vec<blastlight::BlastLight> = Vec::new();
+    let mut scene = Scene::default();
     const MAX_DECALS: usize = 300;
     // A blast's embers: how wide they are, and the width of a pixel for each unit of distance
     // (a 60 degree view about a thousand pixels high)
@@ -197,12 +195,6 @@ fn main() {
     let mut firing_sound: Option<rodio::Player> = None;
     let mut was_reloading = false;
     let mut step_phase = 0i32;
-    let mut remote_anim = rogue_reborn::net::animation::Animators::default();
-    // What each body's drawing remembers, the player's own and the other players'
-    let mut bodies: HashMap<usize, BodyState> = HashMap::new();
-    // The bodies of players who died, by slot: when the fall began, and the body falling where
-    // they died. It stays after they come back somewhere else.
-    let mut corpses: HashMap<usize, (f32, Npc)> = HashMap::new();
     // The latest kills, with when they leave the screen and their color, and how this player died:
     // by whom, and where they were looking before
     let mut feed: Vec<(f32, String, [f32; 3])> = Vec::new();
@@ -229,11 +221,6 @@ fn main() {
     let mut concussion = concussion::Concussion::default();
     let master_volume = args.volume.unwrap_or(1.0).clamp(0.0, 1.0);
     let mut hit_marker_until = 0.0f32;
-    let (mut player_flashes, mut npc_flashes) = (Flashes::default(), Flashes::default());
-    let flash_spots: std::cell::RefCell<Vec<FlashSpot>> = Default::default();
-    let mut casings = casings::Casings::default();
-    let casing_pending: std::cell::RefCell<HashMap<usize, u32>> = Default::default();
-    let casing_spots: std::cell::RefCell<Vec<(usize, casings::Ejector, [f32; 16])>> = Default::default();
     let mut shell_sound_at: HashMap<usize, f32> = HashMap::new();
     let player_ejector = assets.weapon_def.as_ref().and_then(casings::Ejector::of);
     let flash_rng = std::cell::Cell::new(0x9E37_79B9_7F4A_7C15u64);
@@ -261,8 +248,8 @@ fn main() {
             // The first movement after it does not turn the view
             last_cursor_pos = None;
             window.set_cursor_mode(if showing { CursorMode::Normal } else { CursorMode::Disabled });
-            casings.clear();
-            casing_pending.borrow_mut().clear();
+            scene.casings.clear();
+            scene.casing_pending.borrow_mut().clear();
         }
 
         for (_, event) in glfw::flush_messages(&events) {
@@ -633,8 +620,8 @@ fn main() {
         if let Some((client, _)) = &session.net {
             if client.round.number != round_seen {
                 round_seen = client.round.number;
-                decals.clear();
-                corpses.clear();
+                scene.decals.clear();
+                scene.corpses.clear();
                 feed.clear();
             }
         }
@@ -745,7 +732,7 @@ fn main() {
                     }
                     // The gun's place is known only when it is drawn, so the casings wait for that
                     if player_ejector.is_some() && !gate.showing() {
-                        *casing_pending.borrow_mut().entry(player).or_default() += 1;
+                        *scene.casing_pending.borrow_mut().entry(player).or_default() += 1;
                     }
                     if let (Some((name, at)), Some(snd)) = (sim::shot_sound(&event, me), sound.as_mut()) {
                         snd.play_at(name, at, listener_of(&camera), 1.0);
@@ -756,7 +743,7 @@ fn main() {
                     if let Some(n) = sim.npcs.get_mut(npc) {
                         n.last_shot = game_time;
                         if n.weapon.and_then(|w| assets.held_ejectors.get(w)).is_some_and(Option::is_some) && !gate.showing() {
-                            *casing_pending.borrow_mut().entry(NPC_OWNERS + npc).or_default() += 1;
+                            *scene.casing_pending.borrow_mut().entry(NPC_OWNERS + npc).or_default() += 1;
                         }
                     }
                 }
@@ -765,7 +752,7 @@ fn main() {
                     let surface = args.decal_surface.unwrap_or(surface);
                     let mut sparked = false;
                     if args.realistic_decals {
-                        sparked = effects.impact(surface, point, normal, dir, seed);
+                        sparked = scene.effects.impact(surface, point, normal, dir, seed);
                     }
                     println!("t={game_time:.2} shot hit {surface:?} ({material}) at {dist:.0} units{}", if sparked { ", sparks" } else { "" });
                     if surface != Surface::Glass {
@@ -776,9 +763,9 @@ fn main() {
                         };
                         if assets.hole_tex.contains_key(&(art, variant)) {
                             let roll = ((seed >> 20) & 0xFFFF) as f32 / 65536.0;
-                            decals.push(impact::Decal::new(point, normal, art, args.realistic_decals, variant, roll));
-                            if decals.len() > MAX_DECALS {
-                                decals.remove(0);
+                            scene.decals.push(impact::Decal::new(point, normal, art, args.realistic_decals, variant, roll));
+                            if scene.decals.len() > MAX_DECALS {
+                                scene.decals.remove(0);
                             }
                         }
                     }
@@ -794,11 +781,11 @@ fn main() {
                     }
                 }
                 sim::Event::Glass { pane, at, dir, seed } => {
-                    fractures.push(glass::shatter(&sim.panes[pane], at, dir, seed));
+                    scene.fractures.push(glass::shatter(&sim.panes[pane], at, dir, seed));
                 }
                 sim::Event::Blast { point, normal, surface, on_surface, seed } => {
                     let reach = sim.world.local_raycaster(point, 1500.0);
-                    effects.explosion(point, normal, seed, on_surface, &*reach);
+                    scene.effects.explosion(point, normal, seed, on_surface, &*reach);
                     // The light sits a little off the surface, as far as there is room
                     let n = unit3(normal);
                     let lift = reach(point, n, 60.0).map_or(60.0, |hit| hit * 0.5);
@@ -808,15 +795,15 @@ fn main() {
                         let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
                         dist > 4.0 && reach(from, [d[0] / dist, d[1] / dist, d[2] / dist], dist - 4.0).is_some()
                     };
-                    blast_lights.push(blastlight::BlastLight::new(at, &sim.world.solid_tris_near(at, blastlight::RADIUS), &blocked));
-                    if blast_lights.len() > blastlight::MOST {
-                        blast_lights.remove(0);
+                    scene.blast_lights.push(blastlight::BlastLight::new(at, &sim.world.solid_tris_near(at, blastlight::RADIUS), &blocked));
+                    if scene.blast_lights.len() > blastlight::MOST {
+                        scene.blast_lights.remove(0);
                     }
                     if on_surface && surface != Surface::Glass {
                         let roll = ((seed >> 20) & 0xFFFF) as f32 / 65536.0;
-                        decals.push(impact::Decal::scorch(point, normal, 100.0 + (seed >> 50) as f32 % 40.0, (seed >> 33) as usize % SCORCH_VARIANTS, roll));
-                        if decals.len() > MAX_DECALS {
-                            decals.remove(0);
+                        scene.decals.push(impact::Decal::scorch(point, normal, 100.0 + (seed >> 50) as f32 % 40.0, (seed >> 33) as usize % SCORCH_VARIANTS, roll));
+                        if scene.decals.len() > MAX_DECALS {
+                            scene.decals.remove(0);
                         }
                     }
                 }
@@ -982,8 +969,8 @@ fn main() {
         // The sim sets a player's flash_until to 0.05 s after the shot.
         // It is 0 before the first shot.
         let shot_at = |until: f32| if until > 0.0 { until - 0.05 } else { f32::NEG_INFINITY };
-        let player_flash: Vec<bool> = sim.players.iter().enumerate().map(|(slot, p)| player_flashes.shows(slot, shot_at(p.flash_until), game_time) && !p.equipped_grenade).collect();
-        let npc_flash: Vec<bool> = sim.npcs.iter().enumerate().map(|(i, n)| npc_flashes.shows(i, n.last_shot, game_time)).collect();
+        let player_flash: Vec<bool> = sim.players.iter().enumerate().map(|(slot, p)| scene.player_flashes.shows(slot, shot_at(p.flash_until), game_time) && !p.equipped_grenade).collect();
+        let npc_flash: Vec<bool> = sim.npcs.iter().enumerate().map(|(i, n)| scene.npc_flashes.shows(i, n.last_shot, game_time)).collect();
 
         let render_time = Instant::now();
         let view_to_map: Option<casings::Mat4>;
@@ -1306,7 +1293,7 @@ fn main() {
                     let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
                     dist > 10.0 && sim.world.raycast(from, [d[0] / dist, d[1] / dist, d[2] / dist], dist - 10.0).is_some()
                 };
-                for l in &blast_lights {
+                for l in &scene.blast_lights {
                     let g = l.glow_at(chest, &blocked);
                     for k in 0..3 {
                         sum[k] += g[k];
@@ -1325,12 +1312,12 @@ fn main() {
             let flashing = |lit: Option<CharacterLight>, on: bool| lit.map(|l| if on { l.with_muzzle([0.0, 100.0, 60.0]) } else { l });
             let tint = |lit: &Option<CharacterLight>| lit.as_ref().map_or([1.0; 3], |l| l.tint);
 
-            let note_flash = |wd: &WeaponDraw| flash_spots.borrow_mut().push(FlashSpot::here(wd, flash_roll()));
+            let note_flash = |wd: &WeaponDraw| scene.flash_spots.borrow_mut().push(FlashSpot::here(wd, flash_roll()));
             let note_casings = |owner: usize, ejector: &casings::Ejector| {
-                if casing_pending.borrow().contains_key(&owner) {
+                if scene.casing_pending.borrow().contains_key(&owner) {
                     let mut matrix = [0f32; 16];
                     glGetFloatv(GL_MODELVIEW_MATRIX, matrix.as_mut_ptr());
-                    casing_spots.borrow_mut().push((owner, *ejector, matrix));
+                    scene.casing_spots.borrow_mut().push((owner, *ejector, matrix));
                 }
             };
 
@@ -1531,20 +1518,20 @@ fn main() {
                         };
                         let limp = p.leg_wounds > 0;
                         let frames = |m: Movement| assets.player_motions.get(m, doing.crouched, limp).map_or(1, |m| m.frames.max(1)) as f32;
-                        let (movement, frame) = remote_anim.update(slot, pos, yaw, step_dt, doing, frames, args.speed_scale.unwrap_or(1.0), args.anim_scale.unwrap_or(1.0));
+                        let (movement, frame) = scene.remote_anim.update(slot, pos, yaw, step_dt, doing, frames, args.speed_scale.unwrap_or(1.0), args.anim_scale.unwrap_or(1.0));
                         let scale = assets.actors.get(slot % assets.actors.len().max(1)).map_or([1.0; 3], |a| a.scale);
                         let hand = if p.equipped_grenade { p.throw.is_none_or(|t| !t.thrown).then_some(&assets.grenade_draw) } else { Some(&assets.weapon_draw) };
                         let flash = player_flash[slot];
                         // Hidden, the animation still follows them
                         let flinch = flinch_at(chars, p, view_time);
-                        let hip_turn = remote_anim.hip_turn(slot, yaw);
-                        if !visible || draw_body(chars, p.side, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, slot, doing.reloading, doing.firing, doing.crouched, limp, hip_turn, flinch, peek, bodies.entry(slot).or_default()) {
+                        let hip_turn = scene.remote_anim.hip_turn(slot, yaw);
+                        if !visible || draw_body(chars, p.side, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, slot, doing.reloading, doing.firing, doing.crouched, limp, hip_turn, flinch, peek, scene.bodies.entry(slot).or_default()) {
                             continue;
                         }
                     } else {
                         // Dead, they are drawn where they fell, with the bodies
-                        remote_anim.forget(slot);
-                        bodies.remove(&slot);
+                        scene.remote_anim.forget(slot);
+                        scene.bodies.remove(&slot);
                         continue;
                     }
                     if !visible {
@@ -1587,7 +1574,7 @@ fn main() {
                 let flash = player_flash[me];
                 if mine.respawn_at.is_none() {
                     let flinch = flinch_at(chars, mine, game_time);
-                    draw_body(chars, mine.side, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash, me, mine.reloading(game_time), sim.firing(me), mine.player.crouched, mine.leg_wounds > 0, player_hip_turn, flinch, mine.peek, bodies.entry(me).or_default());
+                    draw_body(chars, mine.side, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash, me, mine.reloading(game_time), sim.firing(me), mine.player.crouched, mine.leg_wounds > 0, player_hip_turn, flinch, mine.peek, scene.bodies.entry(me).or_default());
                 }
             }
 
@@ -1596,12 +1583,12 @@ fn main() {
             if let Some(chars) = &sim.characters {
                 for (slot, p) in sim.players.iter().enumerate().filter(|(_, p)| p.active) {
                     if let (Some(_), Some(hit)) = (p.respawn_at, p.hit) {
-                        if corpses.get(&slot).is_none_or(|(start, _)| (start - hit.start).abs() > 0.1) {
+                        if scene.corpses.get(&slot).is_none_or(|(start, _)| (start - hit.start).abs() > 0.1) {
                             let health = combat::Health { hp: 0.0, state: combat::NpcState::Dead { motion: hit.motion, start: hit.start }, ..Default::default() };
                             let yaw = -sim::dequantize(p.look.0);
                             let scale = assets.actors.get(slot % assets.actors.len().max(1)).map_or([1.0; 3], |a| a.scale);
                             let pos = p.player.pos;
-                            corpses.insert(slot, (hit.start, Npc { health, pos, floor: pos[1], yaw, scale, stagger: 0.0, body: None, ..Npc::default() }));
+                            scene.corpses.insert(slot, (hit.start, Npc { health, pos, floor: pos[1], yaw, scale, stagger: 0.0, body: None, ..Npc::default() }));
                         }
                     }
                 }
@@ -1609,13 +1596,13 @@ fn main() {
                 // The others as the view shows them
                 let now_for = |slot: usize| if slot == me { game_time } else { view_time };
                 // A body stays while its player is dead, and for a while after they come back
-                corpses.retain(|&slot, (start, body)| {
+                scene.corpses.retain(|&slot, (start, body)| {
                     let combat::NpcState::Dead { motion, .. } = body.health.state else { return false };
                     sim.players.get(slot).is_some_and(|p| p.active && p.respawn_at.is_some())
                         || now_for(slot) - *start < sim::RESPAWN_SECONDS.max(chars.frames(motion) / 30.0)
                 });
                 glDisable(GL_TEXTURE_2D);
-                for (&slot, (start, body)) in &corpses {
+                for (&slot, (start, body)) in &scene.corpses {
                     // The player's own body only from outside it
                     let now = now_for(slot);
                     if (slot == me && !(toggles.first_person && toggles.third_person)) || now < *start || !shown(body.pos) {
@@ -1657,11 +1644,11 @@ fn main() {
             }
 
             // The light of a blast, over what it reaches
-            for l in &mut blast_lights {
+            for l in &mut scene.blast_lights {
                 l.update(step_dt);
             }
-            blast_lights.retain(|l| !l.done());
-            if let (true, Some(id)) = (toggles.textured && !blast_lights.is_empty(), assets.light_tex) {
+            scene.blast_lights.retain(|l| !l.done());
+            if let (true, Some(id)) = (toggles.textured && !scene.blast_lights.is_empty(), assets.light_tex) {
                 set_clip_planes(&[]);
                 glEnable(GL_TEXTURE_2D);
                 glBindTexture(GL_TEXTURE_2D, id);
@@ -1673,7 +1660,7 @@ fn main() {
                 glDepthFunc(GL_LEQUAL);
                 glDepthMask(0);
                 glBegin(GL_TRIANGLES);
-                for l in &blast_lights {
+                for l in &scene.blast_lights {
                     let (k, c) = (l.intensity(), l.color());
                     for lit in &l.lit {
                         for ((corner, uv), strength) in lit.corners.iter().zip(&lit.uv).zip(&lit.strength) {
@@ -1693,8 +1680,8 @@ fn main() {
             }
 
             // Bullet holes on the walls, then the debris thrown from them
-            effects.update(step_dt);
-            if toggles.textured && !decals.is_empty() {
+            scene.effects.update(step_dt);
+            if toggles.textured && !scene.decals.is_empty() {
                 glEnable(GL_TEXTURE_2D);
                 glEnable(GL_BLEND);
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -1702,7 +1689,7 @@ fn main() {
                 glPolygonOffset(-2.0, -2.0);
                 glDepthMask(0);
                 glColor4f(1.0, 1.0, 1.0, 1.0);
-                for d in &decals {
+                for d in &scene.decals {
                     let Some(&id) = assets.hole_tex.get(&(d.surface, d.variant)) else { continue };
                     glBindTexture(GL_TEXTURE_2D, id);
                     glBegin(GL_QUADS);
@@ -1717,12 +1704,12 @@ fn main() {
                 glDisable(GL_POLYGON_OFFSET_FILL);
                 glDisable(GL_BLEND);
             }
-            if !effects.particles.is_empty() || !effects.puffs.is_empty() {
+            if !scene.effects.particles.is_empty() || !scene.effects.puffs.is_empty() {
                 let right = listener_of(&camera).right;
                 glEnable(GL_BLEND);
                 glDepthMask(0);
                 // Soft clouds and the flash of a spark, as sprites facing the camera
-                for puff in &effects.puffs {
+                for puff in &scene.effects.puffs {
                     let (tex, additive, strength) = match puff.kind {
                         impact::PuffKind::Dust => (assets.cloud_tex, false, 0.55),
                         impact::PuffKind::Flash => (assets.flash_tex, true, 1.0),
@@ -1769,7 +1756,7 @@ fn main() {
                     glBlendFunc(GL_SRC_ALPHA, if sparks { GL_ONE } else { GL_ONE_MINUS_SRC_ALPHA });
                     glLineWidth(if sparks { 1.5 } else { 2.0 });
                     glBegin(GL_LINES);
-                    for pt in effects.particles.iter().filter(|p| matches!(p.kind, impact::Kind::Spark | impact::Kind::Flare) == sparks && p.kind != impact::Kind::Chip && p.kind != impact::Kind::Ember) {
+                    for pt in scene.effects.particles.iter().filter(|p| matches!(p.kind, impact::Kind::Spark | impact::Kind::Flare) == sparks && p.kind != impact::Kind::Chip && p.kind != impact::Kind::Ember) {
                         let (a, b) = (pt.tail(), pt.pos);
                         // The line a fragment crossed since the last frame fades behind it
                         let tail = if pt.kind == impact::Kind::Flare { 0.12 } else { 1.0 };
@@ -1782,7 +1769,7 @@ fn main() {
                     if sparks {
                         glPointSize(3.0);
                         glBegin(GL_POINTS);
-                        for pt in effects.particles.iter().filter(|p| p.kind == impact::Kind::Flare) {
+                        for pt in scene.effects.particles.iter().filter(|p| p.kind == impact::Kind::Flare) {
                             glColor4f(pt.color[0], pt.color[1], pt.color[2], pt.alpha());
                             glVertex3f(pt.pos[0], pt.pos[1], pt.pos[2]);
                         }
@@ -1791,7 +1778,7 @@ fn main() {
                         // of units across, but never less than a pixel or so
                         let eye = listener_of(&camera).pos; // in the map's space, like the embers
                         glBegin(GL_QUADS);
-                        for pt in effects.particles.iter().filter(|p| p.kind == impact::Kind::Ember) {
+                        for pt in scene.effects.particles.iter().filter(|p| p.kind == impact::Kind::Ember) {
                             let away = ((pt.pos[0] - eye[0]).powi(2) + (pt.pos[1] - eye[1]).powi(2) + (pt.pos[2] - eye[2]).powi(2)).sqrt();
                             let h = EMBER_SIZE.max(away * ONE_PIXEL_PER_UNIT) / 2.0;
                             glColor4f(pt.color[0], pt.color[1], pt.color[2], pt.alpha());
@@ -1805,7 +1792,7 @@ fn main() {
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                 glPointSize(2.5);
                 glBegin(GL_POINTS);
-                for pt in effects.particles.iter().filter(|p| p.kind == impact::Kind::Chip) {
+                for pt in scene.effects.particles.iter().filter(|p| p.kind == impact::Kind::Chip) {
                     glColor4f(pt.color[0], pt.color[1], pt.color[2], pt.alpha());
                     glVertex3f(pt.pos[0], pt.pos[1], pt.pos[2]);
                 }
@@ -1817,10 +1804,10 @@ fn main() {
             }
 
             // Glass: intact panes, then the pieces of broken ones falling away
-            for f in fractures.iter_mut() {
+            for f in scene.fractures.iter_mut() {
                 f.update(step_dt, &|x, z, y| sim.world.ground_at(x, z, y + 30.0));
             }
-            fractures.retain(|f| !f.done());
+            scene.fractures.retain(|f| !f.done());
             // A pane shows only with its room. Some maps glaze a window on the inside alone and
             // give the outside a solid one: from outside, the room and its glass are not drawn.
             let pane_shows = |pane: &glass::Pane| plan.is_empty()
@@ -1828,21 +1815,21 @@ fn main() {
             for (pane, _) in sim.panes.iter().zip(&sim.broken_at).filter(|(p, b)| b.is_none() && pane_shows(p)) {
                 draw_glass(&level.materials, pane.material, &session.map_num, &mut textures, toggles.textured, pane.opacity, pane.tris.iter().map(|t| (t.p, t.uv)));
             }
-            for f in &fractures {
+            for f in &scene.fractures {
                 draw_fracture(&level.materials, &session.map_num, &mut textures, toggles.textured, f);
             }
 
             if !gate.showing() {
-                let spots = casing_spots.take();
+                let spots = scene.casing_spots.take();
                 if let Some(to_map) = &view_to_map {
                     for (owner, ejector, gun) in spots {
-                        let rounds = casing_pending.borrow().get(&owner).copied().unwrap_or(0);
+                        let rounds = scene.casing_pending.borrow().get(&owner).copied().unwrap_or(0);
                         for _ in 0..rounds.min(MOST_CASINGS_A_FRAME) {
-                            casings.eject(&gun, to_map, &ejector, owner, 1.0);
+                            scene.casings.eject(&gun, to_map, &ejector, owner, 1.0);
                         }
                     }
                 }
-                for landing in casings.update(step_dt, &sim.world) {
+                for landing in scene.casings.update(step_dt, &sim.world) {
                     let weapon = if landing.owner >= NPC_OWNERS {
                         sim.npcs.get(landing.owner - NPC_OWNERS).and_then(|n| n.weapon).and_then(|w| sim.characters.as_ref()?.weapons.get(w)).map(|(_, w)| w)
                     } else {
@@ -1862,7 +1849,7 @@ fn main() {
                 glBegin(GL_QUADS);
                 // In first person our own casings are only heard, not seen
                 let own_hidden = toggles.first_person && !toggles.third_person;
-                for c in casings.iter().filter(|c| shown(c.pos) && !(own_hidden && c.owner == me)) {
+                for c in scene.casings.iter().filter(|c| shown(c.pos) && !(own_hidden && c.owner == me)) {
                     for (corners, normal) in c.faces() {
                         // Brass, darker on faces that look down
                         let shade = 0.55 + 0.45 * (normal[1] * 0.5 + 0.5);
@@ -1877,11 +1864,11 @@ fn main() {
             }
 
             if let Some(flash) = assets.flash_draw.as_ref().filter(|_| toggles.textured) {
-                for spot in flash_spots.borrow().iter() {
+                for spot in scene.flash_spots.borrow().iter() {
                     draw_flash(flash, spot);
                 }
             }
-            flash_spots.borrow_mut().clear();
+            scene.flash_spots.borrow_mut().clear();
             glColor4f(1.0, 1.0, 1.0, 1.0);
 
             // Render portals overlay when toggled
@@ -1960,7 +1947,7 @@ fn main() {
         let held = if sim.players[me].equipped_grenade { assets.grenade_draw.as_ref().filter(|_| sim.players[me].throw.is_none_or(|t| !t.thrown)) } else { assets.weapon_draw.as_ref() };
         // Without the view model (the default) the gun is not drawn.
         // Its place still says where the casings leave, and only a firing gun needs it.
-        let casing_rounds = casing_pending.borrow().get(&me).copied().unwrap_or(0);
+        let casing_rounds = scene.casing_pending.borrow().get(&me).copied().unwrap_or(0);
         let gun_shows = args.viewmodel;
         if let (true, true, false, Some(wd)) = ((gun_shows || (casing_rounds > 0 && !sim.players[me].equipped_grenade)) && sim.players[me].respawn_at.is_none(), toggles.first_person, toggles.third_person, held) {
             let l = wd.length;
@@ -2016,7 +2003,7 @@ fn main() {
                     glGetFloatv(GL_MODELVIEW_MATRIX, gun.as_mut_ptr());
                     let widen = half_view_tan() / 22.5f32.to_radians().tan();
                     for _ in 0..casing_rounds.min(MOST_CASINGS_A_FRAME) {
-                        casings.eject(&gun, to_map, e, me, widen);
+                        scene.casings.eject(&gun, to_map, e, me, widen);
                     }
                 }
                 if !gun_shows {
@@ -2026,8 +2013,8 @@ fn main() {
             }
         }
         // Rounds fired by guns not drawn this frame leave no casings
-        casing_pending.borrow_mut().clear();
-        casing_spots.borrow_mut().clear();
+        scene.casing_pending.borrow_mut().clear();
+        scene.casing_spots.borrow_mut().clear();
 
         // Draw simple debug text overlay (upper-right)
         let render_ms = (render_time.elapsed().as_secs_f64() * 1000.0) as f32;
@@ -2240,7 +2227,7 @@ fn main() {
                         println!("wrote {} ({fw}x{fh})", path.display());
                         // Live casings per owner, so the gate sees ejections that first person hides
                         let mut owners = std::collections::BTreeMap::<usize, usize>::new();
-                        for c in casings.iter() {
+                        for c in scene.casings.iter() {
                             *owners.entry(c.owner).or_default() += 1;
                         }
                         let list: Vec<String> = owners.iter().map(|(o, n)| format!("{o}={n}")).collect();
