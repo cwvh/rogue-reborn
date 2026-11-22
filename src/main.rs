@@ -1,4 +1,5 @@
 mod args;
+mod audio;
 mod camera;
 mod debug;
 mod hud;
@@ -16,7 +17,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 use rogue_reborn::motion::MOTION_FPS;
-use rogue_reborn::{map, combat, crp, grenade, blastlight, concussion, sim, sound, ambience, glass, casings};
+use rogue_reborn::{map, combat, crp, grenade, blastlight, concussion, sim, sound, glass, casings};
 use rogue_reborn::net::client::{Seen, Status};
 use rogue_reborn::net::proto::LobbyCommand;
 use rogue_reborn::lobby::{self, Chat, Gate, LobbyView};
@@ -40,6 +41,7 @@ use rogue_reborn::visibility::Visibility;
 use crate::render::assets::{Uniform, SCORCH_VARIANTS, HOLE_VARIANTS};
 use crate::render::level::LevelDraw;
 use crate::render::window;
+use crate::audio::Audio;
 use crate::scene::Scene;
 use crate::session::{Game, Session};
 use crate::state::{Pressed, Timing, Toggles};
@@ -182,19 +184,7 @@ fn main() {
     // What the player did in the last tick, which the animation follows
     let mut shown;
     let mut was_free = false;
-    // Sound is optional: no output device just means silence
-    let mut sound = if args.no_sound { None } else { sound::Sound::open("data/sound") };
-    if let Some(snd) = sound.as_mut() {
-        snd.master = args.volume.unwrap_or(1.0).clamp(0.0, 1.0);
-    }
-    // The level's ambient loops and spot sounds, which follow the rooms the player is in
-    let mut ambience = ambience::read(&session.map_path.with_extension("ass"))
-        .map(ambience::Ambience::new)
-        .filter(|_| sound.is_some());
-    // Full auto: a sustained firing sound that runs while the trigger is held
-    let mut firing_sound: Option<rodio::Player> = None;
-    let mut was_reloading = false;
-    let mut step_phase = 0i32;
+    let mut audio = Audio::new(&args, &session.map_path);
     // The latest kills, with when they leave the screen and their color, and how this player died:
     // by whom, and where they were looking before
     let mut feed: Vec<(f32, String, [f32; 3])> = Vec::new();
@@ -219,9 +209,7 @@ fn main() {
     let mut stun = (0.0f32, f32::MAX);
     // ...and flinches, and sees a grey tunnel for a moment
     let mut concussion = concussion::Concussion::default();
-    let master_volume = args.volume.unwrap_or(1.0).clamp(0.0, 1.0);
     let mut hit_marker_until = 0.0f32;
-    let mut shell_sound_at: HashMap<usize, f32> = HashMap::new();
     let player_ejector = assets.weapon_def.as_ref().and_then(casings::Ejector::of);
     let flash_rng = std::cell::Cell::new(0x9E37_79B9_7F4A_7C15u64);
     let flash_roll = || {
@@ -701,8 +689,8 @@ fn main() {
         veil = (veil - 5.0 * step_dt).max(0.0);
         deaf = (deaf - 0.2 * step_dt).max(0.0);
         concussion.update(step_dt);
-        if let Some(snd) = sound.as_mut() {
-            snd.master = master_volume * (1.0 - 0.5 * deaf.min(1.0));
+        if let Some(snd) = audio.sound.as_mut() {
+            snd.master = audio.master_volume * (1.0 - 0.5 * deaf.min(1.0));
             stun.1 += step_dt;
             snd.set_muffle(sound::stunned_after(stun.0, stun.1));
         }
@@ -711,7 +699,7 @@ fn main() {
         for event in events {
             match event {
                 sim::Event::Sound { name, at, gain } => {
-                    if let Some(snd) = sound.as_mut() {
+                    if let Some(snd) = audio.sound.as_mut() {
                         match at {
                             Some(p) => snd.play_at(&name, p, listener_of(&camera), gain),
                             None => snd.play(&name, gain),
@@ -734,7 +722,7 @@ fn main() {
                     if player_ejector.is_some() && !gate.showing() {
                         *scene.casing_pending.borrow_mut().entry(player).or_default() += 1;
                     }
-                    if let (Some((name, at)), Some(snd)) = (sim::shot_sound(&event, me), sound.as_mut()) {
+                    if let (Some((name, at)), Some(snd)) = (sim::shot_sound(&event, me), audio.sound.as_mut()) {
                         snd.play_at(name, at, listener_of(&camera), 1.0);
                     }
                 }
@@ -769,7 +757,7 @@ fn main() {
                             }
                         }
                     }
-                    if let Some(snd) = sound.as_mut() {
+                    if let Some(snd) = audio.sound.as_mut() {
                         let name = match surface {
                             _ if sparked => if seed & 1 == 0 { "C_BLRIC1.WAV" } else { "C_BLRIC2.WAV" },
                             Surface::Wood => "C_BLWOD.WAV",
@@ -818,7 +806,7 @@ fn main() {
                     }
                     if s > 0.1 {
                         deaf = deaf.max(s.min(1.0));
-                        if let Some(snd) = sound.as_mut() {
+                        if let Some(snd) = audio.sound.as_mut() {
                             snd.ring(3.5 * s.min(1.0) + 1.0, 0.2 * s.min(1.0));
                             snd.thump(s.min(1.0));
                             // Never less stunned than what is left of an earlier blast. It takes
@@ -901,10 +889,10 @@ fn main() {
             };
             // A footstep at the start of each half of a walk or run cycle
             let phase = (player_frame / (frames / 2.0).max(1.0)) as i32;
-            if phase != step_phase {
-                step_phase = phase;
+            if phase != audio.step_phase {
+                audio.step_phase = phase;
                 if walking && sim.players[me].player.on_ground {
-                    if let Some(snd) = sound.as_mut() {
+                    if let Some(snd) = audio.sound.as_mut() {
                         snd.play(if matches!(movement, Movement::Run | Movement::RunBack) { "F_HRCON1.WAV" } else { "F_HWCON1.WAV" }, 1.0);
                     }
                 }
@@ -912,28 +900,28 @@ fn main() {
         }
 
         // Reload sound when a reload starts (by key or running dry)
-        if sim.players[me].reload_until.is_some() && !was_reloading {
-            if let Some(snd) = sound.as_mut() {
+        if sim.players[me].reload_until.is_some() && !audio.was_reloading {
+            if let Some(snd) = audio.sound.as_mut() {
                 snd.play("C_SBMAG1.WAV", 1.0);
             }
         }
-        was_reloading = sim.players[me].reload_until.is_some();
+        audio.was_reloading = sim.players[me].reload_until.is_some();
 
         // Full auto: the firing sound runs while the trigger is held with rounds to fire,
         // then stops with a closing crack
         let firing = sim.firing(me);
-        if let Some(snd) = sound.as_mut() {
+        if let Some(snd) = audio.sound.as_mut() {
             if gate.showing() {
-                firing_sound = None;
-            } else if firing && firing_sound.is_none() {
-                firing_sound = snd.play_loop("C_SB5KB.WAV", 1.0);
-            } else if !firing && firing_sound.take().is_some() {
+                audio.firing_sound = None;
+            } else if firing && audio.firing_sound.is_none() {
+                audio.firing_sound = snd.play_loop("C_SB5KB.WAV", 1.0);
+            } else if !firing && audio.firing_sound.take().is_some() {
                 snd.play("C_SB5KR.WAV", 1.0);
             }
         }
 
         // Ambient sound for the rooms around the player's feet
-        if let (Some(snd), Some(amb)) = (sound.as_mut(), ambience.as_mut()) {
+        if let (Some(snd), Some(amb)) = (audio.sound.as_mut(), audio.ambience.as_mut()) {
             let listener = listener_of(&camera);
             let feet = [listener.pos[0], listener.pos[1] - eye_now, listener.pos[2]];
             let rooms: Vec<&str> = level.rooms.rooms.iter()
@@ -1835,8 +1823,8 @@ fn main() {
                     } else {
                         assets.weapon_def.as_ref()
                     };
-                    let last = shell_sound_at.entry(landing.owner).or_insert(f32::NEG_INFINITY);
-                    if let (Some(name), Some(snd)) = (weapon.and_then(|w| w.shell_sound.as_deref()), sound.as_mut()) {
+                    let last = audio.shell_sound_at.entry(landing.owner).or_insert(f32::NEG_INFINITY);
+                    if let (Some(name), Some(snd)) = (weapon.and_then(|w| w.shell_sound.as_deref()), audio.sound.as_mut()) {
                         if game_time - *last >= SHELL_SOUND_GAP {
                             *last = game_time;
                             snd.play_at(name, landing.at, listener_of(&camera), SHELL_SOUND_GAIN);
@@ -2261,6 +2249,6 @@ fn main() {
     }
 
     // Let go of the window and the sound device first when restarting, so the new one has them to itself
-    let release = if toggles.reload { Some((window, sound)) } else { None };
+    let release = if toggles.reload { Some((window, audio.sound)) } else { None };
     session.finish(&args, &sim, release);
 }
