@@ -1671,6 +1671,8 @@ fn main() {
         unsafe {
             glClearStencil(1);
             glClear(0x00004000 | 0x00000100 | 0x00000400); // GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT
+            // The HUD leaves the depth test off
+            glEnable(0x0B71); // GL_DEPTH_TEST
             glMatrixMode(0x1701); // GL_PROJECTION
             glLoadIdentity();
             glu_perspective(VIEW_HIGH, aspect, z_near, z_far);
