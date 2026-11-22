@@ -66,3 +66,13 @@ impl Timing {
         Timing { start_time: Instant::now(), last_step: Instant::now(), fixed_step, tick_budget: 0.0, frames_drawn: 0, bench: (0, 0.0, 0.0) }
     }
 }
+
+// Keys pressed since the sim last ticked, which counts once
+#[derive(Default)]
+pub struct Pressed {
+    pub use_key: bool,
+    pub reload: bool,
+    pub gun: bool,
+    pub grenade: bool,
+    pub culling: bool,
+}

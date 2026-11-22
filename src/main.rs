@@ -40,7 +40,7 @@ use crate::render::assets::{Uniform, SCORCH_VARIANTS, HOLE_VARIANTS};
 use crate::render::level::LevelDraw;
 use crate::render::window;
 use crate::session::{Game, Session};
-use crate::state::{Timing, Toggles};
+use crate::state::{Pressed, Timing, Toggles};
 use crate::render::draw::{WeaponDraw, CharacterArrays, draw_weapon, FlashSpot, Flashes, draw_flash, draw_flash_here, draw_character, draw_glass, draw_fracture, level_radius, Which, draw_plan, wipe_opening, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
@@ -180,8 +180,7 @@ fn main() {
     // A scripted run, or a replay, takes one tick a frame instead of keeping time
     let mut timing = Timing::new(args.walk.is_some() || (session.playback.is_some() && args.screenshot.is_some()));
     let level_draw = LevelDraw::new(&level, &sim, &session.map_num);
-    // Keys pressed since the sim last ticked, which counts once
-    let (mut use_pressed, mut reload_pressed, mut gun_pressed, mut grenade_pressed, mut culling_pressed) = (false, false, false, false, false);
+    let mut pressed = Pressed::default();
     // What the player did in the last tick, which the animation follows
     let mut shown;
     let mut was_free = false;
@@ -258,7 +257,7 @@ fn main() {
         let showing = session.net.as_ref().is_some_and(|(c, _)| c.status == Status::Connected && c.round.phase.screen());
         if gate.show(showing) {
             (trigger, walk_held, pointer_down, wheel) = (false, false, false, 0.0);
-            (use_pressed, reload_pressed, gun_pressed, grenade_pressed, culling_pressed) = (false, false, false, false, false);
+            (pressed.use_key, pressed.reload, pressed.gun, pressed.grenade, pressed.culling) = (false, false, false, false, false);
             // The first movement after it does not turn the view
             last_cursor_pos = None;
             window.set_cursor_mode(if showing { CursorMode::Normal } else { CursorMode::Disabled });
@@ -322,10 +321,10 @@ fn main() {
                             window.set_should_close(true);
                         }
                         (Key::Space, Action::Press) | (Key::Backspace, Action::Press) => {
-                            use_pressed = true;
+                            pressed.use_key = true;
                         }
                         (Key::V, Action::Press) => {
-                            culling_pressed = true;
+                            pressed.culling = true;
                         }
                         (Key::G, Action::Press) => {
                             toggles.room_debug = !toggles.room_debug;
@@ -349,13 +348,13 @@ fn main() {
                             toggles.third_person = !toggles.third_person;
                         }
                         (Key::Num1, Action::Press) => {
-                            gun_pressed = true;
+                            pressed.gun = true;
                         }
                         (Key::Num3, Action::Press) => {
-                            grenade_pressed = true;
+                            pressed.grenade = true;
                         }
                         (Key::R, Action::Press) => {
-                            reload_pressed = true;
+                            pressed.reload = true;
                         }
                         (Key::LeftControl, Action::Press) => {
                             crouch_wanted = !crouch_wanted;
@@ -433,16 +432,16 @@ fn main() {
             trigger = (timing.frames_drawn < n && held.contains('F')) || (held.contains('B') && (60..64).contains(&timing.frames_drawn));
             // T takes out a grenade and throws it after holding for half a second
             if held.contains('T') {
-                grenade_pressed = true;
+                pressed.grenade = true;
                 trigger = timing.frames_drawn < 30;
             }
             // U presses the use key (Space) on frame 5, to open or close the door in front
             if held.contains('U') && timing.frames_drawn == 5 {
-                use_pressed = true;
+                pressed.use_key = true;
             }
             // L starts a reload on the first frame (for testing the animation)
             if held.contains('L') && timing.frames_drawn == 0 {
-                reload_pressed = true;
+                pressed.reload = true;
             }
             walk_held = timing.frames_drawn < n && held.contains('R');
             // Y turns to the right, 2 degrees a frame, to see the feet step round
@@ -515,11 +514,11 @@ fn main() {
             peek_left: gate.held(Key::Q),
             peek_right: gate.held(Key::E),
             fire: trigger,
-            use_key: use_pressed,
-            reload: reload_pressed,
-            gun: gun_pressed,
-            grenade: grenade_pressed,
-            toggle_culling: culling_pressed,
+            use_key: pressed.use_key,
+            reload: pressed.reload,
+            gun: pressed.gun,
+            grenade: pressed.grenade,
+            toggle_culling: pressed.culling,
             observer: (!toggles.first_person).then(|| [camera.position[0], camera.position[1], -camera.position[2]]),
             ..sim::Input::default()
         };
@@ -578,7 +577,7 @@ fn main() {
             ticks += 1;
         }
         if ticks > 0 {
-            (use_pressed, reload_pressed, gun_pressed, grenade_pressed, culling_pressed) = (false, false, false, false, false);
+            (pressed.use_key, pressed.reload, pressed.gun, pressed.grenade, pressed.culling) = (false, false, false, false, false);
         }
         // Past the limit the rest is dropped rather than caught up
         if timing.tick_budget >= sim::TICK {
