@@ -156,13 +156,14 @@ fn main() {
     let mut overlay = Overlay::new(session.joined.as_ref());
     let mut textures = HashMap::new();
     let mut toggles = Toggles::new(&args);
-    // A scripted run, or a replay, takes one tick a frame instead of keeping time
-    let mut timing = Timing::new(args.walk.is_some() || (session.playback.is_some() && args.screenshot.is_some()));
+    let last_step = Instant::now();
     let level_draw = LevelDraw::new(&level, &sim, &session.map_num);
     let mut pressed = Pressed::default();
     // What the player did in the last tick, which the animation follows
     let mut shown;
     let mut audio = Audio::new(&args, &session.map_path);
+    // A scripted run, or a replay, takes one tick a frame instead of keeping time
+    let mut timing = Timing::new(args.walk.is_some() || (session.playback.is_some() && args.screenshot.is_some()), last_step);
     let team_game = session.joined.as_ref().is_some_and(|s| s.bases.iter().all(|b| !b.is_empty()));
     let player_ejector = assets.weapon_def.as_ref().and_then(casings::Ejector::of);
     let flash_rng = std::cell::Cell::new(0x9E37_79B9_7F4A_7C15u64);

@@ -62,8 +62,9 @@ pub struct Timing {
 }
 
 impl Timing {
-    pub fn new(fixed_step: bool) -> Timing {
-        Timing { start_time: Instant::now(), last_step: Instant::now(), fixed_step, tick_budget: 0.0, frames_drawn: 0, bench: (0, 0.0, 0.0) }
+    // The frame clock starts before the level's tables and the sound load, and the game clock after
+    pub fn new(fixed_step: bool, last_step: Instant) -> Timing {
+        Timing { start_time: Instant::now(), last_step, fixed_step, tick_budget: 0.0, frames_drawn: 0, bench: (0, 0.0, 0.0) }
     }
 }
 
