@@ -3,6 +3,86 @@
 
 use rogue_reborn::rsb;
 
+// Primitive modes for glBegin and glDrawArrays
+pub const GL_POINTS: u32 = 0x0000;
+pub const GL_LINES: u32 = 0x0001;
+pub const GL_LINE_LOOP: u32 = 0x0002;
+pub const GL_TRIANGLES: u32 = 0x0004;
+pub const GL_TRIANGLE_STRIP: u32 = 0x0005;
+pub const GL_TRIANGLE_FAN: u32 = 0x0006;
+pub const GL_QUADS: u32 = 0x0007;
+
+// Comparison functions
+pub const GL_LESS: u32 = 0x0201;
+pub const GL_EQUAL: u32 = 0x0202;
+pub const GL_LEQUAL: u32 = 0x0203;
+pub const GL_GREATER: u32 = 0x0204;
+pub const GL_ALWAYS: u32 = 0x0207;
+
+// Stencil operations
+pub const GL_ZERO: u32 = 0x0000;
+pub const GL_KEEP: u32 = 0x1E00;
+pub const GL_REPLACE: u32 = 0x1E01;
+pub const GL_INCR: u32 = 0x1E02;
+pub const GL_DECR: u32 = 0x1E03;
+
+// Blend factors
+pub const GL_ONE: u32 = 0x0001;
+pub const GL_SRC_ALPHA: u32 = 0x0302;
+pub const GL_ONE_MINUS_SRC_ALPHA: u32 = 0x0303;
+
+// Clear bits
+pub const GL_COLOR_BUFFER_BIT: u32 = 0x4000;
+pub const GL_DEPTH_BUFFER_BIT: u32 = 0x0100;
+pub const GL_STENCIL_BUFFER_BIT: u32 = 0x0400;
+
+// Capabilities for glEnable and glDisable
+pub const GL_ALPHA_TEST: u32 = 0x0BC0;
+pub const GL_BLEND: u32 = 0x0BE2;
+pub const GL_CULL_FACE: u32 = 0x0B44;
+pub const GL_DEPTH_TEST: u32 = 0x0B71;
+pub const GL_POLYGON_OFFSET_FILL: u32 = 0x8037;
+pub const GL_SCISSOR_TEST: u32 = 0x0C11;
+pub const GL_STENCIL_TEST: u32 = 0x0B90;
+pub const GL_CLIP_PLANE0: u32 = 0x3000;
+
+// Faces, winding and polygon modes
+pub const GL_BACK: u32 = 0x0405;
+pub const GL_FRONT_AND_BACK: u32 = 0x0408;
+pub const GL_CW: u32 = 0x0900;
+pub const GL_LINE: u32 = 0x1B01;
+pub const GL_FILL: u32 = 0x1B02;
+
+// Matrix modes, matrix queries and viewport
+pub const GL_MODELVIEW: u32 = 0x1700;
+pub const GL_PROJECTION: u32 = 0x1701;
+pub const GL_MODELVIEW_MATRIX: u32 = 0x0BA6;
+pub const GL_PROJECTION_MATRIX: u32 = 0x0BA7;
+pub const GL_VIEWPORT: u32 = 0x0BA2;
+
+// Client arrays
+pub const GL_VERTEX_ARRAY: u32 = 0x8074;
+pub const GL_COLOR_ARRAY: u32 = 0x8076;
+pub const GL_TEXTURE_COORD_ARRAY: u32 = 0x8078;
+
+// Textures and pixel formats
+pub const GL_TEXTURE_2D: u32 = 0x0DE1;
+pub const GL_TEXTURE_MIN_FILTER: u32 = 0x2801;
+pub const GL_TEXTURE_MAG_FILTER: u32 = 0x2800;
+pub const GL_TEXTURE_WRAP_S: u32 = 0x2802;
+pub const GL_TEXTURE_WRAP_T: u32 = 0x2803;
+pub const GL_LINEAR: u32 = 0x2601;
+pub const GL_CLAMP_TO_EDGE: u32 = 0x812F;
+pub const GL_RGB: u32 = 0x1907;
+pub const GL_RGBA: u32 = 0x1908;
+
+// Data types and pixel store
+pub const GL_UNSIGNED_BYTE: u32 = 0x1401;
+pub const GL_FLOAT: u32 = 0x1406;
+pub const GL_PACK_ALIGNMENT: u32 = 0x0D05;
+pub const GL_DEPTH_BITS: u32 = 0x0D56;
+pub const GL_STENCIL_BITS: u32 = 0x0D57;
+
 #[cfg_attr(windows, link(name = "opengl32"))]
 #[cfg_attr(target_os = "macos", link(name = "OpenGL", kind = "framework"))]
 #[cfg_attr(not(any(windows, target_os = "macos")), link(name = "GL"))]
@@ -82,8 +162,8 @@ pub fn read_framebuffer(width: i32, height: i32) -> Vec<u8> {
     let (w, h) = (width as usize, height as usize);
     let mut bottom_up = vec![0u8; w * h * 3];
     unsafe {
-        glPixelStorei(0x0D05, 1); // GL_PACK_ALIGNMENT
-        glReadPixels(0, 0, width, height, 0x1907, 0x1401, // GL_RGB, GL_UNSIGNED_BYTE
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE,
             bottom_up.as_mut_ptr() as *mut std::ffi::c_void);
     }
     let mut out = Vec::with_capacity(bottom_up.len());
@@ -123,10 +203,10 @@ pub unsafe fn set_clip_planes(planes: &[[f32; 4]]) {
         for i in 0..6u32 {
             match planes.get(i as usize) {
                 Some(p) => {
-                    glClipPlane(0x3000 + i, [p[0] as f64, p[1] as f64, p[2] as f64, p[3] as f64].as_ptr());
-                    glEnable(0x3000 + i);
+                    glClipPlane(GL_CLIP_PLANE0 + i, [p[0] as f64, p[1] as f64, p[2] as f64, p[3] as f64].as_ptr());
+                    glEnable(GL_CLIP_PLANE0 + i);
                 }
-                None => glDisable(0x3000 + i),
+                None => glDisable(GL_CLIP_PLANE0 + i),
             }
         }
     }
@@ -183,21 +263,21 @@ pub fn upload_rgba_to_gl(width: u32, height: u32, rgba: &[u8]) -> Option<u32> {
     let mut id = 0;
     unsafe {
         glGenTextures(1, &mut id as *mut u32);
-        glBindTexture(0x0DE1, id); // GL_TEXTURE_2D
+        glBindTexture(GL_TEXTURE_2D, id);
 
         // Simple filters; can be refined per material address mode
-        glTexParameteri(0x0DE1, 0x2801, 0x2601); // GL_TEXTURE_MIN_FILTER, GL_LINEAR
-        glTexParameteri(0x0DE1, 0x2800, 0x2601); // GL_TEXTURE_MAG_FILTER, GL_LINEAR
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as i32);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
 
         glTexImage2D(
-            0x0DE1,              // GL_TEXTURE_2D
+            GL_TEXTURE_2D,
             0,                   // level
-            0x1908,              // GL_RGBA
+            GL_RGBA as i32,
             width as i32,
             height as i32,
             0,                   // border
-            0x1908,              // GL_RGBA
-            0x1401,              // GL_UNSIGNED_BYTE
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
             rgba.as_ptr() as *const std::ffi::c_void
         );
     }

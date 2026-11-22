@@ -11,8 +11,6 @@ use rogue_reborn::ui::{Art, Canvas, Color, Draw, FontId, Rect, Ui};
 use crate::hud::draw_glyph;
 use crate::opengl::*;
 
-const TEXTURE_2D: u32 = 0x0DE1;
-
 /// The UI's textures, uploaded once the window is open
 pub struct UiGl {
     art: HashMap<Art, (u32, [u32; 2])>,
@@ -53,21 +51,21 @@ impl UiGl {
         unsafe {
             glViewport(0, 0, framebuffer[0], framebuffer[1]);
             glClearColor(0.0, 0.0, 0.0, 1.0);
-            glClear(0x4000 | 0x0100); // GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
-            glMatrixMode(0x1701); // GL_PROJECTION
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            glMatrixMode(GL_PROJECTION);
             glLoadIdentity();
             // Down the screen as the canvas goes
             ortho_2d(0.0, framebuffer[0].max(1) as f32, framebuffer[1].max(1) as f32, 0.0);
-            glMatrixMode(0x1700); // GL_MODELVIEW
+            glMatrixMode(GL_MODELVIEW);
             glLoadIdentity();
             glTranslatef(canvas.offset[0], canvas.offset[1], 0.0);
             glScalef(canvas.scale, canvas.scale, 1.0);
-            glDisable(0x0B71); // GL_DEPTH_TEST
-            glDisable(0x0B44); // GL_CULL_FACE
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_CULL_FACE);
             // The level may be drawn in lines; the 3D view sets its own each frame
-            glPolygonMode(0x0408, 0x1B02); // GL_FRONT_AND_BACK, GL_FILL
-            glEnable(0x0BE2); // GL_BLEND
-            glBlendFunc(0x0302, 0x0303); // GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             for d in draws {
                 match d {
                     Draw::Fill { rect, color } => fill(*rect, *color),
@@ -102,9 +100,9 @@ impl UiGl {
                     }
                 }
             }
-            glDisable(0x0BE2);
-            glDisable(TEXTURE_2D);
-            glEnable(0x0B71);
+            glDisable(GL_BLEND);
+            glDisable(GL_TEXTURE_2D);
+            glEnable(GL_DEPTH_TEST);
             glColor4f(1.0, 1.0, 1.0, 1.0);
         }
     }
@@ -114,7 +112,7 @@ impl UiGl {
         let Some(id) = tex else {
             // The dot font draws up the screen, so it is turned over
             unsafe {
-                glDisable(TEXTURE_2D);
+                glDisable(GL_TEXTURE_2D);
                 glColor4f(color[0], color[1], color[2], color[3]);
                 for (ch, (_, _, _, x)) in text.chars().zip(font.layout(text)) {
                     glPushMatrix();
@@ -142,9 +140,9 @@ impl UiGl {
 
 fn fill(rect: Rect, color: Color) {
     unsafe {
-        glDisable(TEXTURE_2D);
+        glDisable(GL_TEXTURE_2D);
         glColor4f(color[0], color[1], color[2], color[3]);
-        glBegin(0x0007); // GL_QUADS
+        glBegin(GL_QUADS);
         glVertex3f(rect.x, rect.y, 0.0);
         glVertex3f(rect.x + rect.w, rect.y, 0.0);
         glVertex3f(rect.x + rect.w, rect.y + rect.h, 0.0);
@@ -157,10 +155,10 @@ fn fill(rect: Rect, color: Color) {
 fn textured(id: u32, rect: Rect, uv: [f32; 4], color: Color) {
     let [u0, v0, u1, v1] = uv;
     unsafe {
-        glEnable(TEXTURE_2D);
-        glBindTexture(TEXTURE_2D, id);
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, id);
         glColor4f(color[0], color[1], color[2], color[3]);
-        glBegin(0x0007); // GL_QUADS
+        glBegin(GL_QUADS);
         glTexCoord2f(u0, v0);
         glVertex3f(rect.x, rect.y, 0.0);
         glTexCoord2f(u1, v0);

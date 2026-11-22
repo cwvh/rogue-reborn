@@ -402,7 +402,7 @@ fn main() {
     window.make_current();
     {
         let mut stencil_bits = 0;
-        unsafe { glGetIntegerv(0x0D57, &mut stencil_bits) }; // GL_STENCIL_BITS
+        unsafe { glGetIntegerv(GL_STENCIL_BITS, &mut stencil_bits) };
         if stencil_bits == 0 {
             eprintln!("warning: no stencil buffer, so rooms seen through doorways will not be masked (use --no-cull)");
         }
@@ -421,8 +421,8 @@ fn main() {
     unsafe {
         glViewport(0, 0, WIDTH, HEIGHT);
         glClearColor(0.1, 0.1, 0.1, 1.0);
-        glEnable(0x0B71); // GL_DEPTH_TEST
-        glPolygonMode(0x0408, 0x1B01); // GL_FRONT_AND_BACK, GL_LINE
+        glEnable(GL_DEPTH_TEST);
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
     }
 
     // Camera setup: start at mission-provided location
@@ -564,10 +564,10 @@ fn main() {
     let light_tex = upload_rgba_to_gl(blastlight::TEXTURE_SIZE as u32, blastlight::TEXTURE_SIZE as u32, &blastlight::texture());
     if let Some(id) = light_tex {
         unsafe {
-            glBindTexture(0x0DE1, id);
+            glBindTexture(GL_TEXTURE_2D, id);
             // The patch must not repeat where a surface runs on past it
-            glTexParameteri(0x0DE1, 0x2802, 0x812F); // GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE
-            glTexParameteri(0x0DE1, 0x2803, 0x812F); // GL_TEXTURE_WRAP_T
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as i32);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as i32);
         }
     }
     let mut blast_lights: Vec<blastlight::BlastLight> = Vec::new();
@@ -1672,14 +1672,14 @@ fn main() {
         let drawn_rooms: Vec<String>;
         unsafe {
             glClearStencil(1);
-            glClear(0x00004000 | 0x00000100 | 0x00000400); // GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
             // The HUD leaves the depth test off
-            glEnable(0x0B71); // GL_DEPTH_TEST
-            glMatrixMode(0x1701); // GL_PROJECTION
+            glEnable(GL_DEPTH_TEST);
+            glMatrixMode(GL_PROJECTION);
             glLoadIdentity();
             glu_perspective(VIEW_HIGH, aspect, z_near, z_far);
 
-            glMatrixMode(0x1700); // GL_MODELVIEW
+            glMatrixMode(GL_MODELVIEW);
             glLoadIdentity();
             // A blast shakes the view: a quick tremble that dies away
             if shake > 0.002 && watch_pose.is_none() {
@@ -1703,7 +1703,7 @@ fn main() {
             apply_camera(&view);
             glScalef(1.0, 1.0, -1.0);
             let mut world_view = [0f32; 16];
-            glGetFloatv(0x0BA6, world_view.as_mut_ptr()); // GL_MODELVIEW_MATRIX
+            glGetFloatv(GL_MODELVIEW_MATRIX, world_view.as_mut_ptr());
             view_to_map = casings::invert_affine(&world_view);
 
             // What the portals show from here: the rooms the player is in, and each room
@@ -1723,8 +1723,8 @@ fn main() {
             };
             if sim.culling && !cull_rooms.is_empty() {
                 let (mut modelview, mut projection) = ([0f32; 16], [0f32; 16]);
-                glGetFloatv(0x0BA6, modelview.as_mut_ptr()); // GL_MODELVIEW_MATRIX
-                glGetFloatv(0x0BA7, projection.as_mut_ptr()); // GL_PROJECTION_MATRIX
+                glGetFloatv(GL_MODELVIEW_MATRIX, modelview.as_mut_ptr());
+                glGetFloatv(GL_PROJECTION_MATRIX, projection.as_mut_ptr());
                 let clip = |v: [f32; 3]| mul_mat4(&projection, mul_mat4(&modelview, [v[0], v[1], v[2], 1.0]));
                 if args.portal_paths {
                     plan = cull_rooms.iter().map(|&r| sim.visibility.plan(&level, r, &cull_body, cam_eye, &sim.blocked_portals, &clip)).collect();
@@ -1747,19 +1747,17 @@ fn main() {
             {
                 // Textured mode
                 if textured {
-                    glEnable(0x0DE1); // GL_TEXTURE_2D
-                    glPolygonMode(0x0408, 0x1B02); // GL_FRONT_AND_BACK, GL_FILL
+                    glEnable(GL_TEXTURE_2D);
+                    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
                 } else {
-                    glDisable(0x0DE1); // GL_TEXTURE_2D
-                    glPolygonMode(0x0408, 0x1B01); // GL_FRONT_AND_BACK, GL_LINE
+                    glDisable(GL_TEXTURE_2D);
+                    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
                 }
-                let level_mode = if textured { 0x1B02 } else { 0x1B01 };
+                let level_mode = if textured { GL_FILL } else { GL_LINE };
 
-                // Determine which room names are active for this planning level (if any)
-                let use_filter = false; // !level.planning_levels.levels.is_empty();
                 // Iterate map geometry by material groups
                 if room_debug {
-                    glDisable(0x0DE1); // GL_TEXTURE_2D
+                    glDisable(GL_TEXTURE_2D);
                 }
 
                 // Draws some of the level's objects, and only the part beyond `plane`.
@@ -1800,12 +1798,6 @@ fn main() {
                             glColor3f(r, g, b);
                         }
                     for (od_index, od) in object.object_datas.iter().enumerate() {
-                        if use_filter {
-                            let rooms = &level.planning_levels.levels[planning_level_index].room_names;
-                            if !rooms.iter().any(|r| r == &object.name) {
-                                continue;
-                            }
-                        }
                         let mat_index = od.material as usize;
                         let blend = if textured { sprite_blends.get(mat_index).copied().flatten() } else { None };
                         if blend.is_some() != (pass == 1) {
@@ -1817,18 +1809,18 @@ fn main() {
                                 // portal does not blend it a second time (a shadow twice as dark, a
                                 // light twice as bright). The alpha test keeps its clear pixels out
                                 // of the depth buffer.
-                                glEnable(0x0BC0); // GL_ALPHA_TEST
-                                glAlphaFunc(0x0204, 0.02); // GL_GREATER
-                                glEnable(0x0BE2); // GL_BLEND
-                                glBlendFunc(0x0302, if additive { 1 } else { 0x0303 }); // SRC_ALPHA, ONE or ONE_MINUS_SRC_ALPHA
+                                glEnable(GL_ALPHA_TEST);
+                                glAlphaFunc(GL_GREATER, 0.02);
+                                glEnable(GL_BLEND);
+                                glBlendFunc(GL_SRC_ALPHA, if additive { GL_ONE } else { GL_ONE_MINUS_SRC_ALPHA });
                                 glDepthMask(u8::from(sprite_mode != 2));
                             }
                             None => {
                                 glDepthMask(1);
-                                glDisable(0x0BE2);
+                                glDisable(GL_BLEND);
                                 if textured {
-                                    glEnable(0x0BC0);
-                                    glAlphaFunc(0x0204, 0.5);
+                                    glEnable(GL_ALPHA_TEST);
+                                    glAlphaFunc(GL_GREATER, 0.5);
                                 }
                             }
                         }
@@ -1840,11 +1832,11 @@ fn main() {
                         // from inside 119), and this hides it.
                         if !args.no_cull_backs {
                             if level.materials.materials.get(mat_index).is_some_and(|m| m.two_sided) {
-                                glDisable(0x0B44); // GL_CULL_FACE
+                                glDisable(GL_CULL_FACE);
                             } else {
-                                glEnable(0x0B44);
-                                glCullFace(0x0405); // GL_BACK
-                                glFrontFace(0x0900); // GL_CW
+                                glEnable(GL_CULL_FACE);
+                                glCullFace(GL_BACK);
+                                glFrontFace(GL_CW);
                             }
                         }
                         // Room colors replace the textures, so they show even where textures are missing
@@ -1852,7 +1844,7 @@ fn main() {
                         if let Some(tex_id) = tex_id {
                             // TODO put all faces with same tex-id together so I can bind once
                             if !room_debug {
-                                glBindTexture(0x0DE1, tex_id); // GL_TEXTURE_2D
+                                glBindTexture(GL_TEXTURE_2D, tex_id);
                             }
 
                             // Faces and UVs are parallel arrays
@@ -1878,10 +1870,10 @@ fn main() {
                             // A sprite's faces come nearer than the surface they lie on
                             let offset = f32::from(layer) + if blend.is_some() && sprite_mode == 0 { 2.0 } else { 0.0 };
                             if offset > 0.0 {
-                                glEnable(0x8037); // GL_POLYGON_OFFSET_FILL
+                                glEnable(GL_POLYGON_OFFSET_FILL);
                                 glPolygonOffset(-offset, -offset);
                             }
-                            glBegin(0x0004); // GL_TRIANGLES
+                            glBegin(GL_TRIANGLES);
                             for i in 0..face_count {
                                 if layers.per_face[od_index][i] != layer {
                                     continue;
@@ -1914,7 +1906,7 @@ fn main() {
                             glEnd();
                             }
                             if layers.max > 0 || blend.is_some() {
-                                glDisable(0x8037);
+                                glDisable(GL_POLYGON_OFFSET_FILL);
                             }
                         }
                     }
@@ -1923,9 +1915,9 @@ fn main() {
                     }
                     }
                     }
-                    glDisable(0x0B44); // GL_CULL_FACE
-                    glDisable(0x0BC0); // GL_ALPHA_TEST
-                    glDisable(0x0BE2); // GL_BLEND
+                    glDisable(GL_CULL_FACE);
+                    glDisable(GL_ALPHA_TEST);
+                    glDisable(GL_BLEND);
                     glDepthMask(1);
                 };
 
@@ -1939,16 +1931,16 @@ fn main() {
                     // as in the original (the hall's wall in 120's doorway, see BUGS.txt)
                     draw_objects(Which::Unowned, &[]);
                     let mut cut_rooms: Vec<u32> = Vec::new();
-                    glEnable(0x0B90); // GL_STENCIL_TEST
+                    glEnable(GL_STENCIL_TEST);
                     for node in &plan {
                         node.rooms(&mut cut_rooms);
                         draw_plan(node, 1, level_mode, textured && !room_debug, &mut |room, planes| draw_objects(Which::Room(room), planes));
                     }
-                    glDisable(0x0B90);
+                    glDisable(GL_STENCIL_TEST);
                     set_clip_planes(&[]);
                     let mut viewport = [0i32; 4];
-                    glGetIntegerv(0x0BA2, viewport.as_mut_ptr()); // GL_VIEWPORT
-                    glEnable(0x0C11); // GL_SCISSOR_TEST
+                    glGetIntegerv(GL_VIEWPORT, viewport.as_mut_ptr());
+                    glEnable(GL_SCISSOR_TEST);
                     for rr in rect_plan.iter().filter(|rr| !cut_rooms.contains(&rr.room)) {
                         let r = rr.rect;
                         let x0 = viewport[0] + ((r[0].max(-1.0) + 1.0) / 2.0 * viewport[2] as f32).floor() as i32;
@@ -1963,17 +1955,17 @@ fn main() {
                         }
                         draw_objects(Which::Room(rr.room), &[]);
                     }
-                    glDisable(0x0C11);
+                    glDisable(GL_SCISSOR_TEST);
                 } else if plan.is_empty() {
                     draw_objects(Which::All, &[]);
                 } else {
                     // Things that belong to no room first, then each room through its portals
                     draw_objects(Which::Unowned, &[]);
-                    glEnable(0x0B90); // GL_STENCIL_TEST
+                    glEnable(GL_STENCIL_TEST);
                     for node in &plan {
                         draw_plan(node, 1, level_mode, textured && !room_debug, &mut |room, planes| draw_objects(Which::Room(room), planes));
                     }
-                    glDisable(0x0B90);
+                    glDisable(GL_STENCIL_TEST);
                 }
                 set_clip_planes(&[]);
                 glColor3f(1.0, 1.0, 1.0);
@@ -2019,7 +2011,7 @@ fn main() {
             let note_casings = |owner: usize, ejector: &casings::Ejector| {
                 if casing_pending.borrow().contains_key(&owner) {
                     let mut matrix = [0f32; 16];
-                    glGetFloatv(0x0BA6, matrix.as_mut_ptr()); // GL_MODELVIEW_MATRIX
+                    glGetFloatv(GL_MODELVIEW_MATRIX, matrix.as_mut_ptr());
                     casing_spots.borrow_mut().push((owner, *ejector, matrix));
                 }
             };
@@ -2027,7 +2019,7 @@ fn main() {
             // Characters at the spawn points, posed for what they are doing
             if let Some(chars) = &sim.characters {
                 let c = &chars.model;
-                glDisable(0x0DE1); // GL_TEXTURE_2D
+                glDisable(GL_TEXTURE_2D);
                 let clock = if fixed_step { game_time as f32 } else { start_time.elapsed().as_secs_f32() };
                 for (i, spot) in sim.npcs.iter().enumerate() {
                     let mut moved;
@@ -2151,10 +2143,10 @@ fn main() {
                 // outlined over it
                 if show_hitboxes {
                     let verts = skin.apply(&pose);
-                    glDisable(0x0DE1); // GL_TEXTURE_2D
-                    glDisable(0x0B71); // GL_DEPTH_TEST
+                    glDisable(GL_TEXTURE_2D);
+                    glDisable(GL_DEPTH_TEST);
                     glColor3f(1.0, 0.85, 0.0);
-                    glBegin(0x0001); // GL_LINES
+                    glBegin(GL_LINES);
                     for t in chars.model.parts.iter().flat_map(|p| &p.triangles) {
                         for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
                             let (a, b) = (verts[a as usize], verts[b as usize]);
@@ -2163,7 +2155,7 @@ fn main() {
                         }
                     }
                     glEnd();
-                    glEnable(0x0B71);
+                    glEnable(GL_DEPTH_TEST);
                     glColor4f(1.0, 1.0, 1.0, 1.0);
                 }
 
@@ -2199,7 +2191,7 @@ fn main() {
 
             // The other players on the server, moving and handling their weapons as they are seen to
             if let Some(chars) = &sim.characters {
-                glDisable(0x0DE1); // GL_TEXTURE_2D
+                glDisable(GL_TEXTURE_2D);
                 let others = view.as_ref().map_or(&[][..], |v| &v.players[..]);
                 // Alive or dead as the view has them, at the moment it shows, not as the newest snapshot says
                 let view_time = view.as_ref().map_or(game_time, |v| v.time);
@@ -2304,7 +2296,7 @@ fn main() {
                     sim.players.get(slot).is_some_and(|p| p.active && p.respawn_at.is_some())
                         || now_for(slot) - *start < sim::RESPAWN_SECONDS.max(chars.frames(motion) / 30.0)
                 });
-                glDisable(0x0DE1); // GL_TEXTURE_2D
+                glDisable(GL_TEXTURE_2D);
                 for (&slot, (start, body)) in &corpses {
                     // The player's own body only from outside it
                     let now = now_for(slot);
@@ -2353,16 +2345,16 @@ fn main() {
             blast_lights.retain(|l| !l.done());
             if let (true, Some(id)) = (textured && !blast_lights.is_empty(), light_tex) {
                 set_clip_planes(&[]);
-                glEnable(0x0DE1); // GL_TEXTURE_2D
-                glBindTexture(0x0DE1, id);
-                glEnable(0x0BE2); // GL_BLEND
-                glBlendFunc(1, 1); // ONE, ONE: it adds to what is there
-                glDisable(0x0B44); // GL_CULL_FACE
-                glEnable(0x8037); // GL_POLYGON_OFFSET_FILL: the light lies on the surface it lights
+                glEnable(GL_TEXTURE_2D);
+                glBindTexture(GL_TEXTURE_2D, id);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_ONE, GL_ONE); // It adds to what is there
+                glDisable(GL_CULL_FACE);
+                glEnable(GL_POLYGON_OFFSET_FILL); // The light lies on the surface it lights
                 glPolygonOffset(-1.0, -1.0);
-                glDepthFunc(0x0203); // GL_LEQUAL
+                glDepthFunc(GL_LEQUAL);
                 glDepthMask(0);
-                glBegin(0x0004); // GL_TRIANGLES
+                glBegin(GL_TRIANGLES);
                 for l in &blast_lights {
                     let (k, c) = (l.intensity(), l.color());
                     for lit in &l.lit {
@@ -2375,27 +2367,27 @@ fn main() {
                     }
                 }
                 glEnd();
-                glDepthFunc(0x0201); // GL_LESS
+                glDepthFunc(GL_LESS);
                 glDepthMask(1);
-                glDisable(0x8037);
-                glDisable(0x0BE2);
+                glDisable(GL_POLYGON_OFFSET_FILL);
+                glDisable(GL_BLEND);
                 glColor4f(1.0, 1.0, 1.0, 1.0);
             }
 
             // Bullet holes on the walls, then the debris thrown from them
             effects.update(step_dt);
             if textured && !decals.is_empty() {
-                glEnable(0x0DE1); // GL_TEXTURE_2D
-                glEnable(0x0BE2); // GL_BLEND
-                glBlendFunc(0x0302, 0x0303); // SRC_ALPHA, ONE_MINUS_SRC_ALPHA
-                glEnable(0x8037); // GL_POLYGON_OFFSET_FILL: keeps the hole from flickering against the wall
+                glEnable(GL_TEXTURE_2D);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glEnable(GL_POLYGON_OFFSET_FILL); // Keeps the hole from flickering against the wall
                 glPolygonOffset(-2.0, -2.0);
                 glDepthMask(0);
                 glColor4f(1.0, 1.0, 1.0, 1.0);
                 for d in &decals {
                     let Some(&id) = hole_tex.get(&(d.surface, d.variant)) else { continue };
-                    glBindTexture(0x0DE1, id);
-                    glBegin(0x0007); // GL_QUADS
+                    glBindTexture(GL_TEXTURE_2D, id);
+                    glBegin(GL_QUADS);
                     // The top row of the picture is its top edge
                     for (c, uv) in d.corners().iter().zip([[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]) {
                         glTexCoord2f(uv[0], uv[1]);
@@ -2404,12 +2396,12 @@ fn main() {
                     glEnd();
                 }
                 glDepthMask(1);
-                glDisable(0x8037);
-                glDisable(0x0BE2);
+                glDisable(GL_POLYGON_OFFSET_FILL);
+                glDisable(GL_BLEND);
             }
             if !effects.particles.is_empty() || !effects.puffs.is_empty() {
                 let right = listener_of(&camera).right;
-                glEnable(0x0BE2); // GL_BLEND
+                glEnable(GL_BLEND);
                 glDepthMask(0);
                 // Soft clouds and the flash of a spark, as sprites facing the camera
                 for puff in &effects.puffs {
@@ -2421,9 +2413,9 @@ fn main() {
                         impact::PuffKind::Ring => (ring_tex, false, 0.9),
                     };
                     let Some(id) = tex else { continue };
-                    glEnable(0x0DE1);
-                    glBindTexture(0x0DE1, id);
-                    glBlendFunc(0x0302, if additive { 1 } else { 0x0303 }); // SRC_ALPHA, ONE or ONE_MINUS_SRC_ALPHA
+                    glEnable(GL_TEXTURE_2D);
+                    glBindTexture(GL_TEXTURE_2D, id);
+                    glBlendFunc(GL_SRC_ALPHA, if additive { GL_ONE } else { GL_ONE_MINUS_SRC_ALPHA });
                     // A blast fades quickly at first, then lingers; the rest fade steadily
                     let fade = if puff.kind == impact::PuffKind::Smoke { puff.alpha().sqrt() * puff.alpha() } else { puff.alpha() };
                     glColor4f(puff.color[0], puff.color[1], puff.color[2], fade * strength);
@@ -2445,7 +2437,7 @@ fn main() {
                         _ => (1.0, 0.0),
                     };
                     let p = [puff.pos[0], puff.pos[1] + lift * h, puff.pos[2]];
-                    glBegin(0x0007); // GL_QUADS
+                    glBegin(GL_QUADS);
                     for (dx, dy, tu, tv) in [(-1.0, -1.0, 0.0, 1.0), (1.0, -1.0, 1.0, 1.0), (1.0, 1.0, 1.0, 0.0), (-1.0, 1.0, 0.0, 0.0)] {
                         glTexCoord2f(tu, tv);
                         let dy = dy * squash;
@@ -2454,11 +2446,11 @@ fn main() {
                     glEnd();
                 }
                 // Splinters, then sparks that glow over everything, then chips
-                glDisable(0x0DE1);
+                glDisable(GL_TEXTURE_2D);
                 for sparks in [false, true] {
-                    glBlendFunc(0x0302, if sparks { 1 } else { 0x0303 });
+                    glBlendFunc(GL_SRC_ALPHA, if sparks { GL_ONE } else { GL_ONE_MINUS_SRC_ALPHA });
                     glLineWidth(if sparks { 1.5 } else { 2.0 });
-                    glBegin(0x0001); // GL_LINES
+                    glBegin(GL_LINES);
                     for pt in effects.particles.iter().filter(|p| matches!(p.kind, impact::Kind::Spark | impact::Kind::Flare) == sparks && p.kind != impact::Kind::Chip && p.kind != impact::Kind::Ember) {
                         let (a, b) = (pt.tail(), pt.pos);
                         // The line a fragment crossed since the last frame fades behind it
@@ -2471,7 +2463,7 @@ fn main() {
                     glEnd();
                     if sparks {
                         glPointSize(3.0);
-                        glBegin(0x0000); // GL_POINTS
+                        glBegin(GL_POINTS);
                         for pt in effects.particles.iter().filter(|p| p.kind == impact::Kind::Flare) {
                             glColor4f(pt.color[0], pt.color[1], pt.color[2], pt.alpha());
                             glVertex3f(pt.pos[0], pt.pos[1], pt.pos[2]);
@@ -2480,7 +2472,7 @@ fn main() {
                         // Embers are small things in the world, not a number of pixels: a couple
                         // of units across, but never less than a pixel or so
                         let eye = listener_of(&camera).pos; // in the map's space, like the embers
-                        glBegin(0x0007); // GL_QUADS
+                        glBegin(GL_QUADS);
                         for pt in effects.particles.iter().filter(|p| p.kind == impact::Kind::Ember) {
                             let away = ((pt.pos[0] - eye[0]).powi(2) + (pt.pos[1] - eye[1]).powi(2) + (pt.pos[2] - eye[2]).powi(2)).sqrt();
                             let h = EMBER_SIZE.max(away * ONE_PIXEL_PER_UNIT) / 2.0;
@@ -2492,9 +2484,9 @@ fn main() {
                         glEnd();
                     }
                 }
-                glBlendFunc(0x0302, 0x0303);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                 glPointSize(2.5);
-                glBegin(0x0000); // GL_POINTS
+                glBegin(GL_POINTS);
                 for pt in effects.particles.iter().filter(|p| p.kind == impact::Kind::Chip) {
                     glColor4f(pt.color[0], pt.color[1], pt.color[2], pt.alpha());
                     glVertex3f(pt.pos[0], pt.pos[1], pt.pos[2]);
@@ -2502,7 +2494,7 @@ fn main() {
                 glEnd();
                 glLineWidth(1.0);
                 glDepthMask(1);
-                glDisable(0x0BE2);
+                glDisable(GL_BLEND);
                 glColor4f(1.0, 1.0, 1.0, 1.0);
             }
 
@@ -2546,10 +2538,10 @@ fn main() {
                         }
                     }
                 }
-                glDisable(0x0DE1); // GL_TEXTURE_2D
-                glDisable(0x0BE2); // GL_BLEND
-                glDisable(0x0B44); // GL_CULL_FACE
-                glBegin(0x0007); // GL_QUADS
+                glDisable(GL_TEXTURE_2D);
+                glDisable(GL_BLEND);
+                glDisable(GL_CULL_FACE);
+                glBegin(GL_QUADS);
                 // In first person our own casings are only heard, not seen
                 let own_hidden = first_person && !third_person;
                 for c in casings.iter().filter(|c| shown(c.pos) && !(own_hidden && c.owner == me)) {
@@ -2576,11 +2568,11 @@ fn main() {
 
             // Render portals overlay when toggled
             if show_portals {
-                glDisable(0x0DE1); // GL_TEXTURE_2D
+                glDisable(GL_TEXTURE_2D);
                 glColor3f(0.0, 1.0, 0.0);
                 for portal in &level.portals.portals {
                     if portal.coordinates.len() >= 2 {
-                        glBegin(0x0002); // GL_LINE_LOOP
+                        glBegin(GL_LINE_LOOP);
                         for v in &portal.coordinates {
                             glVertex3f(v.x, v.y, v.z);
                         }
@@ -2594,7 +2586,7 @@ fn main() {
             // their body is seen, in third person or flying free. With the players' model, that
             // is the posed body, outlined where it is drawn; without, these cylinders.
             if show_hitboxes && sim.characters.as_ref().is_none_or(|c| c.rig.is_none()) {
-                glDisable(0x0DE1); // GL_TEXTURE_2D
+                glDisable(GL_TEXTURE_2D);
                 glColor3f(1.0, 0.85, 0.0);
                 let others = view.as_ref().map_or(&[][..], |v| &v.players[..]);
                 let mut standing: Vec<(usize, [f32; 3])> = others.iter().filter(|s| s.slot != me && s.dead.is_none()).map(|s| (s.slot, s.feet)).collect();
@@ -2603,7 +2595,7 @@ fn main() {
                 }
                 const SIDES: usize = 24;
                 let ring = |c: [f32; 3], y: f32| {
-                    glBegin(0x0002); // GL_LINE_LOOP
+                    glBegin(GL_LINE_LOOP);
                     for k in 0..SIDES {
                         let a = k as f32 / SIDES as f32 * std::f32::consts::TAU;
                         glVertex3f(c[0] + a.cos() * sim::HIT_RADIUS, y, c[2] + a.sin() * sim::HIT_RADIUS);
@@ -2616,7 +2608,7 @@ fn main() {
                         let b = part.bottom;
                         ring(b, b[1]);
                         ring(b, part.top);
-                        glBegin(0x0001); // GL_LINES
+                        glBegin(GL_LINES);
                         for k in 0..4 {
                             let a = k as f32 * std::f32::consts::FRAC_PI_2;
                             let (x, z) = (b[0] + a.cos() * sim::HIT_RADIUS, b[2] + a.sin() * sim::HIT_RADIUS);
@@ -2631,11 +2623,11 @@ fn main() {
 
             // Brushes and some collision hints that augment level geometry
             if show_collisions {
-                glDisable(0x0DE1); // GL_TEXTURE_2D
+                glDisable(GL_TEXTURE_2D);
                 glColor3f(1.0, 0.0, 0.0);
                 for object in &level.geometries.objects {
                     glPointSize(7.5);
-                    glBegin(0x0000); // GL_POINTS
+                    glBegin(GL_POINTS);
                     for v in &object.collisions.vertices {
                         glVertex3f(v.x, v.y, v.z)
                     }
@@ -2671,15 +2663,15 @@ fn main() {
             unsafe {
                 if gun_shows {
                     // Its own depth range, so the gun never sinks into a wall
-                    glClear(0x00000100); // GL_DEPTH_BUFFER_BIT
-                    glMatrixMode(0x1701); // GL_PROJECTION
+                    glClear(GL_DEPTH_BUFFER_BIT);
+                    glMatrixMode(GL_PROJECTION);
                     glLoadIdentity();
                     glu_perspective(45.0, aspect, l * 0.05, l * 20.0); // narrower than the world, as in most shooters
                 } else {
-                    glMatrixMode(0x1700); // GL_MODELVIEW
+                    glMatrixMode(GL_MODELVIEW);
                     glPushMatrix();
                 }
-                glMatrixMode(0x1700); // GL_MODELVIEW
+                glMatrixMode(GL_MODELVIEW);
                 glLoadIdentity();
                 glTranslatef(ox * l, oy * l - dip, -oz * l + kick);
                 // Angle the barrel slightly in toward the middle of the view
@@ -2703,7 +2695,7 @@ fn main() {
                 // Its view is narrower than the world's, so they start further from the middle.
                 if let (true, false, Some(e), Some(to_map)) = (casing_rounds > 0, gate.showing(), player_ejector.as_ref().filter(|_| !sim.players[me].equipped_grenade), &view_to_map) {
                     let mut gun = [0f32; 16];
-                    glGetFloatv(0x0BA6, gun.as_mut_ptr()); // GL_MODELVIEW_MATRIX
+                    glGetFloatv(GL_MODELVIEW_MATRIX, gun.as_mut_ptr());
                     let widen = half_view_tan() / 22.5f32.to_radians().tan();
                     for _ in 0..casing_rounds.min(MOST_CASINGS_A_FRAME) {
                         casings.eject(&gun, to_map, e, me, widen);
@@ -2718,7 +2710,6 @@ fn main() {
         // Rounds fired by guns not drawn this frame leave no casings
         casing_pending.borrow_mut().clear();
         casing_spots.borrow_mut().clear();
-        // println!("render_time:{:?}", render_time.elapsed());
 
         // Draw simple debug text overlay (upper-right)
         let render_ms = (render_time.elapsed().as_secs_f64() * 1000.0) as f32;
@@ -2878,7 +2869,7 @@ fn main() {
                 .collect();
             let depth_bits = {
                 let mut bits = 0;
-                unsafe { glGetIntegerv(0x0D56, &mut bits) }; // GL_DEPTH_BITS
+                unsafe { glGetIntegerv(GL_DEPTH_BITS, &mut bits) };
                 bits
             };
             let report = DebugReport {

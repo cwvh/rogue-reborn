@@ -24,14 +24,14 @@ pub struct WeaponDraw {
 pub fn draw_weapon(wd: &WeaponDraw, textured: bool, light: [f32; 3]) {
     unsafe {
         if let (true, Some(tex)) = (textured, wd.texture) {
-            glEnable(0x0DE1);
-            glBindTexture(0x0DE1, tex);
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, tex);
             glColor4f(light[0], light[1], light[2], 1.0);
         } else {
-            glDisable(0x0DE1);
+            glDisable(GL_TEXTURE_2D);
             glColor4f(0.7, 0.7, 0.75, 1.0);
         }
-        glBegin(0x0004); // GL_TRIANGLES
+        glBegin(GL_TRIANGLES);
         for (v, uv) in wd.verts.iter().zip(&wd.uvs) {
             glTexCoord2f(uv[0], uv[1]);
             glVertex3f(v[0], v[1], v[2]);
@@ -59,7 +59,7 @@ pub struct FlashSpot {
 impl FlashSpot {
     pub fn here(wd: &WeaponDraw, roll: f32) -> Self {
         let mut matrix = [0.0f32; 16];
-        unsafe { glGetFloatv(0x0BA6, matrix.as_mut_ptr()); } // GL_MODELVIEW_MATRIX
+        unsafe { glGetFloatv(GL_MODELVIEW_MATRIX, matrix.as_mut_ptr()); }
         Self { matrix, muzzle: wd.muzzle, scale: wd.flash_scale * (0.8 + 0.4 * roll) }
     }
 }
@@ -86,15 +86,15 @@ pub fn draw_flash_here(flash: &FlashDraw, spot: &FlashSpot) {
         glPushMatrix();
         glTranslatef(spot.muzzle[0], spot.muzzle[1], spot.muzzle[2]);
         glScalef(spot.scale, spot.scale, spot.scale);
-        glDisable(0x0B44); // GL_CULL_FACE
-        glEnable(0x0DE1);
-        glEnable(0x0BE2); // GL_BLEND
-        glBlendFunc(0x0302, 0x0303); // SRC_ALPHA, ONE_MINUS_SRC_ALPHA
+        glDisable(GL_CULL_FACE);
+        glEnable(GL_TEXTURE_2D);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glDepthMask(0);
         glColor4f(1.0, 1.0, 1.0, 1.0);
         for part in &flash.parts {
-            glBindTexture(0x0DE1, part.texture);
-            glBegin(0x0004); // GL_TRIANGLES
+            glBindTexture(GL_TEXTURE_2D, part.texture);
+            glBegin(GL_TRIANGLES);
             for (v, uv) in part.verts.iter().zip(&part.uvs) {
                 glTexCoord2f(uv[0], uv[1]);
                 glVertex3f(v[0], v[1], v[2]);
@@ -102,7 +102,7 @@ pub fn draw_flash_here(flash: &FlashDraw, spot: &FlashSpot) {
             glEnd();
         }
         glDepthMask(1);
-        glDisable(0x0BE2);
+        glDisable(GL_BLEND);
         glPopMatrix();
     }
 }
@@ -183,10 +183,10 @@ pub fn draw_character(c: &crp::Crp, arrays: &CharacterArrays, verts: &[[f32; 3]]
         light.corner_colors(c, verts, turns, &mut colors);
     }
     unsafe {
-    glEnableClientState(0x8074); // GL_VERTEX_ARRAY
-    glEnableClientState(0x8078); // GL_TEXTURE_COORD_ARRAY
-    glVertexPointer(3, 0x1406, 0, positions.as_ptr().cast()); // GL_FLOAT
-    glTexCoordPointer(2, 0x1406, 0, arrays.uvs.as_ptr().cast());
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    glVertexPointer(3, GL_FLOAT, 0, positions.as_ptr().cast());
+    glTexCoordPointer(2, GL_FLOAT, 0, arrays.uvs.as_ptr().cast());
     // Opaque parts first, then the see-through ones (.tga materials) blended over them
     for alpha_pass in [false, true] {
     for (pi, part) in c.parts.iter().enumerate() {
@@ -197,19 +197,19 @@ pub fn draw_character(c: &crp::Crp, arrays: &CharacterArrays, verts: &[[f32; 3]]
         let is_face = part.material.eq_ignore_ascii_case("hrt_face.bmp");
         let tex = if is_face { face } else { None }
             .or(part_textures.get(pi).copied().flatten());
-        if has_alpha && textured { glEnable(0x0BE2); glBlendFunc(0x0302, 0x0303); } // GL_BLEND, SRC_ALPHA, ONE_MINUS_SRC_ALPHA
+        if has_alpha && textured { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); }
         // Solid mode shows the texture; wireframe shows flat color lines
         if let (true, Some(id)) = (textured, tex) {
-            glEnable(0x0DE1); // GL_TEXTURE_2D
-            glBindTexture(0x0DE1, id);
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, id);
             glColor4f(1.0, 1.0, 1.0, 1.0);
             if lit {
-                glEnableClientState(0x8076); // GL_COLOR_ARRAY
-                glColorPointer(3, 0x1406, 0, colors.as_ptr().cast());
+                glEnableClientState(GL_COLOR_ARRAY);
+                glColorPointer(3, GL_FLOAT, 0, colors.as_ptr().cast());
             }
         } else {
-            glDisable(0x0DE1);
-            glDisableClientState(0x8076);
+            glDisable(GL_TEXTURE_2D);
+            glDisableClientState(GL_COLOR_ARRAY);
             if textured && has_alpha {
                 // See-through part with no texture file: faint tinted pane
                 glColor4f(0.45, 0.55, 0.65, 0.2);
@@ -220,37 +220,37 @@ pub fn draw_character(c: &crp::Crp, arrays: &CharacterArrays, verts: &[[f32; 3]]
                 glColor4f(r, g, b, 1.0);
             }
         }
-        glDrawArrays(0x0004, arrays.first[pi], part.triangles.len() as i32 * 3); // GL_TRIANGLES
-        if has_alpha { glDisable(0x0BE2); }
+        glDrawArrays(GL_TRIANGLES, arrays.first[pi], part.triangles.len() as i32 * 3);
+        if has_alpha { glDisable(GL_BLEND); }
     }
     }
-    glDisableClientState(0x8076);
+    glDisableClientState(GL_COLOR_ARRAY);
     // A blast's light on the body: the opaque parts again, added over themselves
     if textured && glow.iter().any(|&g| g > 0.003) {
-        glEnable(0x0BE2); // GL_BLEND
-        glBlendFunc(1, 1); // ONE, ONE
-        glDepthFunc(0x0203); // GL_LEQUAL: the same triangles again
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE);
+        glDepthFunc(GL_LEQUAL); // The same triangles again
         glDepthMask(0);
-        glEnable(0x8037); // GL_POLYGON_OFFSET_FILL
+        glEnable(GL_POLYGON_OFFSET_FILL);
         glPolygonOffset(-1.0, -1.0);
-        glEnable(0x0DE1); // GL_TEXTURE_2D
+        glEnable(GL_TEXTURE_2D);
         glColor4f(glow[0], glow[1], glow[2], 1.0);
         for (pi, part) in c.parts.iter().enumerate() {
             if is_tga(&part.material) { continue; }
             let is_face = part.material.eq_ignore_ascii_case("hrt_face.bmp");
             let tex = if is_face { face } else { None }.or(part_textures.get(pi).copied().flatten());
             let Some(id) = tex else { continue };
-            glBindTexture(0x0DE1, id);
-            glDrawArrays(0x0004, arrays.first[pi], part.triangles.len() as i32 * 3);
+            glBindTexture(GL_TEXTURE_2D, id);
+            glDrawArrays(GL_TRIANGLES, arrays.first[pi], part.triangles.len() as i32 * 3);
         }
-        glDisable(0x8037);
+        glDisable(GL_POLYGON_OFFSET_FILL);
         glDepthMask(1);
-        glDepthFunc(0x0201); // GL_LESS
-        glDisable(0x0BE2);
+        glDepthFunc(GL_LESS);
+        glDisable(GL_BLEND);
         glColor4f(1.0, 1.0, 1.0, 1.0);
     }
-    glDisableClientState(0x8078);
-    glDisableClientState(0x8074);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
     }
 }
 
@@ -265,20 +265,20 @@ pub fn draw_glass(
     tris: impl Iterator<Item = ([[f32; 3]; 3], [[f32; 2]; 3])>,
 ) {
     unsafe {
-        glEnable(0x0BE2); // GL_BLEND
-        glBlendFunc(0x0302, 0x0303); // SRC_ALPHA, ONE_MINUS_SRC_ALPHA
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         match (textured, ensure_texture(materials, material, map_num, textures)) {
             (true, Some(id)) => {
-                glEnable(0x0DE1);
-                glBindTexture(0x0DE1, id);
+                glEnable(GL_TEXTURE_2D);
+                glBindTexture(GL_TEXTURE_2D, id);
                 glColor4f(1.0, 1.0, 1.0, alpha);
             }
             _ => {
-                glDisable(0x0DE1);
+                glDisable(GL_TEXTURE_2D);
                 glColor4f(0.6, 0.8, 0.9, alpha.max(0.3));
             }
         }
-        glBegin(0x0004); // GL_TRIANGLES
+        glBegin(GL_TRIANGLES);
         for (p, uv) in tris {
             for k in 0..3 {
                 glTexCoord2f(uv[k][0], uv[k][1]);
@@ -286,7 +286,7 @@ pub fn draw_glass(
             }
         }
         glEnd();
-        glDisable(0x0BE2);
+        glDisable(GL_BLEND);
         glColor4f(1.0, 1.0, 1.0, 1.0);
     }
 }
@@ -294,42 +294,42 @@ pub fn draw_glass(
 // Draw a broken pane: its pieces with a glint along their edges, and the flying flecks
 pub fn draw_fracture(materials: &map::Materials, map_num: &str, textures: &mut HashMap<String, Option<u32>>, textured: bool, f: &glass::Fracture) {
     unsafe {
-        glEnable(0x0BE2); // GL_BLEND
-        glBlendFunc(0x0302, 0x0303); // SRC_ALPHA, ONE_MINUS_SRC_ALPHA
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         let tex = if textured { ensure_texture(materials, f.material, map_num, textures) } else { None };
         for s in &f.shards {
             let (corners, alpha) = (s.corners(), s.alpha());
             if let Some(id) = tex {
-                glEnable(0x0DE1);
-                glBindTexture(0x0DE1, id);
+                glEnable(GL_TEXTURE_2D);
+                glBindTexture(GL_TEXTURE_2D, id);
                 glColor4f(1.0, 1.0, 1.0, alpha * f.opacity);
             } else {
-                glDisable(0x0DE1);
+                glDisable(GL_TEXTURE_2D);
                 glColor4f(0.6, 0.8, 0.9, alpha * 0.4);
             }
-            glBegin(0x0006); // GL_TRIANGLE_FAN
+            glBegin(GL_TRIANGLE_FAN);
             for (c, uv) in corners.iter().zip(s.uvs()) {
                 glTexCoord2f(uv[0], uv[1]);
                 glVertex3f(c[0], c[1], c[2]);
             }
             glEnd();
             // Edges catch the light
-            glDisable(0x0DE1);
+            glDisable(GL_TEXTURE_2D);
             glColor4f(0.9, 0.97, 1.0, alpha * 0.75);
-            glBegin(0x0002); // GL_LINE_LOOP
+            glBegin(GL_LINE_LOOP);
             for c in &corners {
                 glVertex3f(c[0], c[1], c[2]);
             }
             glEnd();
         }
         glPointSize(2.5);
-        glBegin(0x0000); // GL_POINTS
+        glBegin(GL_POINTS);
         for fl in &f.flecks {
             glColor4f(0.95, 0.98, 1.0, fl.alpha());
             glVertex3f(fl.pos[0], fl.pos[1], fl.pos[2]);
         }
         glEnd();
-        glDisable(0x0BE2);
+        glDisable(GL_BLEND);
         glColor4f(1.0, 1.0, 1.0, 1.0);
     }
 }
@@ -388,11 +388,9 @@ fn slackened(plane: [f32; 4]) -> [f32; 4] {
 /// room beyond is drawn only into the mark: whatever the room in front has past the
 /// portal (rooms overlap each other) cannot show in the doorway.
 pub unsafe fn draw_plan(node: &visibility::PlanNode<'_>, level: i32, fill_mode: u32, textured: bool, draw: &mut dyn FnMut(u32, &[[f32; 4]])) {
-    const EQUAL: u32 = 0x0202;
-    const KEEP: u32 = 0x1E00;
     unsafe {
-        glStencilFunc(EQUAL, level, !0);
-        glStencilOp(KEEP, KEEP, KEEP);
+        glStencilFunc(GL_EQUAL, level, !0);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
         // Cut where the portal it is seen through begins, and at the portals the player is
         // standing in (on this room's side). Where the player stands in a doorway both rooms
         // are drawn whole and each is cut only where it overlaps the other: what is on the
@@ -452,39 +450,39 @@ pub unsafe fn draw_plan(node: &visibility::PlanNode<'_>, level: i32, fill_mode: 
         }
         for child in node.children.iter().filter(|c| !c.touched) {
             let opening = || {
-                glBegin(0x0006); // GL_TRIANGLE_FAN
+                glBegin(GL_TRIANGLE_FAN);
                 for p in child.polygon {
                     glVertex3f(p[0], p[1], p[2]);
                 }
                 glEnd();
             };
             set_clip_planes(&[]);
-            glDisable(0x0DE1); // GL_TEXTURE_2D
-            glPolygonMode(0x0408, 0x1B02);
+            glDisable(GL_TEXTURE_2D);
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
             glColorMask(0, 0, 0, 0);
             glDepthMask(0);
 
             // Mark the part of the opening that is not behind something nearer. The polygon
             // is nudged deeper, so walls lying in the portal's own plane are not wiped.
-            glStencilFunc(EQUAL, level, !0);
-            glStencilOp(KEEP, KEEP, 0x1E02); // GL_INCR
-            glEnable(0x8037); // GL_POLYGON_OFFSET_FILL
+            glStencilFunc(GL_EQUAL, level, !0);
+            glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+            glEnable(GL_POLYGON_OFFSET_FILL);
             glPolygonOffset(2.0, 2.0);
             opening();
-            glDisable(0x8037);
+            glDisable(GL_POLYGON_OFFSET_FILL);
             // Wipe the depth there, so the room beyond competes only with itself
-            glStencilFunc(EQUAL, level + 1, !0);
-            glStencilOp(KEEP, KEEP, KEEP);
-            glDepthFunc(0x0207); // GL_ALWAYS
+            glStencilFunc(GL_EQUAL, level + 1, !0);
+            glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+            glDepthFunc(GL_ALWAYS);
             glDepthMask(1);
             glDepthRange(1.0, 1.0);
             opening();
             glDepthRange(0.0, 1.0);
-            glDepthFunc(0x0201); // GL_LESS
+            glDepthFunc(GL_LESS);
             glColorMask(1, 1, 1, 1);
-            glPolygonMode(0x0408, fill_mode);
+            glPolygonMode(GL_FRONT_AND_BACK, fill_mode);
             if textured {
-                glEnable(0x0DE1);
+                glEnable(GL_TEXTURE_2D);
             }
 
             draw_plan(child, level + 1, fill_mode, textured, draw);
@@ -493,19 +491,19 @@ pub unsafe fn draw_plan(node: &visibility::PlanNode<'_>, level: i32, fill_mode: 
             set_clip_planes(&[]);
             glColorMask(0, 0, 0, 0);
             glDepthMask(0);
-            glDisable(0x0B71); // GL_DEPTH_TEST
-            glPolygonMode(0x0408, 0x1B02);
-            glStencilFunc(EQUAL, level + 1, !0);
-            glStencilOp(KEEP, KEEP, 0x0000); // GL_ZERO
+            glDisable(GL_DEPTH_TEST);
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+            glStencilFunc(GL_EQUAL, level + 1, !0);
+            glStencilOp(GL_KEEP, GL_KEEP, GL_ZERO);
             opening();
-            glEnable(0x0B71);
+            glEnable(GL_DEPTH_TEST);
             glDepthMask(1);
             glColorMask(1, 1, 1, 1);
-            glPolygonMode(0x0408, fill_mode);
+            glPolygonMode(GL_FRONT_AND_BACK, fill_mode);
             if textured {
-                glEnable(0x0DE1);
+                glEnable(GL_TEXTURE_2D);
             }
-            glStencilOp(KEEP, KEEP, KEEP);
+            glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
         }
     }
 }
@@ -519,13 +517,9 @@ pub unsafe fn draw_plan(node: &visibility::PlanNode<'_>, level: i32, fill_mode: 
 /// floor plan). Rooms overlap: this is what hides rm11's hall's wall one step into room 119,
 /// as the original engine does. The stencil is expected to be 1 everywhere, and is left so.
 pub unsafe fn wipe_opening(polygon: &[[f32; 3]], plan: [f32; 4], height: Option<[f32; 2]>, eye: [f32; 3], fill_mode: u32, textured: bool) {
-    const ALWAYS: u32 = 0x0207;
-    const EQUAL: u32 = 0x0202;
-    const KEEP: u32 = 0x1E00;
-    const REPLACE: u32 = 0x1E01;
     unsafe {
         let opening = || {
-            glBegin(0x0006); // GL_TRIANGLE_FAN
+            glBegin(GL_TRIANGLE_FAN);
             for p in polygon {
                 glVertex3f(p[0], p[1], p[2]);
             }
@@ -544,7 +538,7 @@ pub unsafe fn wipe_opening(polygon: &[[f32; 3]], plan: [f32; 4], height: Option<
         const FAR: f32 = 100_000.0;
         let plane_quad = |axis: usize, at: f32| {
             let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
-            glBegin(0x0007); // GL_QUADS
+            glBegin(GL_QUADS);
             for (du, dv) in [(-FAR, -FAR), (FAR, -FAR), (FAR, FAR), (-FAR, FAR)] {
                 let mut p = [0.0f32; 3];
                 p[axis] = at;
@@ -554,54 +548,54 @@ pub unsafe fn wipe_opening(polygon: &[[f32; 3]], plan: [f32; 4], height: Option<
             }
             glEnd();
         };
-        glEnable(0x0B90); // GL_STENCIL_TEST
-        glDisable(0x0DE1); // GL_TEXTURE_2D
-        glPolygonMode(0x0408, 0x1B02);
+        glEnable(GL_STENCIL_TEST);
+        glDisable(GL_TEXTURE_2D);
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
         glColorMask(0, 0, 0, 0);
         glDepthMask(0);
         // Mark the visible part. The polygon is nudged deeper, so walls lying in the portal's
         // own plane are not wiped.
-        glStencilFunc(ALWAYS, 3, !0);
-        glStencilOp(KEEP, KEEP, REPLACE);
-        glEnable(0x8037); // GL_POLYGON_OFFSET_FILL
+        glStencilFunc(GL_ALWAYS, 3, !0);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+        glEnable(GL_POLYGON_OFFSET_FILL);
         glPolygonOffset(2.0, 2.0);
         opening();
-        glDisable(0x8037);
+        glDisable(GL_POLYGON_OFFSET_FILL);
         // Unmark where what is drawn lies outside the box, on the outer side of one of its
         // planes: past the plane where the eye is inside it (the plane is nearer), in front of
         // it where the eye is outside (the plane is farther). Not only the box's far faces: a
         // line of sight can pass over a low room's box without going through it.
-        glStencilFunc(EQUAL, 3, !0);
-        glStencilOp(KEEP, KEEP, 0x1E03); // GL_DECR
+        glStencilFunc(GL_EQUAL, 3, !0);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_DECR);
         for (axis, at, out) in planes {
             let eye_out = (eye[axis] - at) * out > 0.0;
-            glDepthFunc(if eye_out { 0x0204 } else { 0x0201 }); // GL_GREATER, GL_LESS
+            glDepthFunc(if eye_out { GL_GREATER } else { GL_LESS });
             plane_quad(axis, at);
         }
-        glDepthFunc(0x0201); // GL_LESS
+        glDepthFunc(GL_LESS);
         // Wipe the depth where the mark is left
-        glStencilFunc(EQUAL, 3, !0);
-        glStencilOp(KEEP, KEEP, KEEP);
-        glDepthFunc(ALWAYS);
+        glStencilFunc(GL_EQUAL, 3, !0);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        glDepthFunc(GL_ALWAYS);
         glDepthMask(1);
         glDepthRange(1.0, 1.0);
         opening();
         glDepthRange(0.0, 1.0);
-        glDepthFunc(0x0201); // GL_LESS
+        glDepthFunc(GL_LESS);
         // And put the stencil back
-        glDisable(0x0B71); // GL_DEPTH_TEST
+        glDisable(GL_DEPTH_TEST);
         glDepthMask(0);
-        glStencilFunc(ALWAYS, 1, !0);
-        glStencilOp(REPLACE, REPLACE, REPLACE);
+        glStencilFunc(GL_ALWAYS, 1, !0);
+        glStencilOp(GL_REPLACE, GL_REPLACE, GL_REPLACE);
         opening();
-        glEnable(0x0B71);
+        glEnable(GL_DEPTH_TEST);
         glDepthMask(1);
-        glStencilOp(KEEP, KEEP, KEEP);
-        glDisable(0x0B90);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        glDisable(GL_STENCIL_TEST);
         glColorMask(1, 1, 1, 1);
-        glPolygonMode(0x0408, fill_mode);
+        glPolygonMode(GL_FRONT_AND_BACK, fill_mode);
         if textured {
-            glEnable(0x0DE1);
+            glEnable(GL_TEXTURE_2D);
         }
     }
 }

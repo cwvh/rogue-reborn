@@ -14,18 +14,18 @@ use crate::opengl::*;
 #[allow(clippy::too_many_arguments)]
 pub fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_marker: bool, spread: f32, veil: f32, daze: f32, feed: &[(String, [f32; 3])], dead: bool, crosshair: bool, meter: Option<(&Meter, f64)>) {
     unsafe {
-        glMatrixMode(0x1701); // GL_PROJECTION
+        glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
         ortho_2d(0.0, win_w.max(1) as f32, 0.0, win_h.max(1) as f32);
-        glMatrixMode(0x1700); // GL_MODELVIEW
+        glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
-        glDisable(0x0B71); // GL_DEPTH_TEST
-        glDisable(0x0DE1); // GL_TEXTURE_2D
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_TEXTURE_2D);
 
         // The eyes squinting shut against a blast, to a dark slit
         if daze > 0.01 {
-            glEnable(0x0BE2); // GL_BLEND
-            glBlendFunc(0x0302, 0x0303);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             // Rings of dark from the edge of the clear middle out past the corners, coming on
             // quickly at first so the tunnel has a wall and not just a dim edge
             let (cx, cy) = (win_w as f32 / 2.0, win_h as f32 / 2.0);
@@ -42,7 +42,7 @@ pub fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_ma
                 (inner + (outer - inner) * t, edge * (t / 0.5).min(1.0).powf(0.6))
             };
             for k in 0..RINGS {
-                glBegin(0x0005); // GL_TRIANGLE_STRIP
+                glBegin(GL_TRIANGLE_STRIP);
                 for i in 0..=SEGMENTS {
                     let a = i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
                     let (s, c) = a.sin_cos();
@@ -54,38 +54,38 @@ pub fn draw_hud(win_w: i32, win_h: i32, status: &[String], message: &str, hit_ma
                 }
                 glEnd();
             }
-            glDisable(0x0BE2);
+            glDisable(GL_BLEND);
         }
 
         // The white-out from a blast close by
         if veil > 0.01 {
-            glEnable(0x0BE2); // GL_BLEND
-            glBlendFunc(0x0302, 0x0303);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glColor4f(1.0, 0.97, 0.92, veil.min(1.0) * 0.9);
-            glBegin(0x0007); // GL_QUADS
+            glBegin(GL_QUADS);
             for (x, y) in [(0.0, 0.0), (win_w as f32, 0.0), (win_w as f32, win_h as f32), (0.0, win_h as f32)] {
                 glVertex3f(x, y, 0.0);
             }
             glEnd();
-            glDisable(0x0BE2);
+            glDisable(GL_BLEND);
         }
 
         if dead {
-            glEnable(0x0BE2); // GL_BLEND
-            glBlendFunc(0x0302, 0x0303);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glColor4f(0.45, 0.0, 0.0, 0.4);
-            glBegin(0x0007); // GL_QUADS
+            glBegin(GL_QUADS);
             for (x, y) in [(0.0, 0.0), (win_w as f32, 0.0), (win_w as f32, win_h as f32), (0.0, win_h as f32)] {
                 glVertex3f(x, y, 0.0);
             }
             glEnd();
-            glDisable(0x0BE2);
+            glDisable(GL_BLEND);
         }
 
         let (cx, cy) = (win_w as f32 / 2.0, win_h as f32 / 2.0);
         if crosshair {
             if hit_marker { glColor3f(1.0, 0.2, 0.2); } else { glColor3f(1.0, 1.0, 1.0); }
-            glBegin(0x0001); // GL_LINES
+            glBegin(GL_LINES);
             let gap = spread.max(4.0);
             for (x, y) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
                 glVertex3f(cx + x * gap, cy + y * gap, 0.0);
@@ -163,16 +163,16 @@ fn draw_lag_meter(top: f32, meter: &Meter, now: f64) -> f32 {
         glVertex3f(x0, y1, 0.0);
     };
     unsafe {
-        glEnable(0x0BE2); // GL_BLEND
-        glBlendFunc(0x0302, 0x0303);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glColor4f(0.0, 0.0, 0.0, 0.5);
-        glBegin(0x0007); // GL_QUADS
+        glBegin(GL_QUADS);
         quad(left, bottom, left + width, graph_top);
         glEnd();
-        glDisable(0x0BE2);
+        glDisable(GL_BLEND);
 
         // The view: blue up to 100 ms in hand, yellow down when it has run dry
-        glBegin(0x0001); // GL_LINES
+        glBegin(GL_LINES);
         for s in &meter.shown {
             let x = x(s.at);
             if s.ahead < TICK / 2.0 {
@@ -201,7 +201,7 @@ fn draw_lag_meter(top: f32, meter: &Meter, now: f64) -> f32 {
         draw_text(&format!("{} MS", (full * 500.0).round()), left + width + 6.0, bottom + ping_h / 2.0 - 5.0, 10.0);
 
         let column = (width * meter.interval().unwrap_or(2.0 * TICK) / WINDOW as f32).max(1.0);
-        glBegin(0x0007); // GL_QUADS
+        glBegin(GL_QUADS);
         for c in &meter.columns {
             let x = x(c.at);
             if c.lost {
@@ -233,15 +233,15 @@ fn draw_text(text: &str, x: f32, y: f32, scale: f32) {
 pub fn draw_debug_text(win_w: i32, win_h: i32, lines: &[&str]) {
     unsafe {
         // Ortho for pixel coordinates with origin at bottom-left
-        glMatrixMode(0x1701); // GL_PROJECTION
+        glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
         ortho_2d(0.0, win_w.max(1) as f32, 0.0, win_h.max(1) as f32);
-        glMatrixMode(0x1700); // GL_MODELVIEW
+        glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
 
         // Render settings for HUD
-        glDisable(0x0B71); // GL_DEPTH_TEST
-        glDisable(0x0DE1); // GL_TEXTURE_2D
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_TEXTURE_2D);
         glColor3f(1.0, 1.0, 1.0);
 
         let margin = 10.0f32;
@@ -264,7 +264,7 @@ pub fn draw_debug_text(win_w: i32, win_h: i32, lines: &[&str]) {
         }
 
         // Leave depth state restored for next frame's 3D
-        glEnable(0x0B71); // GL_DEPTH_TEST
+        glEnable(GL_DEPTH_TEST);
     }
 }
 
@@ -342,7 +342,7 @@ pub fn draw_glyph(ch: char, x: f32, y: f32, scale: f32) {
         let px = scale / 7.0; // pixel size based on 7 rows
         let py = px;
         unsafe {
-            glBegin(0x0007); // GL_QUADS
+            glBegin(GL_QUADS);
             for (row_idx, row_bits) in rows.iter().enumerate() {
                 for col in 0..5 {
                     if ((row_bits >> (4 - col)) & 1) != 0 {
@@ -360,7 +360,7 @@ pub fn draw_glyph(ch: char, x: f32, y: f32, scale: f32) {
     } else {
         // Fallback: outline box to visualize unsupported chars
         unsafe {
-            glBegin(0x0001); // GL_LINES
+            glBegin(GL_LINES);
             glVertex3f(x, y, 0.0);                 glVertex3f(x + scale, y, 0.0);
             glVertex3f(x + scale, y, 0.0);         glVertex3f(x + scale, y + scale, 0.0);
             glVertex3f(x + scale, y + scale, 0.0); glVertex3f(x, y + scale, 0.0);
