@@ -5,34 +5,27 @@ mod hud;
 mod opengl;
 mod player;
 mod render;
+mod session;
 mod textures;
 mod ui_gl;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::collections::HashMap;
 use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
-use std::rc::Rc;
-use std::net::ToSocketAddrs;
 use rogue_reborn::motion::MOTION_FPS;
-use rogue_reborn::{map, dmp, combat, crp, demo, grenade, blastlight, concussion, recording, sim, sound, ambience, glass, casings};
-use rogue_reborn::net::client::{Client, Seen, Status};
-use rogue_reborn::net::host::{HostedServer, STARTUP, new_key};
+use rogue_reborn::{map, combat, crp, grenade, blastlight, concussion, sim, sound, ambience, glass, casings};
+use rogue_reborn::net::client::{Seen, Status};
 use rogue_reborn::net::proto::LobbyCommand;
 use rogue_reborn::lobby::{self, Chat, Gate, LobbyView};
 use rogue_reborn::results::ResultsView;
 use rogue_reborn::ui::{Canvas, Pointer, Ui};
 use crate::ui_gl::UiGl;
 use rogue_reborn::net::animation::Doing;
-use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
-use rogue_reborn::recording::{Playback, Recorder, Recording};
-use rogue_reborn::net::record::ClientRecorder;
 use rogue_reborn::net::round::{Outcome, Phase, RoundState};
 use rogue_reborn::net::watch::{BEHIND, Pose, RISE, Watch, WatchContext, WatchMode, behind};
-use rogue_reborn::mission;
-use rogue_reborn::sim::characters::{Characters, Npc, Rig, place_npcs, place_terrorists};
+use rogue_reborn::sim::characters::{Characters, Npc, Rig};
 use rogue_reborn::sim::movement::{Movement, Reloading, animation_pace, hip_turn, movement_from_keys};
-use rogue_reborn::collision::{CollisionWorld, Params};
 use rogue_reborn::impact::{self, Surface};
 use crate::opengl::*;
 use crate::args::parse_args;
@@ -42,12 +35,12 @@ use crate::player::{BodyKey, BodyState};
 use rogue_reborn::body;
 use rogue_reborn::lighting::{CharacterLight, Lighting};
 use rogue_reborn::visibility::Visibility;
-use crate::render::assets::{Assets, Uniform, SCORCH_VARIANTS, HOLE_VARIANTS};
+use crate::render::assets::{Uniform, SCORCH_VARIANTS, HOLE_VARIANTS};
 use crate::render::level::LevelDraw;
+use crate::session::{Game, Session};
 use crate::render::draw::{WeaponDraw, CharacterArrays, draw_weapon, FlashSpot, Flashes, draw_flash, draw_flash_here, draw_character, draw_glass, draw_fracture, level_radius, Which, draw_plan, wipe_opening, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
-use rogue_reborn::levels::{find_zone_spawn, find_mission_spawns, pick_index, list_levels, find_level, extract_map_num};
 use crate::textures::ensure_texture;
 
 // The first-person view's height in degrees. The width follows the screen shape.
@@ -133,203 +126,12 @@ fn round_banner(r: &RoundState, now: f32, winner: Option<&str>) -> String {
 }
 
 fn main() {
-    // Load the map
-    // let map_path = Path::new("data/map/m00/demolitions_area.MAP");
-    // let map_path = Path::new("data/map/rm11/rm11.map");
-    // let map_path = Path::new("data/map/rm02/rm02.map");
     let mut args = parse_args();
-    if args.list_levels {
-        for (dir, name, _) in list_levels() {
-            println!("{name:24} data/map/{dir}");
-        }
-        return;
-    }
-    // Playing a recording back: the game starts as it did when it was recorded
-    let recorded = args.play.as_ref().map(|path| {
-        Recording::read(path).unwrap_or_else(|e| {
-            eprintln!("{e:#}");
-            std::process::exit(2);
-        })
-    });
-    let mut playback = recorded.map(|rec| {
-        let h = &rec.header;
-        let build = option_env!("GIT_HASH").unwrap_or("unknown");
-        if h.build != build {
-            eprintln!("warning: recorded by build {}, this is {build}, so it may not play back the same", h.build);
-        }
-        args.demo = h.map == "demo";
-        args.map = (!args.demo).then(|| PathBuf::from(&h.map));
-        args.level = None;
-        args.npcs = Some(h.npcs as usize);
-        args.seed = Some(h.seed);
-        args.speed_scale = Some(h.speed_scale);
-        args.no_cull = !h.culling;
-        args.doors_open = h.doors_open;
-        args.god = h.god;
-        args.model = Some(PathBuf::from(&h.model));
-        args.no_models = h.no_models;
-        args.model_yaw = h.model_yaw;
-        args.actor = h.actor.clone();
-        args.pos = Some(h.camera);
-        args.yaw = Some(h.yaw);
-        args.pitch = Some(h.pitch);
-        // The recording says what the player did, so no script and no real mouse
-        args.walk = None;
-        Playback::new(rec)
-    });
-    // Hosting: a server of our own for a Team Survival game, which we join as its host. A key
-    // in RR_HOST_KEY makes us the host of a server started with it.
-    let mut hosted: Option<HostedServer> = None;
-    let mut key = std::env::var("RR_HOST_KEY").ok().and_then(|k| k.trim().parse::<u64>().ok()).unwrap_or(0);
-    if args.host {
-        key = new_key();
-        let port = args.port.unwrap_or(27960);
-        let mut server_args: Vec<String> = ["--teams", "--rounds", "--port", &port.to_string()].map(String::from).to_vec();
-        match (&args.map, &args.level) {
-            _ if args.demo => server_args.push("--demo".to_string()),
-            (Some(map), _) => server_args.extend(["--map".to_string(), map.display().to_string()]),
-            (None, level) => server_args.extend(["--level".to_string(), level.clone().unwrap_or_else(|| "citystreet_large".to_string())]),
-        }
-        let max_players = Some(args.max_players.clone().unwrap_or_else(|| "8".to_string()));
-        for (flag, value) in [("--seed", args.seed.map(|s| s.to_string())), ("--round-time", args.round_time.clone()), ("--base-pair", args.base_pair.clone()), ("--max-players", max_players)] {
-            if let Some(v) = value {
-                server_args.extend([flag.to_string(), v]);
-            }
-        }
-        if args.no_friendly_fire {
-            server_args.push("--no-friendly-fire".to_string());
-        }
-        // rrsrv is beside rr
-        let exe = std::env::current_exe().map(|e| e.with_file_name(format!("rrsrv{}", std::env::consts::EXE_SUFFIX)));
-        match exe.map_err(anyhow::Error::from).and_then(|exe| HostedServer::start(&exe, &server_args, key, STARTUP)) {
-            Ok(server) => hosted = Some(server),
-            Err(e) => {
-                eprintln!("could not host: {e:#}");
-                std::process::exit(1);
-            }
-        }
-        args.connect = Some(format!("127.0.0.1:{port}"));
-    }
-    // Joining a server: the game is set up as it says, so ask it before anything is loaded
-    let net_clock = Instant::now();
-    let mut net: Option<(Client, Impaired<UdpLink>)> = None;
-    let mut joined: Option<rogue_reborn::net::proto::Setup> = None;
-    // On a server, --record keeps what the player saw (see net::record)
-    let mut net_recorder: Option<ClientRecorder> = None;
-    if let Some(address) = args.connect.clone() {
-        let server = address.to_socket_addrs().ok().and_then(|mut a| a.next()).unwrap_or_else(|| {
-            eprintln!("cannot find the server {address}");
-            std::process::exit(2);
-        });
-        let mut link = Impaired::new(
-            UdpLink::bind("0.0.0.0:0").expect("cannot open a socket"),
-            Conditions { latency: args.sim_latency, jitter: args.sim_jitter, loss: args.sim_loss, duplicate: 0.0, ..Conditions::NONE },
-            std::process::id() as u64,
-        );
-        let to_server = link.inner_mut().addr_of(server);
-        let token = (std::process::id() ^ 0x5bd1e995).wrapping_mul(2654435761);
-        let mut client = Client::new(to_server, token, option_env!("GIT_HASH").unwrap_or("unknown"));
-        client.ask_side(args.side);
-        client.set_key(key);
-        client.set_name(args.name.as_deref().unwrap_or(""));
-        if args.record.is_some() {
-            client.start_tape();
-            net_recorder = Some(ClientRecorder::new(option_env!("GIT_HASH").unwrap_or("unknown"), token));
-        }
-        let setup = loop {
-            let now = net_clock.elapsed().as_secs_f64();
-            link.set_time(now);
-            let setup = client.connect(now, &mut link).cloned();
-            if let Some(rec) = net_recorder.as_mut() {
-                rec.connected(now, &mut client);
-            }
-            if let Some(setup) = setup {
-                break setup;
-            }
-            match &client.status {
-                Status::Refused(why) => {
-                    eprintln!("the server refused us: {why}");
-                    drop(hosted.take());
-                    std::process::exit(1);
-                }
-                _ if now > 10.0 => {
-                    eprintln!("no answer from {address}");
-                    drop(hosted.take());
-                    std::process::exit(1);
-                }
-                _ => {}
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        };
-        println!("joined {address} as player {}: {}, {} characters", client.slot(), setup.map, setup.npcs.len());
-        args.demo = setup.map == "demo";
-        args.map = (!args.demo).then(|| PathBuf::from(&setup.map));
-        args.level = None;
-        args.seed = Some(setup.seed);
-        args.speed_scale = Some(setup.speed_scale);
-        args.no_cull = !setup.culling;
-        args.doors_open = setup.doors_open;
-        args.model = Some(PathBuf::from(&setup.model));
-        args.anim = Some(setup.idle.clone());
-        args.first_person = true;
-        net = Some((client, link));
-        joined = Some(setup);
-    }
-    // Without --seed each run picks its own, which a recording keeps
-    let seed = *args.seed.get_or_insert_with(|| {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64)
-    });
-    let map_buf = match (&args.map, &args.level) {
-        _ if args.demo => PathBuf::from("data/map/m00/demo.map"),
-        (Some(path), level) => {
-            if level.is_some() {
-                eprintln!("--map and --level both given: using --map");
-            }
-            path.clone()
-        }
-        (None, Some(name)) => find_level(name).unwrap_or_else(|e| {
-            eprintln!("{e}");
-            std::process::exit(2);
-        }),
-        (None, None) => PathBuf::from("data/map/m00/citystreet_large.map"),
-    };
-    let map_path = map_buf.as_path();
-    let map_num = extract_map_num(map_path).unwrap_or_else(|| String::from("m00"));
-    let level = Rc::new(if args.demo { demo::map() } else { map::read(map_path).expect("Failed to load map") });
-    // The level's lights (its .dmp file) and the light baked into every corner of it. The
-    // built-in room has none, and --flat-light leaves them out.
-    let lighting = (!args.flat_light && !args.demo).then(|| {
-        let file = map_path.with_extension("dmp");
-        rogue_reborn::lighting::Lighting::new(if file.exists() {
-            dmp::read(&file).unwrap_or_else(|e| {
-                eprintln!("{e:#}");
-                dmp::Dmp::none()
-            })
-        } else {
-            dmp::Dmp::none()
-        }, args.gamma)
-    });
-    set_world_gamma(args.gamma);
-    let baked = lighting.as_ref().map(|l| {
-        let start = Instant::now();
-        let baked = l.bake(&level);
-        println!("lit the level in {:.1} ms", start.elapsed().as_secs_f64() * 1000.0);
-        baked
-    });
-
+    let Some((mut session, world)) = Session::start(&mut args) else { return };
+    let level = session.level.clone();
     let level_radius = level_radius(&level);
-    // Collision world built from the render triangles (MAP space)
-    let world = CollisionWorld::from_map(&level, Params::default());
     // The shards of broken glass fall for a moment afterwards
     let mut fractures: Vec<glass::Fracture> = Vec::new();
-
-    if args.info {
-        println!("rooms={} objects={} portals={} planning_levels={} collision_triangles={}",
-            level.rooms.rooms.len(), level.geometries.objects.len(),
-            level.portals.portals.len(), level.planning_levels.levels.len(),
-            world.triangle_count());
-        return;
-    }
 
     const WIDTH: i32 = 1280;
     const HEIGHT: i32 = 1024;
@@ -370,44 +172,7 @@ fn main() {
         glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
     }
 
-    // Camera setup: start at mission-provided location
-    let mut camera = Camera::new();
-
-    // negate z_lh because original coordinates were RH for Direct3D
-    // TODO: pull a player spawn from the map itself
-    camera.position = [33924.6_f32, 33307.0_f32, -30028.3_f32];   // CSL
-    // Spawn priority: --pos, --spawn-zone, a random mission spawn point, then
-    // the fallback position above
-    let mission_spawns = if args.demo { demo::spawns(args.npcs.unwrap_or(demo::MAX_NPCS)) } else { find_mission_spawns(map_path) };
-    let mut own_spawn = None;
-    let spawn = if args.pos.is_some() {
-        None
-    } else if let Some(zone) = args.spawn_zone.as_deref() {
-        find_zone_spawn(map_path, zone, &world).inspect(|s| println!("spawning in zone {zone} at {s:?}"))
-    } else if mission_spawns.is_empty() {
-        None
-    } else {
-        let i = args.spawn.map_or_else(|| pick_index(mission_spawns.len(), args.seed), |n| n.clamp(1, mission_spawns.len()) - 1);
-        let p = mission_spawns[i];
-        // Mission y is a little above the floor; stand on the floor
-        let floor = world.ground_at(p[0], p[2], p[1] + 100.0).unwrap_or(p[1]);
-        println!("spawning at mission spawn point {} of {}: {p:?}", i + 1, mission_spawns.len());
-        own_spawn = Some(i);
-        Some([p[0], floor, p[2]])
-    };
-    if let Some(spawn) = spawn {
-        camera.position = [spawn[0], spawn[1] + world.params().eye_height, -spawn[2]];
-    }
-    if let Some(p) = &playback {
-        own_spawn = p.header().own_spawn.map(|i| i as usize);
-    }
-    // Character models standing at every other mission spawn point
-    let model_path = args.model.clone()
-        .unwrap_or_else(|| PathBuf::from("data/character/team_hrt/blue_M_a.CRP"));
-    // Motions other characters play: idle (or --anim), injury reactions and deaths
-    let idle_name = args.anim.clone().unwrap_or_else(|| "up_none_cyc".to_string());
-    let mut characters = Characters::load(&model_path, &idle_name);
-    let mut assets = Assets::load(&args, &characters, &model_path, &joined);
+    let Game { mut camera, assets, mut sim, me, npc_actor, eye_height, crouch_eye_height } = session.start_game(&args, world);
     let mut decals: Vec<impact::Decal> = Vec::new();
     let mut effects = impact::Effects::default();
     let mut blast_lights: Vec<blastlight::BlastLight> = Vec::new();
@@ -416,131 +181,10 @@ fn main() {
     // (a 60 degree view about a thousand pixels high)
     const EMBER_SIZE: f32 = 2.0;
     const ONE_PIXEL_PER_UNIT: f32 = 0.0012;
-
-    // The mission whose terrorists stand in the level: the one a recording or the server names,
-    // or else the level's own at the difficulty asked for
-    let mission_file: Option<PathBuf> = match (&playback, &joined) {
-        (Some(p), _) => p.header().mission.as_ref().map(PathBuf::from),
-        (_, Some(s)) => s.mission.as_ref().map(PathBuf::from),
-        _ => mission::find(map_path, args.difficulty).filter(|_| !args.demo),
-    };
-    let (npcs, npc_actor) = match (&joined, &mut characters, args.no_models, &mission_file) {
-        (_, Some(c), false, Some(path)) => match mission::read(path) {
-            Ok(teams) => {
-                let npcs = place_terrorists(&teams, seed, &mission::setting(path), &world, c);
-                println!("{} terrorists from {}", npcs.len(), path.display());
-                let n = npcs.len();
-                (npcs, vec![None; n])
-            }
-            Err(e) => {
-                eprintln!("{e:#}");
-                (Vec::new(), Vec::new())
-            }
-        },
-        (Some(s), _, _, _) => (
-            s.npcs.iter().map(|n| Npc {
-                health: combat::Health::new(), pos: n.pos, floor: n.floor, yaw: n.yaw, scale: n.scale, stagger: n.stagger, ..Npc::default()
-            }).collect(),
-            s.npcs.iter().map(|n| n.actor.map(|a| a as usize)).collect(),
-        ),
-        // Characters at the spawn points
-        // `--npcs` caps them in any level. 0 skips the terrorists and their walking grid.
-        (None, Some(c), false, None) => place_npcs(&mission_spawns[..args.npcs.unwrap_or(usize::MAX).min(mission_spawns.len())], own_spawn.as_slice(), &world, &c.model, &assets.actors, &|i, p| {
-            args.model_yaw.unwrap_or_else(|| match mission_spawns.first() {
-                // In the demo room everyone faces the player
-                Some(player) if args.demo => (player[0] - p[0]).atan2(player[2] - p[2]).to_degrees(),
-                _ => i as f32 * 137.5,
-            })
-        }),
-        _ => (Vec::new(), Vec::new()),
-    };
-    assets.load_held(&characters);
-
-    if let Some(p) = args.pos { camera.position = p; }
-    if let Some(y) = args.yaw { camera.yaw = y; }
-    if let Some(p) = args.pitch { camera.pitch = p.clamp(-89.0, 89.0); }
-
-    // The game: the player stands on the floor below the camera
-    let eye_height = world.params().eye_height;
-    let crouch_eye_height = world.params().crouch_eye_height;
     // The view's height over the feet, which eases down and up as the player crouches and stands
     let mut eye_now = eye_height;
     // Left Ctrl switches between standing and crouched
     let mut crouch_wanted = false;
-    let (mag_size, reserve) = match (&playback, &joined) {
-        (Some(p), _) => (p.header().magazine, p.header().reserve),
-        (_, Some(s)) => (s.magazine, s.reserve),
-        _ => assets.weapon_def.as_ref().map_or((30, 900), |w| (w.magazine, w.reserve)),
-    };
-    // A scripted run can hold L to start with a short magazine and reload it, and E with it empty
-    let scripted = |key| args.walk.is_some() && args.hold.as_deref().is_some_and(|h| h.to_ascii_uppercase().contains(key));
-    let ammo = match &playback {
-        Some(p) => p.header().ammo,
-        None if joined.is_some() => joined.as_ref().map_or(mag_size, |s| s.ammo),
-        None if scripted('L') => if scripted('E') { 0 } else { 10 },
-        None => mag_size,
-    };
-    let grenades = playback.as_ref().map(|p| p.header().grenades).or(joined.as_ref().map(|s| s.grenades)).or(args.grenades).unwrap_or(3);
-    let mut recorder = args.record.as_ref().filter(|_| net.is_none()).map(|_| Recorder::new(recording::Header {
-        build: option_env!("GIT_HASH").unwrap_or("unknown").to_string(),
-        map: if args.demo { "demo".to_string() } else { map_path.display().to_string() },
-        npcs: args.npcs.unwrap_or(demo::MAX_NPCS) as u32,
-        own_spawn: own_spawn.map(|i| i as u32),
-        camera: camera.position,
-        yaw: camera.yaw,
-        pitch: camera.pitch,
-        seed: args.seed.unwrap_or(0x5eed),
-        magazine: mag_size,
-        ammo,
-        reserve,
-        grenades,
-        speed_scale: args.speed_scale.unwrap_or(1.0),
-        culling: !args.no_cull,
-        doors_open: args.doors_open,
-        model: model_path.display().to_string(),
-        no_models: args.no_models,
-        model_yaw: args.model_yaw,
-        actor: args.actor.clone(),
-        mission: mission_file.as_ref().map(|p| p.display().to_string()),
-        god: args.god,
-    }));
-    let mut sim = sim::Sim::new(
-        level.clone(),
-        world,
-        sim::Config {
-            magazine: mag_size,
-            ammo,
-            reserve,
-            grenades,
-            speed_scale: args.speed_scale.unwrap_or(1.0),
-            seed: args.seed.unwrap_or(0x5eed),
-            culling: !args.no_cull,
-        },
-        characters,
-        npcs,
-    );
-    // The player on the floor below the camera: slot 0, who this viewer plays
-    let feet = [camera.position[0], camera.position[1] - eye_height, -camera.position[2]];
-    // On a server the slot is the server's choice, and the first snapshot says where in it the player stands
-    let me = match &net {
-        Some((client, _)) => {
-            sim.activate_slot(client.slot(), feet);
-            client.slot()
-        }
-        None => sim.add_player(feet).expect("a game has room for a player"),
-    };
-    if let Some(open) = args.doors_open {
-        sim.set_doors_open(open);
-    }
-    sim.god = args.god;
-    if let Some(s) = &joined {
-        // Set up as `build_sim` sets up the server's game, so that a recording plays back
-        sim.pvp = s.pvp;
-    }
-    if let Some(rec) = net_recorder.as_mut() {
-        rec.began(feet, args.god, &sim);
-    }
-
     let mut last_cursor_pos = None;
     let mut recent_log: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     window.set_cursor_mode(CursorMode::Disabled);
@@ -557,13 +201,13 @@ fn main() {
     let mut picked = rogue_reborn::results::Picked::default();
     let mut typed: Vec<LobbyCommand> = Vec::new();
     let mut wheel = 0.0f32;
-    let level_name = joined.as_ref().map(|s| Path::new(&s.map).file_stem().map_or(s.map.clone(), |n| n.to_string_lossy().into_owned())).unwrap_or_default();
-    let pair_names: Vec<String> = joined.as_ref().map(|s| s.base_pairs.iter().map(|p| rogue_reborn::levels::game_text(&p.name).unwrap_or_else(|| p.name.clone())).collect()).unwrap_or_default();
+    let level_name = session.joined.as_ref().map(|s| Path::new(&s.map).file_stem().map_or(s.map.clone(), |n| n.to_string_lossy().into_owned())).unwrap_or_default();
+    let pair_names: Vec<String> = session.joined.as_ref().map(|s| s.base_pairs.iter().map(|p| rogue_reborn::levels::game_text(&p.name).unwrap_or_else(|| p.name.clone())).collect()).unwrap_or_default();
     // The mission's name for the results, as the original's mission file has it
-    let mission = joined.as_ref().and_then(|s| rogue_reborn::levels::mission_name(&s.map)).unwrap_or_else(|| level_name.clone());
-    let uniform_names: [String; 2] = joined.as_ref().map(|s| s.uniforms.clone().map(|u| lobby::uniform_name(&u))).unwrap_or_default();
+    let mission = session.joined.as_ref().and_then(|s| rogue_reborn::levels::mission_name(&s.map)).unwrap_or_else(|| level_name.clone());
+    let uniform_names: [String; 2] = session.joined.as_ref().map(|s| s.uniforms.clone().map(|u| lobby::uniform_name(&u))).unwrap_or_default();
     // Hosting, the server we joined must name us its host, or it is someone else's
-    let mut host_checked = hosted.is_none();
+    let mut host_checked = session.hosted.is_none();
 
     let mut last_step = Instant::now();
 
@@ -582,11 +226,11 @@ fn main() {
     let mut clip: Option<(std::time::Instant, String, u32)> = None;
     // F3 closes the window and starts the viewer again with the same options
     let mut reload = false;
-    let level_draw = LevelDraw::new(&level, &sim, &map_num);
+    let level_draw = LevelDraw::new(&level, &sim, &session.map_num);
     // Keys pressed since the sim last ticked, which counts once
     let (mut use_pressed, mut reload_pressed, mut gun_pressed, mut grenade_pressed, mut culling_pressed) = (false, false, false, false, false);
     // A scripted run, or a replay, takes one tick a frame instead of keeping time
-    let fixed_step = args.walk.is_some() || (playback.is_some() && args.screenshot.is_some());
+    let fixed_step = args.walk.is_some() || (session.playback.is_some() && args.screenshot.is_some());
     // What the player did in the last tick, which the animation follows
     let mut shown;
     let mut was_free = false;
@@ -598,7 +242,7 @@ fn main() {
         snd.master = args.volume.unwrap_or(1.0).clamp(0.0, 1.0);
     }
     // The level's ambient loops and spot sounds, which follow the rooms the player is in
-    let mut ambience = ambience::read(&map_path.with_extension("ass"))
+    let mut ambience = ambience::read(&session.map_path.with_extension("ass"))
         .map(ambience::Ambience::new)
         .filter(|_| sound.is_some());
     // Full auto: a sustained firing sound that runs while the trigger is held
@@ -625,7 +269,7 @@ fn main() {
     let (mut watch_next, mut watch_previous, mut watch_mode) = (false, false, false);
     let (mut camera_on, mut camera_room): (Option<usize>, Option<usize>) = (None, None);
     let mut watch_eye: Option<(Option<usize>, f32)> = None;
-    let team_game = joined.as_ref().is_some_and(|s| s.bases.iter().all(|b| !b.is_empty()));
+    let team_game = session.joined.as_ref().is_some_and(|s| s.bases.iter().all(|b| !b.is_empty()));
     let mut trigger = false;
     // Right mouse button held: walk instead of the default run
     let mut walk_held = false;
@@ -671,7 +315,7 @@ fn main() {
         glfw.poll_events();
 
         // Between rounds the lobby shows. Whatever was held when it comes or goes is let go.
-        let showing = net.as_ref().is_some_and(|(c, _)| c.status == Status::Connected && c.round.phase.screen());
+        let showing = session.net.as_ref().is_some_and(|(c, _)| c.status == Status::Connected && c.round.phase.screen());
         if gate.show(showing) {
             (trigger, walk_held, pointer_down, wheel) = (false, false, false, 0.0);
             (use_pressed, reload_pressed, gun_pressed, grenade_pressed, culling_pressed) = (false, false, false, false, false);
@@ -705,12 +349,12 @@ fn main() {
                         (Key::T, Action::Press) => {
                             textured = !textured;
                         }
-                        (Key::L, Action::Press) if net.is_some() => {
+                        (Key::L, Action::Press) if session.net.is_some() => {
                             lag_meter = !lag_meter;
                         }
-                        (Key::M, Action::Press) if net_recorder.is_some() => {
-                            let now = net_clock.elapsed().as_secs_f64();
-                            net_recorder.as_mut().unwrap().mark(now);
+                        (Key::M, Action::Press) if session.net_recorder.is_some() => {
+                            let now = session.net_clock.elapsed().as_secs_f64();
+                            session.net_recorder.as_mut().unwrap().mark(now);
                             println!("marked this moment in the recording, {now:.1} s in");
                         }
                         (Key::L, Action::Press) => {
@@ -776,7 +420,7 @@ fn main() {
                         (Key::LeftControl, Action::Press) => {
                             crouch_wanted = !crouch_wanted;
                         }
-                        (Key::F1, Action::Press) if playback.is_none() && net.is_none() => {
+                        (Key::F1, Action::Press) if session.playback.is_none() && session.net.is_none() => {
                             // Into the player's body, who drops in from wherever the view is, and out again
                             first_person = !first_person;
                         }
@@ -794,7 +438,7 @@ fn main() {
                 WindowEvent::CursorPos(..) if gate.showing() => {}
                 WindowEvent::CursorPos(xpos, ypos) => {
                     // A scripted run (--walk) or a replay is not steered by a real mouse
-                    if let (Some((last_x, last_y)), None, false) = (last_cursor_pos, args.walk, playback.is_some()) {
+                    if let (Some((last_x, last_y)), None, false) = (last_cursor_pos, args.walk, session.playback.is_some()) {
                         let dx = xpos - last_x;
                         let dy = ypos - last_y;
                         if args.cinematic && first_person && third_person && gate.held(Key::LeftShift) {
@@ -883,7 +527,7 @@ fn main() {
         let step_dt = if fixed_step { sim::TICK } else { real_dt };
 
         // Free-fly: WASD moves the view (hold LeftShift to move faster)
-        if !first_person && playback.is_none() {
+        if !first_person && session.playback.is_none() {
             let mut speed = base_speed;
             if gate.held(Key::LeftShift) {
                 speed *= 5.0;
@@ -915,7 +559,7 @@ fn main() {
         }
 
         // Held before and after a round, the view stays where the game has it
-        if net.is_some() && sim.frozen && first_person && sim.players[me].respawn_at.is_none() {
+        if session.net.is_some() && sim.frozen && first_person && sim.players[me].respawn_at.is_none() {
             let (yaw, pitch) = sim.players[me].look;
             (camera.yaw, camera.pitch) = sim::Input { yaw, pitch, ..sim::Input::default() }.look();
         }
@@ -946,7 +590,7 @@ fn main() {
         let mut ticks = 0;
         while tick_budget >= sim::TICK && ticks < 5 {
             // What the player does comes from the keys, or from the recording
-            let tick_input = match playback.as_mut() {
+            let tick_input = match session.playback.as_mut() {
                 Some(pb) => match pb.next_input() {
                     Some(i) => i,
                     None => break,
@@ -954,24 +598,24 @@ fn main() {
                 None => input,
             };
             prev_feet = sim.players[me].player.pos;
-            events.extend(match net.as_mut() {
+            events.extend(match session.net.as_mut() {
                 // On a server the game is its to run: send it what the player did, and put
                 // what it says into this copy
                 Some((client, link)) => {
-                    let now = net_clock.elapsed().as_secs_f64();
+                    let now = session.net_clock.elapsed().as_secs_f64();
                     link.set_time(now);
                     let news = client.tick(now, link, &mut sim, tick_input);
-                    if let Some(rec) = net_recorder.as_mut() {
+                    if let Some(rec) = session.net_recorder.as_mut() {
                         rec.ticked(now, tick_input, client, &sim);
                     }
                     news
                 }
                 None => sim.tick(&[tick_input], sim::TICK),
             });
-            if let Some(rec) = recorder.as_mut() {
+            if let Some(rec) = session.recorder.as_mut() {
                 rec.after_tick(&tick_input, &sim);
             }
-            if let Some(pb) = playback.as_mut() {
+            if let Some(pb) = session.playback.as_mut() {
                 if let Some(d) = pb.after_tick(&sim) {
                     eprintln!("DESYNC: {d}");
                 }
@@ -1003,14 +647,14 @@ fn main() {
         let game_time = sim.time;
         // On a server, what moves is shown a little in the past, between its snapshots, so that
         // it moves smoothly
-        let frame = net.as_mut().map(|(client, _)| {
-            let now = net_clock.elapsed().as_secs_f64();
-            if let Some(rec) = net_recorder.as_mut() {
+        let frame = session.net.as_mut().map(|(client, _)| {
+            let now = session.net_clock.elapsed().as_secs_f64();
+            if let Some(rec) = session.net_recorder.as_mut() {
                 rec.viewed(now);
             }
             client.view(now)
         });
-        if let Some((client, _)) = &net {
+        if let Some((client, _)) = &session.net {
             match &client.status {
                 Status::Connected => {}
                 Status::SentAway(why) => {
@@ -1047,7 +691,7 @@ fn main() {
 
         feed.retain(|(until, ..)| *until > game_time);
         // A new round leaves nothing of the last
-        if let Some((client, _)) = &net {
+        if let Some((client, _)) = &session.net {
             if client.round.number != round_seen {
                 round_seen = client.round.number;
                 decals.clear();
@@ -1058,7 +702,7 @@ fn main() {
 
         // Dead on a server: the view sinks to the floor and turns to whoever did it, and is given
         // back the way it was when the player comes back
-        match net.as_ref().and_then(|_| sim.players[me].respawn_at) {
+        match session.net.as_ref().and_then(|_| sim.players[me].respawn_at) {
             Some(until) if first_person => {
                 let (yaw0, pitch0) = *alive_look.get_or_insert((camera.yaw, camera.pitch));
                 let fall = ((game_time - (until - sim::RESPAWN_SECONDS)) / 0.6).clamp(0.0, 1.0);
@@ -1086,7 +730,7 @@ fn main() {
         }
 
         // Dead in a round, the view is a teammate's (see net::watch)
-        let watch_pose = match (&net, &frame) {
+        let watch_pose = match (&session.net, &frame) {
             (Some((client, _)), Some(f)) => {
                 let cx = WatchContext { sim: &sim, frame: f, me, round: client.round, team_game, connected: client.status == Status::Connected };
                 watch.update(&cx);
@@ -1449,7 +1093,7 @@ fn main() {
             let mut rect_plan: Vec<rogue_reborn::visibility::RectRoom> = Vec::new();
             // Dead on a server, drawn from the rooms of whoever the camera is on: the player's own
             // rooms are not followed while they are dead
-            let (cull_rooms, cull_body) = if net.is_some() && sim.players[me].respawn_at.is_some() {
+            let (cull_rooms, cull_body) = if session.net.is_some() && sim.players[me].respawn_at.is_some() {
                 let (rooms, room) = sim.standing_rooms(camera_feet, camera_room);
                 camera_room = room;
                 (rooms, [[camera_feet[0], camera_feet[1] + 10.0, camera_feet[2]], cam_eye])
@@ -1575,7 +1219,7 @@ fn main() {
                             }
                         }
                         // Room colors replace the textures, so they show even where textures are missing
-                        let tex_id = if room_debug { Some(0) } else { ensure_texture(&level.materials, mat_index, &map_num, &mut textures) };
+                        let tex_id = if room_debug { Some(0) } else { ensure_texture(&level.materials, mat_index, &session.map_num, &mut textures) };
                         if let Some(tex_id) = tex_id {
                             // TODO put all faces with same tex-id together so I can bind once
                             if !room_debug {
@@ -1589,7 +1233,7 @@ fn main() {
                             }
 
                             // Each face corner's light, baked at load; soft sprites and lamps are not lit
-                            let shades = baked.as_ref().filter(|_| textured && !room_debug && blend.is_none() && !level_draw.glowing.get(mat_index).copied().unwrap_or(false))
+                            let shades = session.baked.as_ref().filter(|_| textured && !room_debug && blend.is_none() && !level_draw.glowing.get(mat_index).copied().unwrap_or(false))
                                 .map(|b| &b.colors[object_index][od_index]);
                             if shades.is_none() && textured && !room_debug {
                                 glColor3f(1.0, 1.0, 1.0);
@@ -1735,7 +1379,7 @@ fn main() {
             // The level's light on a character standing at `feet`, turned `yaw` and scaled, in its own
             // space: its room's ambient light and strongest lights. None with --flat-light.
             let lit_at = |feet: [f32; 3], yaw: f32, scale: [f32; 3]| -> Option<CharacterLight> {
-                Some(standing_light(lighting.as_ref()?, &level, &sim.visibility, feet).local(feet, yaw, scale))
+                Some(standing_light(session.lighting.as_ref()?, &level, &sim.visibility, feet).local(feet, yaw, scale))
             };
             // A flashing gun lights its shooter. With no falloff only the direction matters, so the
             // light sits ahead of the chest, at gun height, in the character's own space.
@@ -2066,7 +1710,7 @@ fn main() {
                     glRotatef(spin, 1.0, 0.3, 0.0);
                     // Model space (forward -Y, up +Z) turned so its length runs the way it spins
                     glTranslatef(-gd.center[0], -gd.center[1], -gd.center[2]);
-                    let light = lighting.as_ref().map_or([1.0; 3], |l| room_light(l, &level, &sim.visibility, pos, pos).tint);
+                    let light = session.lighting.as_ref().map_or([1.0; 3], |l| room_light(l, &level, &sim.visibility, pos, pos).tint);
                     draw_weapon(gd, textured, light);
                     glPopMatrix();
                 }
@@ -2243,10 +1887,10 @@ fn main() {
             let pane_shows = |pane: &glass::Pane| plan.is_empty()
                 || map::object_room(&pane.name).is_none_or(|n| visible_rooms.contains(&n));
             for (pane, _) in sim.panes.iter().zip(&sim.broken_at).filter(|(p, b)| b.is_none() && pane_shows(p)) {
-                draw_glass(&level.materials, pane.material, &map_num, &mut textures, textured, pane.opacity, pane.tris.iter().map(|t| (t.p, t.uv)));
+                draw_glass(&level.materials, pane.material, &session.map_num, &mut textures, textured, pane.opacity, pane.tris.iter().map(|t| (t.p, t.uv)));
             }
             for f in &fractures {
-                draw_fracture(&level.materials, &map_num, &mut textures, textured, f);
+                draw_fracture(&level.materials, &session.map_num, &mut textures, textured, f);
             }
 
             if !gate.showing() {
@@ -2417,7 +2061,7 @@ fn main() {
                 glTranslatef(-wd.center[0], -wd.center[1], -wd.center[2]);
                 if gun_shows {
                     // Lit by the room the player stands in
-                    let light = lighting.as_ref().map_or([1.0; 3], |l| {
+                    let light = session.lighting.as_ref().map_or([1.0; 3], |l| {
                         let lit = standing_light(l, &level, &sim.visibility, sim.players[me].player.pos);
                         if player_flash[me] && wd.flash_scale > 0.0 { lit.flash_tint() } else { lit.tint }
                     });
@@ -2469,7 +2113,7 @@ fn main() {
             if let Some(hp) = sim.players[me].target_hp {
                 status.insert(0, format!("TARGET: {hp:.0}"));
             }
-            if net.is_some() {
+            if session.net.is_some() {
                 let p = &sim.players[me];
                 status.insert(0, if p.respawn_at.is_some() { "DEAD".to_string() } else { format!("HEALTH: {:.0}", p.hp.ceil()) });
                 status.insert(1, format!("DEATHS: {}", p.deaths));
@@ -2477,12 +2121,12 @@ fn main() {
             // Watching, who it is and how they are, in place of the player's own
             if watch.watching() {
                 status = vec![match watch.target() {
-                    Some(t) => format!("WATCHING {}  HEALTH: {:.0}", net.as_ref().map_or_else(|| format!("PLAYER {}", t + 1), |(c, _)| c.name_of(t)), sim.players[t].hp.ceil()),
+                    Some(t) => format!("WATCHING {}  HEALTH: {:.0}", session.net.as_ref().map_or_else(|| format!("PLAYER {}", t + 1), |(c, _)| c.name_of(t)), sim.players[t].hp.ceil()),
                     None if watch_pose.is_some() => "WATCHING".to_string(),
                     None => "NO ONE TO WATCH".to_string(),
                 }];
             }
-            let round = net.as_ref().map(|(c, _)| c.round).unwrap_or_default();
+            let round = session.net.as_ref().map(|(c, _)| c.round).unwrap_or_default();
             if round.phase != Phase::Open {
                 status.insert(0, format!("ROUND {}  BLUE {}  GOLD {}", round.number.max(1), round.wins[0], round.wins[1]));
                 if let (Phase::Live, Some(ends)) = (round.phase, round.ends) {
@@ -2490,14 +2134,14 @@ fn main() {
                     status.insert(1, format!("TIME: {}:{:02}", left / 60, left % 60));
                 }
             }
-            let results = net.as_ref().and_then(|(c, _)| c.results.as_ref());
+            let results = session.net.as_ref().and_then(|(c, _)| c.results.as_ref());
             let winner = results.and_then(|r| r.rows.get(r.winner? as usize)).map(|row| row.name.as_str());
             let banner = round_banner(&round, game_time, winner);
             let msg = if game_time < sim.players[me].message.1 { sim.players[me].message.0.as_str() } else { banner.as_str() };
             let marker = game_time < hit_marker_until;
             let lines: Vec<(String, [f32; 3])> = feed.iter().map(|(_, text, color)| (text.clone(), *color)).collect();
-            let dead = net.is_some() && sim.players[me].respawn_at.is_some();
-            let meter = net.as_ref().filter(|_| lag_meter).map(|(client, _)| (&client.meter, net_clock.elapsed().as_secs_f64()));
+            let dead = session.net.is_some() && sim.players[me].respawn_at.is_some();
+            let meter = session.net.as_ref().filter(|_| lag_meter).map(|(client, _)| (&client.meter, session.net_clock.elapsed().as_secs_f64()));
             // The crosshair opens as wide as the gun's spread, in the world view
             let p = &sim.players[me];
             let spread = if p.equipped_grenade { 0.0 } else { p.aim.angle.tan() / half_view_tan() * h as f32 / 2.0 };
@@ -2511,7 +2155,7 @@ fn main() {
         } else {
             format!("ROOM: {} (CULLING OFF)", current_rooms.join(" "))
         };
-        let demo_text = match (&recorder, &playback) {
+        let demo_text = match (&session.recorder, &session.playback) {
             (Some(r), _) => format!("REC {:.0} S", r.ticks() as f32 * sim::TICK),
             (_, Some(p)) => {
                 let (done, all) = p.progress();
@@ -2519,7 +2163,7 @@ fn main() {
             }
             _ => String::new(),
         };
-        let net_text = net.as_ref().map_or(String::new(), |(c, _)| format!("NET: {:?} {} PLAYERS", c.status, sim.players.iter().filter(|p| p.active).count()).to_uppercase());
+        let net_text = session.net.as_ref().map_or(String::new(), |(c, _)| format!("NET: {:?} {} PLAYERS", c.status, sim.players.iter().filter(|p| p.active).count()).to_uppercase());
         let mut debug_lines: Vec<&str> = vec![&level_text, &fps_text, &render_text];
         if !net_text.is_empty() {
             debug_lines.push(&net_text);
@@ -2537,7 +2181,7 @@ fn main() {
 
         // The lobby or the results, over the whole window, and the chat, which notes what
         // happens all game long. What is clicked and said is sent with the next tick.
-        if let Some((client, _)) = net.as_mut().filter(|(c, _)| c.status == Status::Connected && c.snapshots > 0) {
+        if let Some((client, _)) = session.net.as_mut().filter(|(c, _)| c.status == Status::Connected && c.snapshots > 0) {
             let players: Vec<lobby::Player> = sim.players.iter().enumerate().filter(|(_, p)| p.active)
                 .map(|(i, p)| lobby::Player { slot: i, joined: p.joined, side: p.side, name: client.name_of(i) })
                 .collect();
@@ -2569,8 +2213,8 @@ fn main() {
                 ui_gl.draw(&ui, &draws, [fw, fh]);
             }
             for command in commands {
-                if let Some(rec) = net_recorder.as_mut() {
-                    rec.lobby(net_clock.elapsed().as_secs_f64(), command.clone());
+                if let Some(rec) = session.net_recorder.as_mut() {
+                    rec.lobby(session.net_clock.elapsed().as_secs_f64(), command.clone());
                 }
                 client.lobby(command);
             }
@@ -2608,7 +2252,7 @@ fn main() {
                 bits
             };
             let report = DebugReport {
-                map_path, map_num: &map_num, level: &level, eye, feet, yaw: camera.yaw, pitch: camera.pitch, dir,
+                map_path: &session.map_path, map_num: &session.map_num, level: &level, eye, feet, yaw: camera.yaw, pitch: camera.pitch, dir,
                 hit, first_person, third_person, textured, room_debug, show_portals, show_collisions, sprite_mode, depth_bits,
                 fps, render_ms, culling: sim.culling, portal_paths: args.portal_paths, room: current_rooms.first().copied(), drawn: &drawn_rooms, collision: &sim.players[me].collision_rooms, player_rooms: &sim.players[me].player_rooms, render_rooms: &sim.players[me].render_rooms, doors: &nearby_doors,
                 terrorists: &sim.terrorist_report(me), log: recent_log.make_contiguous(),
@@ -2640,12 +2284,12 @@ fn main() {
             bench = (bench.0 + 1, bench.1 + render_ms as f64, bench.2 + raw_dt as f64 * 1000.0);
         }
         // A replay ends when the recording does
-        let replay_over = playback.as_ref().is_some_and(|p| p.finished());
+        let replay_over = session.playback.as_ref().is_some_and(|p| p.finished());
         if replay_over && args.screenshot.is_none() {
             window.set_should_close(true);
         }
         if let Some(path) = &args.screenshot {
-            let done = if playback.is_some() { replay_over } else { frames_drawn >= args.walk.map_or(3, |n| n.max(3)) };
+            let done = if session.playback.is_some() { replay_over } else { frames_drawn >= args.walk.map_or(3, |n| n.max(3)) };
             if done {
                 if bench.0 > 0 {
                     println!("timing over {} frames: render {:.3} ms, whole frame {:.3} ms", bench.0, bench.1 / bench.0 as f64, bench.2 / bench.0 as f64);
@@ -2690,43 +2334,7 @@ fn main() {
         }
     }
 
-    if let Some((client, link)) = net.as_mut() {
-        client.leave(link);
-    }
-    if let (Some(rec), Some(path)) = (&net_recorder, &args.record) {
-        let rec = rec.recording(&sim);
-        match rec.write(path) {
-            Ok(()) => println!("recorded {:.1} s of the game as you saw it to {}", rec.seconds(), path.display()),
-            Err(e) => eprintln!("{e:#}"),
-        }
-    }
-    if let (Some(rec), Some(path)) = (recorder, &args.record) {
-        let rec = rec.finish(&sim);
-        match rec.write(path) {
-            Ok(()) => println!("recorded {} ticks ({:.1} s) to {}", rec.inputs.len(), rec.seconds(), path.display()),
-            Err(e) => eprintln!("{e:#}"),
-        }
-    }
-    if let Some(pb) = &playback {
-        let (done, all) = pb.progress();
-        match pb.desync() {
-            None => println!("played {done} of {all} ticks: the game matched the recording"),
-            Some(d) => {
-                println!("played {done} of {all} ticks: {d}");
-                std::process::exit(1);
-            }
-        }
-    }
-
-    if reload {
-        // Let go of the window and the sound device first, so the new one has them to itself
-        drop(window);
-        drop(sound);
-        let exe = std::env::current_exe().expect("cannot find the viewer to restart");
-        match std::process::Command::new(exe).args(std::env::args_os().skip(1)).spawn() {
-            Ok(_) => {}
-            Err(e) => eprintln!("could not reload: {e}"),
-        }
-    }
+    // Let go of the window and the sound device first when restarting, so the new one has them to itself
+    let release = if reload { Some((window, sound)) } else { None };
+    session.finish(&args, &sim, release);
 }
-
