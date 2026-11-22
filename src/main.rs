@@ -394,6 +394,8 @@ fn main() {
     let mut glfw = glfw::init_no_callbacks().unwrap();
     glfw.window_hint(glfw::WindowHint::StencilBits(Some(8)));
     glfw.window_hint(glfw::WindowHint::DepthBits(Some(24)));
+    // A screenshot run draws into a window that never shows, so it doesn't cover the desktop
+    glfw.window_hint(glfw::WindowHint::Visible(args.screenshot.is_none() && !args.dump));
     let (mut window, events) = glfw
         .create_window(WIDTH as _, HEIGHT as _, "Wireframe Viewer", glfw::WindowMode::Windowed)
         .expect("Failed to create GLFW window");
