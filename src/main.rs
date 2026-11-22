@@ -12,20 +12,21 @@ mod session;
 mod state;
 mod textures;
 mod ui_gl;
+mod view;
 
 use std::path::Path;
 use std::collections::HashMap;
 use std::time::Instant;
 use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 use rogue_reborn::motion::MOTION_FPS;
-use rogue_reborn::{map, combat, crp, grenade, blastlight, concussion, sim, sound, glass, casings};
+use rogue_reborn::{map, combat, crp, grenade, blastlight, sim, sound, glass, casings};
 use rogue_reborn::net::client::{Seen, Status};
 use rogue_reborn::lobby::{self, LobbyView};
 use rogue_reborn::results::ResultsView;
 use rogue_reborn::ui::{Canvas, Pointer};
 use rogue_reborn::net::animation::Doing;
 use rogue_reborn::net::round::{Outcome, Phase, RoundState};
-use rogue_reborn::net::watch::{BEHIND, Pose, RISE, Watch, WatchContext, WatchMode, behind};
+use rogue_reborn::net::watch::{BEHIND, Pose, RISE, WatchContext, WatchMode, behind};
 use rogue_reborn::sim::characters::{Characters, Npc, Rig};
 use rogue_reborn::sim::movement::{Movement, Reloading, animation_pace, hip_turn, movement_from_keys};
 use rogue_reborn::impact::{self, Surface};
@@ -44,6 +45,7 @@ use crate::audio::Audio;
 use crate::overlay::Overlay;
 use crate::scene::Scene;
 use crate::session::{Game, Session};
+use crate::view::PlayerView;
 use crate::state::{Pressed, Timing, Toggles};
 use crate::render::draw::{WeaponDraw, CharacterArrays, draw_weapon, FlashSpot, draw_flash, draw_flash_here, draw_character, draw_glass, draw_fracture, level_radius, Which, draw_plan, wipe_opening, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
@@ -140,17 +142,14 @@ fn main() {
 
     let (mut glfw, mut window, events) = window::open(&args);
 
-    let Game { mut camera, assets, mut sim, me, npc_actor, eye_height, crouch_eye_height } = session.start_game(&args, world);
+    let Game { camera, assets, mut sim, me, npc_actor, eye_height, crouch_eye_height } = session.start_game(&args, world);
     let mut scene = Scene::default();
     const MAX_DECALS: usize = 300;
     // A blast's embers: how wide they are, and the width of a pixel for each unit of distance
     // (a 60 degree view about a thousand pixels high)
     const EMBER_SIZE: f32 = 2.0;
     const ONE_PIXEL_PER_UNIT: f32 = 0.0012;
-    // The view's height over the feet, which eases down and up as the player crouches and stands
-    let mut eye_now = eye_height;
-    // Left Ctrl switches between standing and crouched
-    let mut crouch_wanted = false;
+    let mut pview = PlayerView::new(camera, eye_height, sim.players[me].player.pos);
     window.set_cursor_mode(CursorMode::Disabled);
     // The lobby between rounds (see lobby.rs), drawn over everything with the original's art.
     // While it shows, the keys and mouse are its, and the pointer is free.
@@ -166,31 +165,10 @@ fn main() {
     let mut pressed = Pressed::default();
     // What the player did in the last tick, which the animation follows
     let mut shown;
-    let mut was_free = false;
     let mut audio = Audio::new(&args, &session.map_path);
-    // How this player died: by whom, and where they were looking before
-    let mut killed_by: Option<Option<usize>> = None;
-    let mut alive_look: Option<(f32, f32)> = None;
     // The round the marks and bodies are from
     let mut round_seen = 0u16;
-    // Dead in a round: whom the player watches (see net::watch), the keys pressed for it, whom
-    // the camera is on and the room they were in last, and the eye height eased between the
-    // watched one's stances
-    let mut watch = Watch::default();
-    let (mut watch_next, mut watch_previous, mut watch_mode) = (false, false, false);
-    let (mut camera_on, mut camera_room): (Option<usize>, Option<usize>) = (None, None);
-    let mut watch_eye: Option<(Option<usize>, f32)> = None;
     let team_game = session.joined.as_ref().is_some_and(|s| s.bases.iter().all(|b| !b.is_empty()));
-    let mut trigger = false;
-    // Right mouse button held: walk instead of the default run
-    let mut walk_held = false;
-    // A blast leaves the player shaken (the view), dazzled (a white veil) and deafened (muffled sound)
-    let (mut shake, mut veil, mut deaf) = (0.0f32, 0.0f32, 0.0f32);
-    // ...and what they hear is dull: how much, and seconds since it began (see `sound::stunned_after`)
-    let mut stun = (0.0f32, f32::MAX);
-    // ...and flinches, and sees a grey tunnel for a moment
-    let mut concussion = concussion::Concussion::default();
-    let mut hit_marker_until = 0.0f32;
     let player_ejector = assets.weapon_def.as_ref().and_then(casings::Ejector::of);
     let flash_rng = std::cell::Cell::new(0x9E37_79B9_7F4A_7C15u64);
     let flash_roll = || {
@@ -199,11 +177,6 @@ fn main() {
         flash_rng.set(r);
         (x >> 40) as f32 / (1u64 << 24) as f32
     };
-    let mut movement = Movement::Idle;
-    let mut player_frame = 0.0f32;
-    let mut player_hip_turn = 0.0f32;
-    // Where the player stood a tick ago, to draw between ticks
-    let mut prev_feet = sim.players[me].player.pos;
     let base_speed = 7.5;
 
     while !window.should_close() {
@@ -212,7 +185,7 @@ fn main() {
         // Between rounds the lobby shows. Whatever was held when it comes or goes is let go.
         let showing = session.net.as_ref().is_some_and(|(c, _)| c.status == Status::Connected && c.round.phase.screen());
         if overlay.gate.show(showing) {
-            (trigger, walk_held, overlay.pointer_down, overlay.wheel) = (false, false, false, 0.0);
+            (pview.trigger, pview.walk_held, overlay.pointer_down, overlay.wheel) = (false, false, false, 0.0);
             (pressed.use_key, pressed.reload, pressed.gun, pressed.grenade, pressed.culling) = (false, false, false, false, false);
             // The first movement after it does not turn the view
             overlay.last_cursor_pos = None;
@@ -297,8 +270,8 @@ fn main() {
                         }
                         // Dead in a round, F goes between their eyes and behind them once
                         // watching, and leaves the player's own view as it was
-                        (Key::F, Action::Press) if watch.in_round() => {
-                            watch_mode |= watch.watching();
+                        (Key::F, Action::Press) if pview.watch.in_round() => {
+                            pview.watch_mode |= pview.watch.watching();
                         }
                         (Key::F, Action::Press) => {
                             toggles.third_person = !toggles.third_person;
@@ -313,7 +286,7 @@ fn main() {
                             pressed.reload = true;
                         }
                         (Key::LeftControl, Action::Press) => {
-                            crouch_wanted = !crouch_wanted;
+                            pview.crouch_wanted = !pview.crouch_wanted;
                         }
                         (Key::F1, Action::Press) if session.playback.is_none() && session.net.is_none() => {
                             // Into the player's body, who drops in from wherever the view is, and out again
@@ -342,9 +315,9 @@ fn main() {
                             overlay.last_cursor_pos = Some((xpos, ypos));
                             continue;
                         }
-                        camera.yaw -= dx as f32 * 0.1;
-                        camera.pitch -= dy as f32 * 0.1;
-                        camera.pitch = camera.pitch.clamp(-89.0, 89.0);
+                        pview.camera.yaw -= dx as f32 * 0.1;
+                        pview.camera.pitch -= dy as f32 * 0.1;
+                        pview.camera.pitch = pview.camera.pitch.clamp(-89.0, 89.0);
                     }
                     overlay.last_cursor_pos = Some((xpos, ypos));
                 }
@@ -358,22 +331,22 @@ fn main() {
                 WindowEvent::MouseButton(_, _, _) if overlay.gate.showing() => {}
                 // Watching, the buttons go to the next teammate and back, on a press
                 WindowEvent::MouseButton(glfw::MouseButton::Button1, action, _) => {
-                    trigger = action != Action::Release;
-                    watch_next |= action == Action::Press && watch.watching();
+                    pview.trigger = action != Action::Release;
+                    pview.watch_next |= action == Action::Press && pview.watch.watching();
                 }
                 WindowEvent::MouseButton(glfw::MouseButton::Button2, action, _) => {
-                    walk_held = action != Action::Release;
-                    watch_previous |= action == Action::Press && watch.watching();
+                    pview.walk_held = action != Action::Release;
+                    pview.watch_previous |= action == Action::Press && pview.watch.watching();
                 }
                 WindowEvent::Scroll(_x, y) => {
                     if !toggles.first_person {
                         let scroll = y as f32;
                         if scroll != 0.0 {
-                            let dir = camera.get_forward();
+                            let dir = pview.camera.get_forward();
                             let zoom_speed = base_speed * 10.0;
-                            camera.position[0] += dir[0] * zoom_speed * scroll;
-                            camera.position[1] += dir[1] * zoom_speed * scroll;
-                            camera.position[2] += dir[2] * zoom_speed * scroll;
+                            pview.camera.position[0] += dir[0] * zoom_speed * scroll;
+                            pview.camera.position[1] += dir[1] * zoom_speed * scroll;
+                            pview.camera.position[2] += dir[2] * zoom_speed * scroll;
                         }
                     }
                 }
@@ -385,11 +358,11 @@ fn main() {
             // --hold picks the keys to press: W A S D, and R for walk (right mouse button)
             let held = args.hold.as_deref().unwrap_or("W").to_ascii_uppercase();
             // B fires a single round at frame 60, once the others are in view, to see one hit land
-            trigger = (timing.frames_drawn < n && held.contains('F')) || (held.contains('B') && (60..64).contains(&timing.frames_drawn));
+            pview.trigger = (timing.frames_drawn < n && held.contains('F')) || (held.contains('B') && (60..64).contains(&timing.frames_drawn));
             // T takes out a grenade and throws it after holding for half a second
             if held.contains('T') {
                 pressed.grenade = true;
-                trigger = timing.frames_drawn < 30;
+                pview.trigger = timing.frames_drawn < 30;
             }
             // U presses the use key (Space) on frame 5, to open or close the door in front
             if held.contains('U') && timing.frames_drawn == 5 {
@@ -399,19 +372,19 @@ fn main() {
             if held.contains('L') && timing.frames_drawn == 0 {
                 pressed.reload = true;
             }
-            walk_held = timing.frames_drawn < n && held.contains('R');
+            pview.walk_held = timing.frames_drawn < n && held.contains('R');
             // Y turns to the right, 2 degrees a frame, to see the feet step round
             if timing.frames_drawn < n && held.contains('Y') {
-                camera.yaw -= 2.0;
+                pview.camera.yaw -= 2.0;
             }
             // C crouches for the whole run; K switches stance at frame 30, to see the change
-            crouch_wanted = held.contains('C') != (held.contains('K') && timing.frames_drawn >= 30);
+            pview.crouch_wanted = held.contains('C') != (held.contains('K') && timing.frames_drawn >= 30);
             for (ch, key) in [('W', Key::W), ('A', Key::A), ('S', Key::S), ('D', Key::D)] {
                 overlay.gate.set(key, timing.frames_drawn < n && held.contains(ch));
             }
             if timing.frames_drawn % 10 == 0 {
                 println!("frame {frames_drawn:4} crouch_wanted={crouch_wanted} crouched={} feet=({:.1}, {:.1}, {:.1}) on_ground={} movement={movement:?} anim_frame={player_frame:.1}",
-                    sim.players[me].player.crouched, sim.players[me].player.pos[0], sim.players[me].player.pos[1], sim.players[me].player.pos[2], sim.players[me].player.on_ground, frames_drawn = timing.frames_drawn);
+                    sim.players[me].player.crouched, sim.players[me].player.pos[0], sim.players[me].player.pos[1], sim.players[me].player.pos[2], sim.players[me].player.on_ground, frames_drawn = timing.frames_drawn, crouch_wanted = pview.crouch_wanted, movement = pview.movement, player_frame = pview.player_frame);
             }
         }
 
@@ -427,8 +400,8 @@ fn main() {
             if overlay.gate.held(Key::LeftShift) {
                 speed *= 5.0;
             }
-            let right = camera.get_right();
-            let yaw_rad = camera.yaw.to_radians();
+            let right = pview.camera.get_right();
+            let yaw_rad = pview.camera.yaw.to_radians();
             let fwd_flat = [-yaw_rad.sin(), 0.0, -yaw_rad.cos()];
             // Desired horizontal displacement for this frame, in camera space
             let mut mv = [0.0f32; 2];
@@ -449,14 +422,14 @@ fn main() {
                 mv[1] += (right[2] * speed) / 2.0;
             }
             // mv is per-frame at 60 FPS; scale so free-fly speed does not depend on frame rate
-            camera.position[0] += mv[0] * step_dt * 60.0;
-            camera.position[2] += mv[1] * step_dt * 60.0;
+            pview.camera.position[0] += mv[0] * step_dt * 60.0;
+            pview.camera.position[2] += mv[1] * step_dt * 60.0;
         }
 
         // Held before and after a round, the view stays where the game has it
         if session.net.is_some() && sim.frozen && toggles.first_person && sim.players[me].respawn_at.is_none() {
             let (yaw, pitch) = sim.players[me].look;
-            (camera.yaw, camera.pitch) = sim::Input { yaw, pitch, ..sim::Input::default() }.look();
+            (pview.camera.yaw, pview.camera.pitch) = sim::Input { yaw, pitch, ..sim::Input::default() }.look();
         }
 
         // The game runs in fixed ticks, however fast the frames come
@@ -465,20 +438,20 @@ fn main() {
             back: overlay.gate.held(Key::S),
             left: overlay.gate.held(Key::A),
             right: overlay.gate.held(Key::D),
-            run: !walk_held,
-            crouch: crouch_wanted,
+            run: !pview.walk_held,
+            crouch: pview.crouch_wanted,
             peek_left: overlay.gate.held(Key::Q),
             peek_right: overlay.gate.held(Key::E),
-            fire: trigger,
+            fire: pview.trigger,
             use_key: pressed.use_key,
             reload: pressed.reload,
             gun: pressed.gun,
             grenade: pressed.grenade,
             toggle_culling: pressed.culling,
-            observer: (!toggles.first_person).then(|| [camera.position[0], camera.position[1], -camera.position[2]]),
+            observer: (!toggles.first_person).then(|| [pview.camera.position[0], pview.camera.position[1], -pview.camera.position[2]]),
             ..sim::Input::default()
         };
-        input.set_look(camera.yaw, camera.pitch);
+        input.set_look(pview.camera.yaw, pview.camera.pitch);
         shown = input;
         timing.tick_budget += step_dt;
         let mut events: Vec<sim::Event> = Vec::new();
@@ -492,7 +465,7 @@ fn main() {
                 },
                 None => input,
             };
-            prev_feet = sim.players[me].player.pos;
+            pview.prev_feet = sim.players[me].player.pos;
             events.extend(match session.net.as_mut() {
                 // On a server the game is its to run: send it what the player did, and put
                 // what it says into this copy
@@ -515,17 +488,17 @@ fn main() {
                     eprintln!("DESYNC: {d}");
                 }
                 // The view follows the recorded player
-                (camera.yaw, camera.pitch) = tick_input.look();
+                (pview.camera.yaw, pview.camera.pitch) = tick_input.look();
                 toggles.first_person = tick_input.observer.is_none();
                 if let Some(o) = tick_input.observer {
-                    camera.position = [o[0], o[1], -o[2]];
+                    pview.camera.position = [o[0], o[1], -o[2]];
                 }
             }
             // Dropping in from the free view is a jump, not something to glide through
-            if was_free && tick_input.observer.is_none() {
-                prev_feet = sim.players[me].player.pos;
+            if pview.was_free && tick_input.observer.is_none() {
+                pview.prev_feet = sim.players[me].player.pos;
             }
-            was_free = tick_input.observer.is_some();
+            pview.was_free = tick_input.observer.is_some();
             shown = tick_input;
             // A key press counts once
             (input.use_key, input.reload, input.gun, input.grenade, input.toggle_culling) = (false, false, false, false, false);
@@ -573,12 +546,12 @@ fn main() {
         // The view is at the player's eyes, between where they were a tick ago and now
         let draw_feet = if toggles.first_person {
             let alpha = if timing.fixed_step { 1.0 } else { (timing.tick_budget / sim::TICK).clamp(0.0, 1.0) };
-            let (a, b) = (prev_feet, sim.players[me].player.pos);
+            let (a, b) = (pview.prev_feet, sim.players[me].player.pos);
             let feet = [a[0] * (1.0 - alpha) + b[0] * alpha, a[1] * (1.0 - alpha) + b[1] * alpha, a[2] * (1.0 - alpha) + b[2] * alpha];
             let eye_target = if sim.players[me].player.crouched { crouch_eye_height } else { eye_height };
-            eye_now += (eye_target - eye_now) * (1.0 - (-step_dt * 15.0).exp());
+            pview.eye_now += (eye_target - pview.eye_now) * (1.0 - (-step_dt * 15.0).exp());
             let peek = sim.peek_offset(me);
-            camera.position = [feet[0] + peek[0], feet[1] + eye_now + peek[1], -(feet[2] + peek[2])];
+            pview.camera.position = [feet[0] + peek[0], feet[1] + pview.eye_now + peek[1], -(feet[2] + peek[2])];
             feet
         } else {
             sim.players[me].player.pos
@@ -599,28 +572,28 @@ fn main() {
         // back the way it was when the player comes back
         match session.net.as_ref().and_then(|_| sim.players[me].respawn_at) {
             Some(until) if toggles.first_person => {
-                let (yaw0, pitch0) = *alive_look.get_or_insert((camera.yaw, camera.pitch));
+                let (yaw0, pitch0) = *pview.alive_look.get_or_insert((pview.camera.yaw, pview.camera.pitch));
                 let fall = ((game_time - (until - sim::RESPAWN_SECONDS)) / 0.6).clamp(0.0, 1.0);
-                camera.position[1] -= (eye_now - 25.0) * fall * fall * (3.0 - 2.0 * fall);
-                let (want_yaw, want_pitch) = match killed_by.flatten().filter(|&k| k != me && sim.players[k].active) {
+                pview.camera.position[1] -= (pview.eye_now - 25.0) * fall * fall * (3.0 - 2.0 * fall);
+                let (want_yaw, want_pitch) = match pview.killed_by.flatten().filter(|&k| k != me && sim.players[k].active) {
                     Some(k) => {
                         let t = sim.players[k].player.pos;
-                        let d = [t[0] - camera.position[0], t[1] + 100.0 - camera.position[1], -t[2] - camera.position[2]];
+                        let d = [t[0] - pview.camera.position[0], t[1] + 100.0 - pview.camera.position[1], -t[2] - pview.camera.position[2]];
                         let flat = d[0].hypot(d[2]);
                         ((-d[0]).atan2(-d[2]).to_degrees(), d[1].atan2(flat).to_degrees())
                     }
                     None => (yaw0, pitch0),
                 };
                 let k = 1.0 - (-5.0 * step_dt).exp();
-                camera.yaw += ((want_yaw - camera.yaw + 540.0).rem_euclid(360.0) - 180.0) * k;
-                camera.pitch += (want_pitch - camera.pitch) * k;
+                pview.camera.yaw += ((want_yaw - pview.camera.yaw + 540.0).rem_euclid(360.0) - 180.0) * k;
+                pview.camera.pitch += (want_pitch - pview.camera.pitch) * k;
             }
             Some(_) => {}
             None => {
-                if let Some((yaw, pitch)) = alive_look.take() {
-                    (camera.yaw, camera.pitch) = (yaw, pitch);
+                if let Some((yaw, pitch)) = pview.alive_look.take() {
+                    (pview.camera.yaw, pview.camera.pitch) = (yaw, pitch);
                 }
-                killed_by = None;
+                pview.killed_by = None;
             }
         }
 
@@ -628,17 +601,17 @@ fn main() {
         let watch_pose = match (&session.net, &frame) {
             (Some((client, _)), Some(f)) => {
                 let cx = WatchContext { sim: &sim, frame: f, me, round: client.round, team_game, connected: client.status == Status::Connected };
-                watch.update(&cx);
-                if std::mem::take(&mut watch_next) {
-                    watch.next(&cx);
+                pview.watch.update(&cx);
+                if std::mem::take(&mut pview.watch_next) {
+                    pview.watch.next(&cx);
                 }
-                if std::mem::take(&mut watch_previous) {
-                    watch.previous(&cx);
+                if std::mem::take(&mut pview.watch_previous) {
+                    pview.watch.previous(&cx);
                 }
-                if std::mem::take(&mut watch_mode) {
-                    watch.toggle_mode();
+                if std::mem::take(&mut pview.watch_mode) {
+                    pview.watch.toggle_mode();
                 }
-                watch.camera(&cx)
+                pview.watch.camera(&cx)
             }
             _ => None,
         };
@@ -646,34 +619,34 @@ fn main() {
             Some(pose) => {
                 // Through their eyes the height eases as they crouch and stand, as the player's
                 // own does, and starts afresh with each one watched
-                let target = watch.target().filter(|_| watch.mode == WatchMode::Eyes);
-                let y = match watch_eye {
+                let target = pview.watch.target().filter(|_| pview.watch.mode == WatchMode::Eyes);
+                let y = match pview.watch_eye {
                     Some((t, y)) if t == target && target.is_some() => y + (pose.eye[1] - y) * (1.0 - (-step_dt * 15.0).exp()),
                     _ => pose.eye[1],
                 };
-                watch_eye = Some((target, y));
-                camera.position = [pose.eye[0], y, -pose.eye[2]];
-                (camera.yaw, camera.pitch) = (pose.yaw, pose.pitch);
+                pview.watch_eye = Some((target, y));
+                pview.camera.position = [pose.eye[0], y, -pose.eye[2]];
+                (pview.camera.yaw, pview.camera.pitch) = (pose.yaw, pose.pitch);
             }
-            None => watch_eye = None,
+            None => pview.watch_eye = None,
         }
-        let watched_body = watch.target().filter(|_| watch_pose.is_some() && watch.mode == WatchMode::Eyes);
+        let watched_body = pview.watch.target().filter(|_| watch_pose.is_some() && pview.watch.mode == WatchMode::Eyes);
         // Dead, the view is drawn from the rooms of whoever the camera is on, the one watched (or
         // last watched, while their view is held) or the player's own body, where they stand
-        let (on, camera_feet) = watch_pose.and(watch.standing()).unwrap_or((me, sim.players[me].player.pos));
-        if camera_on != Some(on) {
-            (camera_on, camera_room) = (Some(on), None);
+        let (on, camera_feet) = watch_pose.and(pview.watch.standing()).unwrap_or((me, sim.players[me].player.pos));
+        if pview.camera_on != Some(on) {
+            (pview.camera_on, pview.camera_room) = (Some(on), None);
         }
 
         // A blast leaves the view shaken and whited out, and the sound muffled, for a while
-        shake = (shake - 9.0 * step_dt).max(0.0);
-        veil = (veil - 5.0 * step_dt).max(0.0);
-        deaf = (deaf - 0.2 * step_dt).max(0.0);
-        concussion.update(step_dt);
+        pview.shake = (pview.shake - 9.0 * step_dt).max(0.0);
+        pview.veil = (pview.veil - 5.0 * step_dt).max(0.0);
+        pview.deaf = (pview.deaf - 0.2 * step_dt).max(0.0);
+        pview.concussion.update(step_dt);
         if let Some(snd) = audio.sound.as_mut() {
-            snd.master = audio.master_volume * (1.0 - 0.5 * deaf.min(1.0));
-            stun.1 += step_dt;
-            snd.set_muffle(sound::stunned_after(stun.0, stun.1));
+            snd.master = audio.master_volume * (1.0 - 0.5 * pview.deaf.min(1.0));
+            pview.stun.1 += step_dt;
+            snd.set_muffle(sound::stunned_after(pview.stun.0, pview.stun.1));
         }
 
         // What happened in the ticks: sounds to play, effects to draw, lines for the log
@@ -682,7 +655,7 @@ fn main() {
                 sim::Event::Sound { name, at, gain } => {
                     if let Some(snd) = audio.sound.as_mut() {
                         match at {
-                            Some(p) => snd.play_at(&name, p, listener_of(&camera), gain),
+                            Some(p) => snd.play_at(&name, p, listener_of(&pview.camera), gain),
                             None => snd.play(&name, gain),
                         }
                     }
@@ -697,14 +670,14 @@ fn main() {
                 }
                 sim::Event::Shot { player, hit_character, .. } => {
                     if player == me {
-                        hit_marker_until = if hit_character { game_time + 0.1 } else { 0.0 };
+                        pview.hit_marker_until = if hit_character { game_time + 0.1 } else { 0.0 };
                     }
                     // The gun's place is known only when it is drawn, so the casings wait for that
                     if player_ejector.is_some() && !overlay.gate.showing() {
                         *scene.casing_pending.borrow_mut().entry(player).or_default() += 1;
                     }
                     if let (Some((name, at)), Some(snd)) = (sim::shot_sound(&event, me), audio.sound.as_mut()) {
-                        snd.play_at(name, at, listener_of(&camera), 1.0);
+                        snd.play_at(name, at, listener_of(&pview.camera), 1.0);
                     }
                 }
                 // A character fired: its muzzle flashes, here as on the server
@@ -746,7 +719,7 @@ fn main() {
                             Surface::Earth => "C_BLEAR.WAV",
                             _ => "C_BLCON.WAV",
                         };
-                        snd.play_at(name, point, listener_of(&camera), 1.0);
+                        snd.play_at(name, point, listener_of(&pview.camera), 1.0);
                     }
                 }
                 sim::Event::Glass { pane, at, dir, seed } => {
@@ -778,23 +751,23 @@ fn main() {
                 }
                 // Not while watching: the view and the ears are elsewhere
                 sim::Event::PlayerBlast { player, shake: s, veil: v } if player == me && watch_pose.is_none() => {
-                    shake = shake.max(s);
-                    veil = veil.max(v);
+                    pview.shake = pview.shake.max(s);
+                    pview.veil = pview.veil.max(v);
                     // The blast knocks the head: where the player points jumps, and drops
-                    if let Some((turn, drop)) = concussion.hit(s, (game_time * 1000.0) as u64) {
-                        camera.yaw += turn;
-                        camera.pitch = (camera.pitch - drop).clamp(-89.0, 89.0);
+                    if let Some((turn, drop)) = pview.concussion.hit(s, (game_time * 1000.0) as u64) {
+                        pview.camera.yaw += turn;
+                        pview.camera.pitch = (pview.camera.pitch - drop).clamp(-89.0, 89.0);
                     }
                     if s > 0.1 {
-                        deaf = deaf.max(s.min(1.0));
+                        pview.deaf = pview.deaf.max(s.min(1.0));
                         if let Some(snd) = audio.sound.as_mut() {
                             snd.ring(3.5 * s.min(1.0) + 1.0, 0.2 * s.min(1.0));
                             snd.thump(s.min(1.0));
                             // Never less stunned than what is left of an earlier blast. It takes
                             // less of a blast to stun the ears than to shake the view.
                             let stunned = (s * 2.0).min(1.0);
-                            if stunned >= sound::stunned_after(stun.0, stun.1) {
-                                stun = (stunned, 0.0);
+                            if stunned >= sound::stunned_after(pview.stun.0, pview.stun.1) {
+                                pview.stun = (stunned, 0.0);
                             }
                         }
                     }
@@ -817,7 +790,7 @@ fn main() {
                         overlay.feed.remove(0);
                     }
                     if victim == me {
-                        killed_by = Some(killer);
+                        pview.killed_by = Some(killer);
                     }
                 }
                 // Said in the lobby or the round: in the chat, and in the feed for a while
@@ -852,29 +825,29 @@ fn main() {
             } else {
                 Movement::Idle
             };
-            if now != movement {
-                movement = now;
-                player_frame = 0.0;
+            if now != pview.movement {
+                pview.movement = now;
+                pview.player_frame = 0.0;
             }
-            player_hip_turn = hip_turn(shown.forward, shown.back, shown.left, shown.right);
+            pview.player_hip_turn = hip_turn(shown.forward, shown.back, shown.left, shown.right);
             let crouched = sim.players[me].player.crouched;
             let limp = sim.players[me].leg_wounds > 0;
-            let pace = animation_pace(movement, crouched, limp);
-            let rate = if matches!(movement, Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw) { 1.0 } else { (moved / (pace * args.speed_scale.unwrap_or(1.0))).clamp(0.5, 3.0) * args.anim_scale.unwrap_or(1.0) };
-            let frames = assets.player_motions.get(movement, crouched, limp).map_or(1, |m| m.frames.max(1)) as f32;
+            let pace = animation_pace(pview.movement, crouched, limp);
+            let rate = if matches!(pview.movement, Movement::Idle | Movement::Fire | Movement::Reload | Movement::Throw) { 1.0 } else { (moved / (pace * args.speed_scale.unwrap_or(1.0))).clamp(0.5, 3.0) * args.anim_scale.unwrap_or(1.0) };
+            let frames = assets.player_motions.get(pview.movement, crouched, limp).map_or(1, |m| m.frames.max(1)) as f32;
             // A reload's frame follows its progress, and is picked where the body is drawn
-            player_frame = if let (Movement::Throw, Some(th)) = (movement, sim.players[me].throw) {
+            pview.player_frame = if let (Movement::Throw, Some(th)) = (pview.movement, sim.players[me].throw) {
                 ((game_time - th.start) / sim::THROW_SECONDS).clamp(0.0, 1.0) * (frames - 1.0)
             } else {
-                (player_frame + rate * MOTION_FPS * dt) % frames
+                (pview.player_frame + rate * MOTION_FPS * dt) % frames
             };
             // A footstep at the start of each half of a walk or run cycle
-            let phase = (player_frame / (frames / 2.0).max(1.0)) as i32;
+            let phase = (pview.player_frame / (frames / 2.0).max(1.0)) as i32;
             if phase != audio.step_phase {
                 audio.step_phase = phase;
                 if walking && sim.players[me].player.on_ground {
                     if let Some(snd) = audio.sound.as_mut() {
-                        snd.play(if matches!(movement, Movement::Run | Movement::RunBack) { "F_HRCON1.WAV" } else { "F_HWCON1.WAV" }, 1.0);
+                        snd.play(if matches!(pview.movement, Movement::Run | Movement::RunBack) { "F_HRCON1.WAV" } else { "F_HWCON1.WAV" }, 1.0);
                     }
                 }
             }
@@ -903,8 +876,8 @@ fn main() {
 
         // Ambient sound for the rooms around the player's feet
         if let (Some(snd), Some(amb)) = (audio.sound.as_mut(), audio.ambience.as_mut()) {
-            let listener = listener_of(&camera);
-            let feet = [listener.pos[0], listener.pos[1] - eye_now, listener.pos[2]];
+            let listener = listener_of(&pview.camera);
+            let feet = [listener.pos[0], listener.pos[1] - pview.eye_now, listener.pos[2]];
             let rooms: Vec<&str> = level.rooms.rooms.iter()
                 .filter(|r| r.contains(feet, 50.0))
                 .map(|r| r.section_name.as_str())
@@ -956,9 +929,9 @@ fn main() {
             glMatrixMode(GL_MODELVIEW);
             glLoadIdentity();
             // A blast shakes the view: a quick tremble that dies away
-            if shake > 0.002 && watch_pose.is_none() {
+            if pview.shake > 0.002 && watch_pose.is_none() {
                 let t = game_time;
-                let s = shake.min(1.0);
+                let s = pview.shake.min(1.0);
                 glRotatef(5.0 * s * (t * 47.0).sin(), 0.0, 0.0, 1.0);
                 glTranslatef(9.0 * s * (t * 61.0 + 1.0).sin(), 7.0 * s * (t * 53.0 + 2.0).sin(), 0.0);
                 glRotatef(2.5 * s * (t * 39.0 + 3.0).sin(), 1.0, 0.0, 0.0);
@@ -967,12 +940,12 @@ fn main() {
             let view = if toggles.first_person && toggles.third_person && watch_pose.is_none() {
                 // Orbited round the player to see them from the side, if asked, and kept out
                 // of the walls as the camera behind a watched player is
-                let eye = [camera.position[0], camera.position[1], -camera.position[2]];
-                let from = Pose { eye, yaw: camera.yaw, pitch: (camera.pitch + toggles.orbit.1).clamp(-89.0, 89.0) };
+                let eye = [pview.camera.position[0], pview.camera.position[1], -pview.camera.position[2]];
+                let from = Pose { eye, yaw: pview.camera.yaw, pitch: (pview.camera.pitch + toggles.orbit.1).clamp(-89.0, 89.0) };
                 let p = behind(&sim, from, args.view_dist.unwrap_or(BEHIND), RISE, toggles.orbit.0);
                 Camera { position: [p.eye[0], p.eye[1], -p.eye[2]], yaw: p.yaw, pitch: p.pitch }
             } else {
-                Camera { position: camera.position, yaw: camera.yaw, pitch: camera.pitch }
+                Camera { position: pview.camera.position, yaw: pview.camera.yaw, pitch: pview.camera.pitch }
             };
             apply_camera(&view);
             glScalef(1.0, 1.0, -1.0);
@@ -989,8 +962,8 @@ fn main() {
             // Dead on a server, drawn from the rooms of whoever the camera is on: the player's own
             // rooms are not followed while they are dead
             let (cull_rooms, cull_body) = if session.net.is_some() && sim.players[me].respawn_at.is_some() {
-                let (rooms, room) = sim.standing_rooms(camera_feet, camera_room);
-                camera_room = room;
+                let (rooms, room) = sim.standing_rooms(camera_feet, pview.camera_room);
+                pview.camera_room = room;
                 (rooms, [[camera_feet[0], camera_feet[1] + 10.0, camera_feet[2]], cam_eye])
             } else {
                 (sim.players[me].render_rooms.clone(), sim.players[me].body)
@@ -1543,7 +1516,7 @@ fn main() {
                 let flash = player_flash[me];
                 if mine.respawn_at.is_none() {
                     let flinch = flinch_at(chars, mine, game_time);
-                    draw_body(chars, mine.side, movement, player_frame, draw_feet, -camera.yaw, scale, face, hand, mine.equipped_grenade, flash, me, mine.reloading(game_time), sim.firing(me), mine.player.crouched, mine.leg_wounds > 0, player_hip_turn, flinch, mine.peek, scene.bodies.entry(me).or_default());
+                    draw_body(chars, mine.side, pview.movement, pview.player_frame, draw_feet, -pview.camera.yaw, scale, face, hand, mine.equipped_grenade, flash, me, mine.reloading(game_time), sim.firing(me), mine.player.crouched, mine.leg_wounds > 0, pview.player_hip_turn, flinch, mine.peek, scene.bodies.entry(me).or_default());
                 }
             }
 
@@ -1674,7 +1647,7 @@ fn main() {
                 glDisable(GL_BLEND);
             }
             if !scene.effects.particles.is_empty() || !scene.effects.puffs.is_empty() {
-                let right = listener_of(&camera).right;
+                let right = listener_of(&pview.camera).right;
                 glEnable(GL_BLEND);
                 glDepthMask(0);
                 // Soft clouds and the flash of a spark, as sprites facing the camera
@@ -1745,7 +1718,7 @@ fn main() {
                         glEnd();
                         // Embers are small things in the world, not a number of pixels: a couple
                         // of units across, but never less than a pixel or so
-                        let eye = listener_of(&camera).pos; // in the map's space, like the embers
+                        let eye = listener_of(&pview.camera).pos; // in the map's space, like the embers
                         glBegin(GL_QUADS);
                         for pt in scene.effects.particles.iter().filter(|p| p.kind == impact::Kind::Ember) {
                             let away = ((pt.pos[0] - eye[0]).powi(2) + (pt.pos[1] - eye[1]).powi(2) + (pt.pos[2] - eye[2]).powi(2)).sqrt();
@@ -1808,7 +1781,7 @@ fn main() {
                     if let (Some(name), Some(snd)) = (weapon.and_then(|w| w.shell_sound.as_deref()), audio.sound.as_mut()) {
                         if game_time - *last >= SHELL_SOUND_GAP {
                             *last = game_time;
-                            snd.play_at(name, landing.at, listener_of(&camera), SHELL_SOUND_GAIN);
+                            snd.play_at(name, landing.at, listener_of(&pview.camera), SHELL_SOUND_GAIN);
                         }
                     }
                 }
@@ -2014,8 +1987,8 @@ fn main() {
                 status.insert(1, format!("DEATHS: {}", p.deaths));
             }
             // Watching, who it is and how they are, in place of the player's own
-            if watch.watching() {
-                status = vec![match watch.target() {
+            if pview.watch.watching() {
+                status = vec![match pview.watch.target() {
                     Some(t) => format!("WATCHING {}  HEALTH: {:.0}", session.net.as_ref().map_or_else(|| format!("PLAYER {}", t + 1), |(c, _)| c.name_of(t)), sim.players[t].hp.ceil()),
                     None if watch_pose.is_some() => "WATCHING".to_string(),
                     None => "NO ONE TO WATCH".to_string(),
@@ -2033,7 +2006,7 @@ fn main() {
             let winner = results.and_then(|r| r.rows.get(r.winner? as usize)).map(|row| row.name.as_str());
             let banner = round_banner(&round, game_time, winner);
             let msg = if game_time < sim.players[me].message.1 { sim.players[me].message.0.as_str() } else { banner.as_str() };
-            let marker = game_time < hit_marker_until;
+            let marker = game_time < pview.hit_marker_until;
             let lines: Vec<(String, [f32; 3])> = overlay.feed.iter().map(|(_, text, color)| (text.clone(), *color)).collect();
             let dead = session.net.is_some() && sim.players[me].respawn_at.is_some();
             let meter = session.net.as_ref().filter(|_| toggles.lag_meter).map(|(client, _)| (&client.meter, session.net_clock.elapsed().as_secs_f64()));
@@ -2042,7 +2015,7 @@ fn main() {
             let spread = if p.equipped_grenade { 0.0 } else { p.aim.angle.tan() / half_view_tan() * h as f32 / 2.0 };
             // Watching, none of the player's own: no crosshair, red, whiteout or daze
             let own = watch_pose.is_none();
-            let (veil, daze) = if own { (veil, concussion.daze()) } else { (0.0, 0.0) };
+            let (veil, daze) = if own { (pview.veil, pview.concussion.daze()) } else { (0.0, 0.0) };
             draw_hud(w, h, &status, msg, marker && own, spread, veil, daze, &lines, dead && own, own, meter);
         }
         let rooms_text = if sim.culling {
@@ -2124,15 +2097,15 @@ fn main() {
             });
             let (fw, fh) = window.get_framebuffer_size();
             let rgb = read_framebuffer(fw, fh);
-            let eye = [camera.position[0], camera.position[1], -camera.position[2]];
-            let f = camera.get_forward();
+            let eye = [pview.camera.position[0], pview.camera.position[1], -pview.camera.position[2]];
+            let f = pview.camera.get_forward();
             let dir = [f[0], f[1], -f[2]];
             let hit = sim.world.raycast_hit(eye, dir, 20000.0).map(|hit| {
                 let point = [eye[0] + dir[0] * hit.dist, eye[1] + dir[1] * hit.dist, eye[2] + dir[2] * hit.dist];
                 let material = hit.material.and_then(|m| level.materials.materials.get(m)).map_or("?", |m| m.filename.as_str());
                 (hit, point, material)
             });
-            let feet = [eye[0], eye[1] - if toggles.first_person { eye_now } else { 0.0 }, eye[2]];
+            let feet = [eye[0], eye[1] - if toggles.first_person { pview.eye_now } else { 0.0 }, eye[2]];
             let nearby_doors: Vec<String> = sim.doors.iter().zip(&sim.door_states)
                 .filter_map(|(d, s)| {
                     let c = d.center(s.open);
@@ -2147,7 +2120,7 @@ fn main() {
                 bits
             };
             let report = DebugReport {
-                map_path: &session.map_path, map_num: &session.map_num, level: &level, eye, feet, yaw: camera.yaw, pitch: camera.pitch, dir,
+                map_path: &session.map_path, map_num: &session.map_num, level: &level, eye, feet, yaw: pview.camera.yaw, pitch: pview.camera.pitch, dir,
                 hit, first_person: toggles.first_person, third_person: toggles.third_person, textured: toggles.textured, room_debug: toggles.room_debug, show_portals: toggles.show_portals, show_collisions: toggles.show_collisions, sprite_mode: toggles.sprite_mode, depth_bits,
                 fps, render_ms, culling: sim.culling, portal_paths: args.portal_paths, room: current_rooms.first().copied(), drawn: &drawn_rooms, collision: &sim.players[me].collision_rooms, player_rooms: &sim.players[me].player_rooms, render_rooms: &sim.players[me].render_rooms, doors: &nearby_doors,
                 terrorists: &sim.terrorist_report(me), log: overlay.recent_log.make_contiguous(),
