@@ -43,6 +43,7 @@ use rogue_reborn::body;
 use rogue_reborn::lighting::{CharacterLight, Lighting};
 use rogue_reborn::visibility::Visibility;
 use crate::render::assets::{Assets, Uniform, SCORCH_VARIANTS, HOLE_VARIANTS};
+use crate::render::level::LevelDraw;
 use crate::render::draw::{WeaponDraw, CharacterArrays, draw_weapon, FlashSpot, Flashes, draw_flash, draw_flash_here, draw_character, draw_glass, draw_fracture, level_radius, Which, draw_plan, wipe_opening, room_color};
 use crate::hud::{draw_hud, draw_debug_text};
 use crate::debug::{DebugReport, write_debug_dump};
@@ -75,19 +76,6 @@ const RECENT_LOG: usize = 60;
 /// camera so that it wins against the surface it lies on. A shadow a fraction of a unit off its
 /// wall flickered with no offset, so the first mode, which has one, is the default.
 pub const SPRITE_MODES: [&str; 3] = ["writes depth, offset toward the camera", "writes depth", "no depth writes"];
-
-/// How a material's soft sprite is blended over the level, if it is one: `Some(true)` adds
-/// (a light, whose material glows), `Some(false)` blends (a shadow, a stain). Other .tga
-/// materials are cut out with an alpha test instead: foliage (two-sided), and sprites whose
-/// pixels are nearly all solid or clear (a wheel's face), which blending would only soften
-/// at the edges. Glass panes are drawn apart.
-fn sprite_blend(m: &map::Material, map_num: &str) -> Option<bool> {
-    if !textures::is_tga(&m.filename) || m.two_sided {
-        return None;
-    }
-    let glows = m.emissive_strength > 0.0;
-    (glows || textures::has_soft_alpha(map_num, &m.filename)).then_some(glows)
-}
 
 /// The light of the room at `room_at`, weighed at `weigh_at`, in the level's space
 fn room_light(lighting: &Lighting, level: &map::Map, visibility: &Visibility, room_at: [f32; 3], weigh_at: [f32; 3]) -> CharacterLight {
@@ -594,24 +582,7 @@ fn main() {
     let mut clip: Option<(std::time::Instant, String, u32)> = None;
     // F3 closes the window and starts the viewer again with the same options
     let mut reload = false;
-    // Which objects are glass panes (drawn in place), and every object's index
-    // Faces lying over others in the same plane (a door frame on its wall) get drawn on top
-    let coplanar_layers: Vec<rogue_reborn::coplanar::Layers> = level.geometries.objects.iter().map(rogue_reborn::coplanar::layers).collect();
-    let pane_objects: Vec<bool> = level.geometries.objects.iter().map(|o| sim.panes.iter().any(|g| g.name == o.name)).collect();
-    let sprite_blends: Vec<Option<bool>> = level.materials.materials.iter().map(|m| sprite_blend(m, &map_num)).collect();
-    // Lamps and the like are drawn as lit as they are, whatever light falls on them
-    let glowing: Vec<bool> = level.materials.materials.iter().map(|m| m.emissive_strength > 0.0).collect();
-    let all_objects: Vec<usize> = (0..level.geometries.objects.len()).collect();
-    // Doors: each leaf is drawn where its door is. Space or Backspace opens and closes the
-    // one being looked at.
-    let door_leaf: Vec<bool> = (0..level.geometries.objects.len()).map(|i| sim.doors.iter().any(|d| d.model_index == i)).collect();
-    let mut doors_by_room: HashMap<u32, Vec<usize>> = HashMap::new();
-    for (i, d) in sim.doors.iter().enumerate() {
-        for &r in &d.rooms {
-            doors_by_room.entry(r).or_default().push(i);
-        }
-    }
-    let all_doors: Vec<usize> = (0..sim.doors.len()).collect();
+    let level_draw = LevelDraw::new(&level, &sim, &map_num);
     // Keys pressed since the sim last ticked, which counts once
     let (mut use_pressed, mut reload_pressed, mut gun_pressed, mut grenade_pressed, mut culling_pressed) = (false, false, false, false, false);
     // A scripted run, or a replay, takes one tick a frame instead of keeping time
@@ -1529,15 +1500,15 @@ fn main() {
                 let mut draw_objects = |which: Which, planes: &[[f32; 4]]| {
                     set_clip_planes(planes);
                     let indices: &[usize] = match which {
-                        Which::All => &all_objects,
+                        Which::All => &level_draw.all_objects,
                         Which::Room(n) => sim.visibility.objects_of(n),
                         Which::Unowned => sim.visibility.unowned_objects(),
                     };
                     // The doors of these rooms are drawn along with them, each leaf where
                     // its door is
                     let room_doors: &[usize] = match which {
-                        Which::All => &all_doors,
-                        Which::Room(n) => doors_by_room.get(&n).map(Vec::as_slice).unwrap_or_default(),
+                        Which::All => &level_draw.all_doors,
+                        Which::Room(n) => level_draw.doors_by_room.get(&n).map(Vec::as_slice).unwrap_or_default(),
                         Which::Unowned => &[],
                     };
                     let items: Vec<(usize, Option<usize>)> = indices.iter().map(|&i| (i, None)).chain(room_doors.iter().map(|&d| (sim.doors[d].model_index, Some(d)))).collect();
@@ -1546,7 +1517,7 @@ fn main() {
                     for &(object_index, door) in &items {
                         let object = &level.geometries.objects[object_index];
                         // Panes are drawn in place below, and door leaves with their doors
-                        if pane_objects[object_index] || (door_leaf[object_index] && door.is_none()) {
+                        if level_draw.pane_objects[object_index] || (level_draw.door_leaf[object_index] && door.is_none()) {
                             continue;
                         }
                         let room = sim.visibility.room_of_object(object_index);
@@ -1563,7 +1534,7 @@ fn main() {
                         }
                     for (od_index, od) in object.object_datas.iter().enumerate() {
                         let mat_index = od.material as usize;
-                        let blend = if textured { sprite_blends.get(mat_index).copied().flatten() } else { None };
+                        let blend = if textured { level_draw.sprite_blends.get(mat_index).copied().flatten() } else { None };
                         if blend.is_some() != (pass == 1) {
                             continue;
                         }
@@ -1618,14 +1589,14 @@ fn main() {
                             }
 
                             // Each face corner's light, baked at load; soft sprites and lamps are not lit
-                            let shades = baked.as_ref().filter(|_| textured && !room_debug && blend.is_none() && !glowing.get(mat_index).copied().unwrap_or(false))
+                            let shades = baked.as_ref().filter(|_| textured && !room_debug && blend.is_none() && !level_draw.glowing.get(mat_index).copied().unwrap_or(false))
                                 .map(|b| &b.colors[object_index][od_index]);
                             if shades.is_none() && textured && !room_debug {
                                 glColor3f(1.0, 1.0, 1.0);
                             }
 
                             // Faces over others in their plane come after, each layer nearer
-                            let layers = &coplanar_layers[object_index];
+                            let layers = &level_draw.coplanar_layers[object_index];
                             for layer in 0..=layers.max {
                             // Most groups have faces in only one of their object's layers
                             if !layers.per_face[od_index][..face_count].contains(&layer) {
