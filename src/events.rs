@@ -51,7 +51,7 @@ pub fn handle_events(events: Vec<sim::Event>, pass: EventPass, sim: &mut sim::Si
                 }
                 // The gun's place is known only when it is drawn, so the casings wait for that
                 if player_ejector.is_some() && !overlay.gate.showing() {
-                    *scene.casing_pending.borrow_mut().entry(player).or_default() += 1;
+                    *scene.casing_pending.entry(player).or_default() += 1;
                 }
                 if let (Some((name, at)), Some(snd)) = (sim::shot_sound(&event, me), audio.sound.as_mut()) {
                     snd.play_at(name, at, listener_of(&pview.camera), 1.0);
@@ -62,7 +62,7 @@ pub fn handle_events(events: Vec<sim::Event>, pass: EventPass, sim: &mut sim::Si
                 if let Some(n) = sim.npcs.get_mut(npc) {
                     n.last_shot = game_time;
                     if n.weapon.and_then(|w| assets.held_ejectors.get(w)).is_some_and(Option::is_some) && !overlay.gate.showing() {
-                        *scene.casing_pending.borrow_mut().entry(NPC_OWNERS + npc).or_default() += 1;
+                        *scene.casing_pending.entry(NPC_OWNERS + npc).or_default() += 1;
                     }
                 }
             }

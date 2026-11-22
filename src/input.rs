@@ -34,7 +34,7 @@ pub fn poll_window(pass: InputPass, glfw: &mut glfw::Glfw, events: &glfw::GlfwRe
         overlay.last_cursor_pos = None;
         window.set_cursor_mode(if showing { CursorMode::Normal } else { CursorMode::Disabled });
         scene.casings.clear();
-        scene.casing_pending.borrow_mut().clear();
+        scene.casing_pending.clear();
     }
 
     for (_, event) in glfw::flush_messages(events) {

@@ -22,21 +22,15 @@ use std::collections::HashMap;
 use std::time::Instant;
 use glfw::{Context, CursorMode};
 use rogue_reborn::motion::MOTION_FPS;
-use rogue_reborn::{map, combat, crp, grenade, sim, glass, casings};
-use rogue_reborn::net::client::{Seen, Status};
-use rogue_reborn::net::animation::Doing;
-use rogue_reborn::sim::characters::{Characters, Npc, Rig};
-use rogue_reborn::sim::movement::{Movement, Reloading, animation_pace, hip_turn, movement_from_keys};
+use rogue_reborn::{map, grenade, sim, glass, casings};
+use rogue_reborn::net::client::Status;
+use rogue_reborn::sim::movement::{Movement, animation_pace, hip_turn, movement_from_keys};
 use rogue_reborn::impact;
 use crate::opengl::*;
 use crate::args::parse_args;
 use crate::camera::listener_of;
 use rogue_reborn::util::unit3;
-use crate::player::{BodyKey, BodyState};
-use rogue_reborn::body;
-use rogue_reborn::lighting::{CharacterLight, Lighting};
-use rogue_reborn::visibility::Visibility;
-use crate::render::assets::Uniform;
+use crate::render::characters::{CharacterPass, FrameOutput, draw_characters, standing_light};
 use crate::render::level::LevelDraw;
 use crate::render::world::{WorldPass, draw_world};
 use crate::render::window;
@@ -50,7 +44,7 @@ use crate::scene::{NPC_OWNERS, Scene};
 use crate::session::{Game, Session};
 use crate::view::{PlayerView, ViewPass, Watched};
 use crate::state::{Pressed, Timing, Toggles};
-use crate::render::draw::{WeaponDraw, CharacterArrays, draw_weapon, FlashSpot, draw_flash, draw_flash_here, draw_character, draw_glass, draw_fracture, level_radius};
+use crate::render::draw::{draw_weapon, FlashSpot, draw_flash, draw_flash_here, draw_glass, draw_fracture, level_radius};
 
 // The first-person view's height in degrees. The width follows the screen shape.
 const VIEW_HIGH: f32 = 90.0;
@@ -69,27 +63,6 @@ const SHELL_SOUND_GAIN: f32 = 0.5;
 /// camera so that it wins against the surface it lies on. A shadow a fraction of a unit off its
 /// wall flickered with no offset, so the first mode, which has one, is the default.
 pub const SPRITE_MODES: [&str; 3] = ["writes depth, offset toward the camera", "writes depth", "no depth writes"];
-
-/// The light of the room at `room_at`, weighed at `weigh_at`, in the level's space
-fn room_light(lighting: &Lighting, level: &map::Map, visibility: &Visibility, room_at: [f32; 3], weigh_at: [f32; 3]) -> CharacterLight {
-    let room = level.rooms.locate(room_at, None).and_then(|i| visibility.number_of(i));
-    lighting.character(room, weigh_at)
-}
-
-/// The light on a character standing at `feet`: its room is found just above the floor, and
-/// the light is weighed at the chest
-fn standing_light(lighting: &Lighting, level: &map::Map, visibility: &Visibility, feet: [f32; 3]) -> CharacterLight {
-    room_light(lighting, level, visibility, [feet[0], feet[1] + 10.0, feet[2]], [feet[0], feet[1] + 100.0, feet[2]])
-}
-
-/// What a player on `side` is drawn with: their side's uniform, or else the players' model
-fn dress<'a>(side: Option<sim::Side>, sides: &'a [Option<Uniform>], model: &'a crp::Crp, arrays: &'a CharacterArrays,
-             textures: &'a [Option<u32>], skin: Option<&'a crp::Skin>) -> (&'a crp::Crp, &'a CharacterArrays, &'a [Option<u32>], Option<&'a crp::Skin>) {
-    match side.and_then(|s| sides.get(s.index())).and_then(Option::as_ref) {
-        Some(u) => (&u.model, &u.arrays, &u.textures, Some(&u.skin)),
-        None => (model, arrays, textures, skin),
-    }
-}
 
 fn main() {
     let mut args = parse_args();
@@ -120,13 +93,7 @@ fn main() {
     let mut timing = Timing::new(args.walk.is_some() || (session.playback.is_some() && args.screenshot.is_some()), last_step);
     let team_game = session.joined.as_ref().is_some_and(|s| s.bases.iter().all(|b| !b.is_empty()));
     let player_ejector = assets.weapon_def.as_ref().and_then(casings::Ejector::of);
-    let flash_rng = std::cell::Cell::new(0x9E37_79B9_7F4A_7C15u64);
-    let flash_roll = || {
-        let mut r = flash_rng.get();
-        let x = rogue_reborn::util::next_rng(&mut r);
-        flash_rng.set(r);
-        (x >> 40) as f32 / (1u64 << 24) as f32
-    };
+    let mut out = FrameOutput::new();
     let base_speed = 7.5;
 
     while !window.should_close() {
@@ -270,368 +237,9 @@ fn main() {
         let world = WorldPass { args: &args, level: &level, sim: &sim, session: &session, level_draw: &level_draw, me, game_time, aspect, z_near, z_far, watch_pose, camera_feet, current_rooms: &current_rooms };
         let drawn = draw_world(world, &toggles, &mut pview, &mut textures);
         unsafe {
-            let view = frame.clone();
-
+            let characters = CharacterPass { args: &args, assets: &assets, level: &level, sim: &sim, session: &session, toggles: &toggles, timing: &timing, drawn: &drawn, frame: frame.as_ref(), me, game_time, step_dt, npc_actor: &npc_actor, player_flash: &player_flash, npc_flash: &npc_flash, watched_body, draw_feet, player_ejector: player_ejector.as_ref() };
+            draw_characters(&characters, &pview, &mut scene, &mut out);
             let shown = |feet: [f32; 3]| drawn.shows(&sim, &level, feet);
-
-            // The light of a blast on a character standing at `feet`: nothing when there is none
-            let glow_on = |feet: [f32; 3]| -> [f32; 3] {
-                let mut sum = [0.0f32; 3];
-                let chest = [feet[0], feet[1] + 100.0, feet[2]];
-                let blocked = |from: [f32; 3], to: [f32; 3]| {
-                    let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
-                    let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-                    dist > 10.0 && sim.world.raycast(from, [d[0] / dist, d[1] / dist, d[2] / dist], dist - 10.0).is_some()
-                };
-                for l in &scene.blast_lights {
-                    let g = l.glow_at(chest, &blocked);
-                    for k in 0..3 {
-                        sum[k] += g[k];
-                    }
-                }
-                sum
-            };
-
-            // The level's light on a character standing at `feet`, turned `yaw` and scaled, in its own
-            // space: its room's ambient light and strongest lights. None with --flat-light.
-            let lit_at = |feet: [f32; 3], yaw: f32, scale: [f32; 3]| -> Option<CharacterLight> {
-                Some(standing_light(session.lighting.as_ref()?, &level, &sim.visibility, feet).local(feet, yaw, scale))
-            };
-            // A flashing gun lights its shooter. With no falloff only the direction matters, so the
-            // light sits ahead of the chest, at gun height, in the character's own space.
-            let flashing = |lit: Option<CharacterLight>, on: bool| lit.map(|l| if on { l.with_muzzle([0.0, 100.0, 60.0]) } else { l });
-            let tint = |lit: &Option<CharacterLight>| lit.as_ref().map_or([1.0; 3], |l| l.tint);
-
-            let note_flash = |wd: &WeaponDraw| scene.flash_spots.borrow_mut().push(FlashSpot::here(wd, flash_roll()));
-            let note_casings = |owner: usize, ejector: &casings::Ejector| {
-                if scene.casing_pending.borrow().contains_key(&owner) {
-                    let mut matrix = [0f32; 16];
-                    glGetFloatv(GL_MODELVIEW_MATRIX, matrix.as_mut_ptr());
-                    scene.casing_spots.borrow_mut().push((owner, *ejector, matrix));
-                }
-            };
-
-            // Characters at the spawn points, posed for what they are doing
-            if let Some(chars) = &sim.characters {
-                let c = &chars.model;
-                glDisable(GL_TEXTURE_2D);
-                let clock = if timing.fixed_step { game_time as f32 } else { timing.start_time.elapsed().as_secs_f32() };
-                for (i, spot) in sim.npcs.iter().enumerate() {
-                    let mut moved;
-                    let spot = match view.as_ref().and_then(|v| v.npcs.get(i)) {
-                        Some(&(pos, yaw)) => {
-                            moved = spot.clone();
-                            (moved.pos[0], moved.pos[2], moved.yaw) = (pos[0], pos[2], yaw);
-                            &moved
-                        }
-                        None => spot,
-                    };
-                    if !shown([spot.pos[0], spot.floor, spot.pos[2]]) {
-                        continue;
-                    }
-                    let idle = args.anim_frame.unwrap_or_else(|| game_time * args.anim_fps.unwrap_or(30.0) + spot.stagger * 9.0);
-                    let (model, arrays, textures) = match spot.body.and_then(|b| chars.bodies.get(b).zip(assets.body_draws.get(b))) {
-                        Some((b, (arrays, textures))) => (&b.model, arrays, textures.as_slice()),
-                        None => (c, &assets.character_arrays, assets.part_textures.as_slice()),
-                    };
-                    let bones = chars.bones(spot, game_time, idle);
-                    let (posed, turns) = match (&bones, chars.body(spot).1) {
-                        (Some(bones), Some(rig)) => (rig.skin.apply(bones), rig.skin.turns(bones)),
-                        (None, Some(_)) => (model.vertices.clone(), Vec::new()),
-                        (_, None) => (Vec::new(), Vec::new()),
-                    };
-                    let verts: &[[f32; 3]] = if posed.is_empty() { &model.vertices } else { &posed };
-                    let y = if posed.is_empty() { spot.pos[1] } else { spot.floor };
-                    glPushMatrix();
-                    glTranslatef(spot.pos[0], y, spot.pos[2]);
-                    glRotatef(spot.yaw, 0.0, 1.0, 0.0);
-                    glScalef(spot.scale[0], spot.scale[1], spot.scale[2]);
-                    // Eyes shut for 0.15 s every 4 s, staggered per model; the dead keep them shut
-                    let blinking = args.eyes_closed || spot.health.is_dead()
-                        || (toggles.blink_enabled && (clock + spot.stagger) % 4.0 < 0.15);
-                    let face = npc_actor[i].map(|a| assets.face_textures[a]).and_then(|(main, blink)| {
-                        if blinking { blink.or(main) } else { main }
-                    });
-                    let held = spot.weapon.and_then(|w| assets.held_draws.get(w)).and_then(Option::as_ref);
-                    let glowing = npc_flash.get(i).copied().unwrap_or(false) && held.is_some_and(|w| w.flash_scale > 0.0) && !spot.health.is_dead();
-                    let lit = flashing(lit_at([spot.pos[0], y, spot.pos[2]], spot.yaw, spot.scale), glowing);
-                    draw_character(model, arrays, verts, &turns, textures, face, toggles.textured, glow_on([spot.pos[0], y, spot.pos[2]]), lit.as_ref());
-                    // Their weapon in the right hand, as the players hold theirs, or on the
-                    // floor once they have dropped it dying
-                    if let (Some(bones), Some(wd), Some((hand, off))) = (&bones, held, &assets.weapon_attach) {
-                        glPushMatrix();
-                        let lying = match chars.dropped_weapon(spot, game_time, *hand, off) {
-                            Some(lying) => {
-                                glMultMatrixf(lying.as_ptr());
-                                true
-                            }
-                            None => {
-                                glMultMatrixf(bones[*hand].matrix().as_ptr());
-                                glMultMatrixf(off.matrix().as_ptr());
-                                false
-                            }
-                        };
-                        draw_weapon(wd, toggles.textured, tint(&lit));
-                        if !lying && npc_flash.get(i).copied().unwrap_or(false) {
-                            note_flash(wd);
-                        }
-                        if let (false, Some(e)) = (lying, spot.weapon.and_then(|w| assets.held_ejectors.get(w)).and_then(Option::as_ref)) {
-                            note_casings(NPC_OWNERS + i, e);
-                        }
-                        glPopMatrix();
-                    }
-                    glPopMatrix();
-                }
-                glColor4f(1.0, 1.0, 1.0, 1.0);
-            }
-
-            // How a posed body is drawn, for the other players and for the player's own
-            // `reloading` is the reload they are in the middle of, if any: its motion and frame
-            // follow its progress, on the beats of its sound. `firing` says the gun is firing,
-            // which the arms show whatever the legs do. `crouched` kneels the body for what is
-            // done in place, and a change of stance plays crouching down or standing up. `flinch`
-            // is a wound's flinch, its frame and when it began. It takes the whole body standing
-            // in place and the upper body walking. `hip_turn` is how far the hips would turn
-            // toward a side step (see `movement::hip_turn`). `peek` takes the whole body while it
-            // lasts.
-            // `body` is what the drawing remembers of this body from frame to frame.
-            let draw_body = |chars: &Characters, side: Option<sim::Side>, movement: Movement, frame: f32, feet: [f32; 3], yaw_deg: f32, scale: [f32; 3],
-                             face: Option<u32>, hand: Option<&Option<WeaponDraw>>, grenade: bool, flash: bool, owner: usize, reloading: Option<Reloading>,
-                             firing: bool, crouched: bool, limp: bool, hip_turn: f32, flinch: Option<(&rogue_reborn::motion::Motion, f32, f32)>,
-                             peek: Option<rogue_reborn::sim::peek::Peek>, body: &mut BodyState| -> bool {
-                let Some(Rig { skeleton: skel, skin }) = &chars.rig else { return false };
-                let moving = assets.player_motions.moving(movement, peek, flinch.is_some());
-                // Crouching down or standing up plays in place, at its own pace; moving cuts it short
-                let since = body.since_stance_change(crouched, game_time);
-                let changing = since.filter(|_| !moving)
-                    .and_then(|t| assets.player_motions.stance_change(crouched).map(|m| (m, t * 30.0)))
-                    .filter(|(m, f)| *f < m.frames.saturating_sub(1) as f32);
-                // Standing in place, the feet step round once the body has turned far enough
-                let shuffle = body.shuffle(yaw_deg, !moving && changing.is_none(), game_time)
-                    .and_then(|at| assets.player_motions.turn(crouched).map(|m| (m, (game_time - at) * 30.0, at)))
-                    .filter(|(m, f, _)| *f < m.frames.saturating_sub(1) as f32);
-                let turn = body.turn_hips(if moving { hip_turn } else { 0.0 }, game_time);
-                let doing = body::Doing {
-                    movement, frame, crouched, limp, reloading, firing, flinch: flinch.map(|(m, f, _)| (m, f)), peek, hip_turn: turn,
-                    changing, shuffle: shuffle.map(|(m, f, _)| (m, f)), clock: game_time,
-                };
-                let Some(body::Pose { mut root, rotations: mut rots, aiming, peeking, shuffling }) = body::pose(&assets.player_motions, skel, &doing) else { return false };
-                // Raising the gun to fire is a cut, as in the original, so the first shots never
-                // leave a gun still on its way up. Once firing, the legs still ease.
-                let raising = aiming && !body.fade.key().is_some_and(|k| k.aiming);
-                let ease = if raising { 0.0 } else { rogue_reborn::motion::CROSSFADE_SECONDS };
-                let key = BodyKey { movement, reload: reloading.map(|r| r.empty), aiming, crouched, changing: changing.is_some(), flinch: flinch.map(|f| f.2.to_bits()), shuffle: shuffle.filter(|_| shuffling).map(|s| s.2.to_bits()), peek: peeking };
-                body.fade.apply(key, game_time, ease, &mut root, &mut rots);
-                let pose = skel.pose([0.0, root[1], 0.0], &rots);
-                let (model, arrays, textures, worn) = dress(side, &assets.side_dress, &chars.model, &assets.character_arrays, &assets.part_textures, Some(skin));
-                let verts = worn.unwrap_or(skin).apply(&pose);
-                let turns = worn.unwrap_or(skin).turns(&pose);
-                glPushMatrix();
-                glTranslatef(feet[0], feet[1], feet[2]);
-                // The body faces where the player looks (model forward is +Z)
-                glRotatef(yaw_deg, 0.0, 1.0, 0.0);
-                glScalef(scale[0], scale[1], scale[2]);
-                let glowing = flash && hand.and_then(Option::as_ref).is_some_and(|w| w.flash_scale > 0.0);
-                let lit = flashing(lit_at(feet, yaw_deg, scale), glowing);
-                draw_character(model, arrays, &verts, &turns, textures, face, toggles.textured, glow_on(feet), lit.as_ref());
-                // What bullets hit (B): the players' model posed alike, whatever the uniform,
-                // outlined over it
-                if toggles.show_hitboxes {
-                    let verts = skin.apply(&pose);
-                    glDisable(GL_TEXTURE_2D);
-                    glDisable(GL_DEPTH_TEST);
-                    glColor3f(1.0, 0.85, 0.0);
-                    glBegin(GL_LINES);
-                    for t in chars.model.parts.iter().flat_map(|p| &p.triangles) {
-                        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
-                            let (a, b) = (verts[a as usize], verts[b as usize]);
-                            glVertex3f(a[0], a[1], a[2]);
-                            glVertex3f(b[0], b[1], b[2]);
-                        }
-                    }
-                    glEnd();
-                    glEnable(GL_DEPTH_TEST);
-                    glColor4f(1.0, 1.0, 1.0, 1.0);
-                }
-
-                // The MP5K in the right hand, or a grenade until it is thrown
-                if let (Some(Some(wd)), Some((hand, off))) = (hand, &assets.weapon_attach) {
-                    glPushMatrix();
-                    glMultMatrixf(pose[*hand].matrix().as_ptr());
-                    glMultMatrixf(off.matrix().as_ptr());
-                    if grenade {
-                        glTranslatef(-wd.center[0], -wd.center[1], -wd.center[2]);
-                    }
-                    draw_weapon(wd, toggles.textured, tint(&lit));
-                    if flash {
-                        note_flash(wd);
-                    }
-                    if let (false, Some(e)) = (grenade, player_ejector.as_ref()) {
-                        note_casings(owner, e);
-                    }
-                    glPopMatrix();
-                }
-                glPopMatrix();
-                glColor4f(1.0, 1.0, 1.0, 1.0);
-                true
-            };
-
-            // The flinch a living player's latest wound plays at `now`, while it lasts
-            fn flinch_at<'a>(chars: &'a Characters, p: &rogue_reborn::sim::PlayerState, now: f32) -> Option<(&'a rogue_reborn::motion::Motion, f32, f32)> {
-                let hit = p.hit.filter(|_| p.respawn_at.is_none())?;
-                let m = chars.motions.get(hit.motion)?;
-                let frame = (now - hit.start) * 30.0;
-                (0.0..m.frames as f32).contains(&frame).then_some((m, frame, hit.start))
-            }
-
-            // The other players on the server, moving and handling their weapons as they are seen to
-            if let Some(chars) = &sim.characters {
-                glDisable(GL_TEXTURE_2D);
-                let others = view.as_ref().map_or(&[][..], |v| &v.players[..]);
-                // Alive or dead as the view has them, at the moment it shows, not as the newest snapshot says
-                let view_time = view.as_ref().map_or(game_time, |v| v.time);
-                // Not the one watched, through whose eyes the view is
-                for &Seen { slot, feet: pos, look, dead, crouched, peek, .. } in others.iter().filter(|s| s.slot != me && Some(s.slot) != watched_body) {
-                    let visible = shown(pos);
-                    let p = &sim.players[slot];
-                    let yaw = sim::dequantize(look.0);
-                    let face = (!assets.actors.is_empty()).then(|| assets.face_textures[slot % assets.actors.len()].0).flatten();
-                    if dead.is_none() {
-                        let doing = Doing {
-                            throwing: p.throw.map(|t| (game_time - t.start) / sim::THROW_SECONDS),
-                            reloading: p.reloading(game_time),
-                            // The server sends others' trigger only while their gun has rounds
-                            firing: p.gun_trigger,
-                            crouched,
-                            wounds: p.wounds,
-                            leg_wounds: p.leg_wounds,
-                        };
-                        let limp = p.leg_wounds > 0;
-                        let frames = |m: Movement| assets.player_motions.get(m, doing.crouched, limp).map_or(1, |m| m.frames.max(1)) as f32;
-                        let (movement, frame) = scene.remote_anim.update(slot, pos, yaw, step_dt, doing, frames, args.speed_scale.unwrap_or(1.0), args.anim_scale.unwrap_or(1.0));
-                        let scale = assets.actors.get(slot % assets.actors.len().max(1)).map_or([1.0; 3], |a| a.scale);
-                        let hand = if p.equipped_grenade { p.throw.is_none_or(|t| !t.thrown).then_some(&assets.grenade_draw) } else { Some(&assets.weapon_draw) };
-                        let flash = player_flash[slot];
-                        // Hidden, the animation still follows them
-                        let flinch = flinch_at(chars, p, view_time);
-                        let hip_turn = scene.remote_anim.hip_turn(slot, yaw);
-                        if !visible || draw_body(chars, p.side, movement, frame, pos, -yaw, scale, face, hand, p.equipped_grenade, flash, slot, doing.reloading, doing.firing, doing.crouched, limp, hip_turn, flinch, peek, scene.bodies.entry(slot).or_default()) {
-                            continue;
-                        }
-                    } else {
-                        // Dead, they are drawn where they fell, with the bodies
-                        scene.remote_anim.forget(slot);
-                        scene.bodies.remove(&slot);
-                        continue;
-                    }
-                    if !visible {
-                        continue;
-                    }
-                    // Without the player animations: a character, idling where they are
-                    let ghost = Npc {
-                        health: combat::Health::new(),
-                        pos,
-                        floor: pos[1],
-                        yaw: -yaw,
-                        scale: [1.0; 3],
-                        stagger: slot as f32 * 0.73,
-                        ..Npc::default()
-                    };
-                    let idle = game_time * 30.0 + ghost.stagger * 9.0;
-                    let (model, arrays, textures, skin) = dress(p.side, &assets.side_dress, &chars.model, &assets.character_arrays, &assets.part_textures, chars.rig.as_ref().map(|r| &r.skin));
-                    let (posed, turns) = chars.bones(&ghost, view_time, idle).zip(skin).map(|(b, s)| (s.apply(&b), s.turns(&b))).unwrap_or_default();
-                    let verts: &[[f32; 3]] = if posed.is_empty() { &model.vertices } else { &posed };
-                    glPushMatrix();
-                    glTranslatef(ghost.pos[0], ghost.pos[1], ghost.pos[2]);
-                    glRotatef(ghost.yaw, 0.0, 1.0, 0.0);
-                    let lit = lit_at(ghost.pos, ghost.yaw, ghost.scale);
-                    draw_character(model, arrays, verts, &turns, textures, face, toggles.textured, glow_on(ghost.pos), lit.as_ref());
-                    glPopMatrix();
-                }
-                glColor4f(1.0, 1.0, 1.0, 1.0);
-            }
-
-            // The player's own body, shown in third person
-            if let (true, true, Some(chars)) = (toggles.first_person, toggles.third_person, &sim.characters) {
-                let clock = if timing.fixed_step { game_time as f32 } else { timing.start_time.elapsed().as_secs_f32() };
-                let blinking = args.eyes_closed || (toggles.blink_enabled && clock % 4.0 < 0.15);
-                let face = (!assets.actors.is_empty()).then(|| assets.face_textures[0]).and_then(|(main, blink)| {
-                    if blinking { blink.or(main) } else { main }
-                });
-                let scale = assets.actors.first().map_or([1.0; 3], |a| a.scale);
-                let mine = &sim.players[me];
-                let hand = if mine.equipped_grenade { mine.throw.is_none_or(|t| !t.thrown).then_some(&assets.grenade_draw) } else { Some(&assets.weapon_draw) };
-                let flash = player_flash[me];
-                if mine.respawn_at.is_none() {
-                    let flinch = flinch_at(chars, mine, game_time);
-                    draw_body(chars, mine.side, pview.movement, pview.player_frame, draw_feet, -pview.camera.yaw, scale, face, hand, mine.equipped_grenade, flash, me, mine.reloading(game_time), sim.firing(me), mine.player.crouched, mine.leg_wounds > 0, pview.player_hip_turn, flinch, mine.peek, scene.bodies.entry(me).or_default());
-                }
-            }
-
-            // The bodies of the players who died, falling where they did with the motion the
-            // server picked, and lying there for as long as the fall plays or they wait to come back
-            if let Some(chars) = &sim.characters {
-                for (slot, p) in sim.players.iter().enumerate().filter(|(_, p)| p.active) {
-                    if let (Some(_), Some(hit)) = (p.respawn_at, p.hit) {
-                        if scene.corpses.get(&slot).is_none_or(|(start, _)| (start - hit.start).abs() > 0.1) {
-                            let health = combat::Health { hp: 0.0, state: combat::NpcState::Dead { motion: hit.motion, start: hit.start }, ..Default::default() };
-                            let yaw = -sim::dequantize(p.look.0);
-                            let scale = assets.actors.get(slot % assets.actors.len().max(1)).map_or([1.0; 3], |a| a.scale);
-                            let pos = p.player.pos;
-                            scene.corpses.insert(slot, (hit.start, Npc { health, pos, floor: pos[1], yaw, scale, stagger: 0.0, body: None, ..Npc::default() }));
-                        }
-                    }
-                }
-                let view_time = view.as_ref().map_or(game_time, |v| v.time);
-                // The others as the view shows them
-                let now_for = |slot: usize| if slot == me { game_time } else { view_time };
-                // A body stays while its player is dead, and for a while after they come back
-                scene.corpses.retain(|&slot, (start, body)| {
-                    let combat::NpcState::Dead { motion, .. } = body.health.state else { return false };
-                    sim.players.get(slot).is_some_and(|p| p.active && p.respawn_at.is_some())
-                        || now_for(slot) - *start < sim::RESPAWN_SECONDS.max(chars.frames(motion) / 30.0)
-                });
-                glDisable(GL_TEXTURE_2D);
-                for (&slot, (start, body)) in &scene.corpses {
-                    // The player's own body only from outside it
-                    let now = now_for(slot);
-                    if (slot == me && !(toggles.first_person && toggles.third_person)) || now < *start || !shown(body.pos) {
-                        continue;
-                    }
-                    let face = (!assets.actors.is_empty()).then(|| assets.face_textures[slot % assets.actors.len()].0).flatten();
-                    let side = sim.players.get(slot).and_then(|p| p.side);
-                    let (model, arrays, textures, skin) = dress(side, &assets.side_dress, &chars.model, &assets.character_arrays, &assets.part_textures, chars.rig.as_ref().map(|r| &r.skin));
-                    let (posed, turns) = chars.bones(body, now, 0.0).zip(skin).map(|(b, s)| (s.apply(&b), s.turns(&b))).unwrap_or_default();
-                    let verts: &[[f32; 3]] = if posed.is_empty() { &model.vertices } else { &posed };
-                    glPushMatrix();
-                    glTranslatef(body.pos[0], body.pos[1], body.pos[2]);
-                    glRotatef(body.yaw, 0.0, 1.0, 0.0);
-                    glScalef(body.scale[0], body.scale[1], body.scale[2]);
-                    let lit = lit_at(body.pos, body.yaw, body.scale);
-                    draw_character(model, arrays, verts, &turns, textures, face, toggles.textured, glow_on(body.pos), lit.as_ref());
-                    glPopMatrix();
-                }
-                glColor4f(1.0, 1.0, 1.0, 1.0);
-            }
-
-            // Grenades in the air
-            if let Some(gd) = &assets.grenade_draw {
-                let flying: Vec<([f32; 3], f32)> = match &view {
-                    Some(v) => v.grenades.iter().map(|&(_, pos, spin)| (pos, spin)).collect(),
-                    None => sim.thrown.iter().map(|t| (t.grenade.pos, t.grenade.spin)).collect(),
-                };
-                for (pos, spin) in flying {
-                    glPushMatrix();
-                    glTranslatef(pos[0], pos[1], pos[2]);
-                    glRotatef(spin, 1.0, 0.3, 0.0);
-                    // Model space (forward -Y, up +Z) turned so its length runs the way it spins
-                    glTranslatef(-gd.center[0], -gd.center[1], -gd.center[2]);
-                    let light = session.lighting.as_ref().map_or([1.0; 3], |l| room_light(l, &level, &sim.visibility, pos, pos).tint);
-                    draw_weapon(gd, toggles.textured, light);
-                    glPopMatrix();
-                }
-                glColor4f(1.0, 1.0, 1.0, 1.0);
-            }
 
             // The light of a blast, over what it reaches
             for l in &mut scene.blast_lights {
@@ -810,10 +418,10 @@ fn main() {
             }
 
             if !overlay.gate.showing() {
-                let spots = scene.casing_spots.take();
+                let spots = std::mem::take(&mut out.casing_spots);
                 if let Some(to_map) = &drawn.view_to_map {
                     for (owner, ejector, gun) in spots {
-                        let rounds = scene.casing_pending.borrow().get(&owner).copied().unwrap_or(0);
+                        let rounds = scene.casing_pending.get(&owner).copied().unwrap_or(0);
                         for _ in 0..rounds.min(MOST_CASINGS_A_FRAME) {
                             scene.casings.eject(&gun, to_map, &ejector, owner, 1.0);
                         }
@@ -854,11 +462,11 @@ fn main() {
             }
 
             if let Some(flash) = assets.flash_draw.as_ref().filter(|_| toggles.textured) {
-                for spot in scene.flash_spots.borrow().iter() {
+                for spot in out.flash_spots.iter() {
                     draw_flash(flash, spot);
                 }
             }
-            scene.flash_spots.borrow_mut().clear();
+            out.flash_spots.clear();
             glColor4f(1.0, 1.0, 1.0, 1.0);
 
             // Render portals overlay when toggled
@@ -883,7 +491,7 @@ fn main() {
             if toggles.show_hitboxes && sim.characters.as_ref().is_none_or(|c| c.rig.is_none()) {
                 glDisable(GL_TEXTURE_2D);
                 glColor3f(1.0, 0.85, 0.0);
-                let others = view.as_ref().map_or(&[][..], |v| &v.players[..]);
+                let others = frame.as_ref().map_or(&[][..], |v| &v.players[..]);
                 let mut standing: Vec<(usize, [f32; 3])> = others.iter().filter(|s| s.slot != me && s.dead.is_none()).map(|s| (s.slot, s.feet)).collect();
                 if sim.players[me].respawn_at.is_none() && (toggles.third_person || !toggles.first_person) {
                     standing.push((me, draw_feet));
@@ -937,7 +545,7 @@ fn main() {
         let held = if sim.players[me].equipped_grenade { assets.grenade_draw.as_ref().filter(|_| sim.players[me].throw.is_none_or(|t| !t.thrown)) } else { assets.weapon_draw.as_ref() };
         // Without the view model (the default) the gun is not drawn.
         // Its place still says where the casings leave, and only a firing gun needs it.
-        let casing_rounds = scene.casing_pending.borrow().get(&me).copied().unwrap_or(0);
+        let casing_rounds = scene.casing_pending.get(&me).copied().unwrap_or(0);
         let gun_shows = args.viewmodel;
         if let (true, true, false, Some(wd)) = ((gun_shows || (casing_rounds > 0 && !sim.players[me].equipped_grenade)) && sim.players[me].respawn_at.is_none(), toggles.first_person, toggles.third_person, held) {
             let l = wd.length;
@@ -983,7 +591,7 @@ fn main() {
                     });
                     draw_weapon(wd, toggles.textured, light);
                     if let (true, Some(flash)) = (player_flash[me], assets.flash_draw.as_ref().filter(|_| toggles.textured)) {
-                        draw_flash_here(flash, &FlashSpot::here(wd, flash_roll()));
+                        draw_flash_here(flash, &FlashSpot::here(wd, out.flash_roll()));
                     }
                 }
                 // The casings leave the gun as it is placed here.
@@ -1003,8 +611,8 @@ fn main() {
             }
         }
         // Rounds fired by guns not drawn this frame leave no casings
-        scene.casing_pending.borrow_mut().clear();
-        scene.casing_spots.borrow_mut().clear();
+        scene.casing_pending.clear();
+        out.casing_spots.clear();
 
         // Debug text and the HUD
         let hud = HudPass { args: &args, level: &level, sim: &sim, me, game_time, w, h, fps, render_time, watch_pose, current_rooms: &current_rooms, drawn_rooms: &drawn.drawn_rooms };

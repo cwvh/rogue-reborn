@@ -1,10 +1,9 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 use rogue_reborn::{blastlight, casings, glass, impact};
 use rogue_reborn::net::animation::Animators;
 use rogue_reborn::sim::characters::Npc;
 use crate::player::BodyState;
-use crate::render::draw::{FlashSpot, Flashes};
+use crate::render::draw::Flashes;
 
 /// Added to a terrorist's number so its casings are not taken for a player's
 pub const NPC_OWNERS: usize = 1000;
@@ -19,10 +18,9 @@ pub struct Scene {
     pub fractures: Vec<glass::Fracture>,
     pub player_flashes: Flashes,
     pub npc_flashes: Flashes,
-    pub flash_spots: RefCell<Vec<FlashSpot>>,
     pub casings: casings::Casings,
-    pub casing_pending: RefCell<HashMap<usize, u32>>,
-    pub casing_spots: RefCell<Vec<(usize, casings::Ejector, [f32; 16])>>,
+    // The rounds fired since the guns were last drawn, by owner: the casings they owe
+    pub casing_pending: HashMap<usize, u32>,
     pub remote_anim: Animators,
     // What each body's drawing remembers, the player's own and the other players'
     pub bodies: HashMap<usize, BodyState>,
