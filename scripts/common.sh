@@ -33,16 +33,20 @@ fresh_dir() {
 }
 
 # Runs FUNC NAME [--cinematic] ARGS for each case of a list, JOBS at a time. A line is
-# "name args". "@hud" in the args leaves --cinematic out, and "@DIR@" is replaced by $D.
+# "name args". "@hud" in the args leaves --cinematic out, and "@DIR@" is replaced by $D (spaces are fine).
 each_case() {
-  local list="$1" fn="$2" name args cine
+  local list="$1" fn="$2" name args cine a i
+  local -a arr kept
   while read -r name args; do
     case "$name" in ''|'#'*) continue ;; esac
-    cine=--cinematic
-    case " $args " in *" @hud "*) args="${args/@hud/}"; cine= ;; esac
-    args="${args//@DIR@/$D}"
+    cine=(--cinematic)
+    read -ra arr <<< "$args"
+    kept=()
+    for a in "${arr[@]}"; do
+      if [ "$a" = "@hud" ]; then cine=(); else kept+=("${a//@DIR@/$D}"); fi
+    done
     while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do wait -n; done
-    "$fn" "$name" $cine $args &
+    "$fn" "$name" "${cine[@]}" "${kept[@]}" &
   done <<< "$list"
   wait
 }

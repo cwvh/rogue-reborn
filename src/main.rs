@@ -2918,7 +2918,16 @@ fn main() {
                 let (fw, fh) = window.get_framebuffer_size();
                 let rgb = read_framebuffer(fw, fh);
                 match rogue_reborn::png::write_png(path, fw as u32, fh as u32, &rgb) {
-                    Ok(()) => println!("wrote {} ({fw}x{fh})", path.display()),
+                    Ok(()) => {
+                        println!("wrote {} ({fw}x{fh})", path.display());
+                        // Live casings per owner, so the gate sees ejections that first person hides
+                        let mut owners = std::collections::BTreeMap::<usize, usize>::new();
+                        for c in casings.iter() {
+                            *owners.entry(c.owner).or_default() += 1;
+                        }
+                        let list: Vec<String> = owners.iter().map(|(o, n)| format!("{o}={n}")).collect();
+                        println!("casings: {}", if list.is_empty() { "none".to_string() } else { list.join(" ") });
+                    }
                     Err(e) => {
                         eprintln!("failed to write screenshot: {e}");
                         std::process::exit(1);

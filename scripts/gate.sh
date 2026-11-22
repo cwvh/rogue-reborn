@@ -8,6 +8,7 @@
 # default, or fast). Any failure prints why and exits 1. NEW is also checked by playing BASE's
 # recording back with the current build, which must run every tick and match. Needs the game
 # data (see the README) and the MinGW target on Windows. See common.sh for PROFILE and JOBS.
+# Needs bash (Git Bash on Windows; sh fails): bash scripts/gate.sh run target/gate/base
 source "$(dirname "$0")/common.sh"
 PY="${PYTHON:-python}"
 fails=0
@@ -28,8 +29,8 @@ run() {
   build
   export NOBUILD=1
   local start=$SECONDS
-  scripts/shots.sh "$d/shots" || fail "shots"
-  scripts/golden.sh "$d/golden" || fail "golden"
+  bash scripts/shots.sh "$d/shots" || fail "shots"
+  bash scripts/golden.sh "$d/golden" || fail "golden"
   [ -f "$d/golden/h.rrd" ] || fail "no recording"
   echo "gate run took $((SECONDS - start)) s (PROFILE=$PROFILE)"
 }
@@ -37,8 +38,8 @@ run() {
 # Every expected file is there and every game exited 0
 complete() {
   local d="$1"
-  scripts/shots.sh --expect | verify "$d/shots" || fail "$d/shots is incomplete"
-  scripts/golden.sh --expect | verify "$d/golden" || fail "$d/golden is incomplete"
+  bash scripts/shots.sh --expect | verify "$d/shots" || fail "$d/shots is incomplete"
+  bash scripts/golden.sh --expect | verify "$d/golden" || fail "$d/golden is incomplete"
 }
 
 compare() {
@@ -64,12 +65,14 @@ compare() {
   ticks="$(replay_ticks "$base/golden/h-play.txt")"
   [ -n "$ticks" ] || fail "the baseline's own replay did not play every tick"
   build
+  rm -rf "$out"
   mkdir -p "$out"
   "$EXE" --first-person --textured --no-sound --seed 1 --max-fps 10000 --cinematic --play "$base/golden/h.rrd" \
     --screenshot "$out/h-play.png" 2>&1 < /dev/null | grep -vE "^(timing|wrote|loaded|spawning at|lit the level in )" > "$out/h-play.txt"
   [ "${PIPESTATUS[0]}" = 0 ] || fail "the replay did not exit 0"
   grep -q "^played $ticks of $ticks ticks: the game matched the recording" "$out/h-play.txt" \
     || fail "the replay did not play $ticks of $ticks ticks and match (see $out/h-play.txt)"
+  [ -f "$out/h-play.png" ] || fail "the replay wrote no picture"
   cmp -s "$out/h-play.png" "$base/golden/h-play.png" || fail "the replay's picture differs from the baseline's"
 
   if [ $fails = 0 ]; then echo "GATE PASSED"; else echo "GATE FAILED ($fails problems)"; return 1; fi
