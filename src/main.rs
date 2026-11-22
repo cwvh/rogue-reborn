@@ -4,6 +4,7 @@ mod camera;
 mod debug;
 mod hud;
 mod opengl;
+mod overlay;
 mod player;
 mod render;
 mod scene;
@@ -19,11 +20,9 @@ use glfw::{Action, Context, Key, WindowEvent, CursorMode};
 use rogue_reborn::motion::MOTION_FPS;
 use rogue_reborn::{map, combat, crp, grenade, blastlight, concussion, sim, sound, glass, casings};
 use rogue_reborn::net::client::{Seen, Status};
-use rogue_reborn::net::proto::LobbyCommand;
-use rogue_reborn::lobby::{self, Chat, Gate, LobbyView};
+use rogue_reborn::lobby::{self, LobbyView};
 use rogue_reborn::results::ResultsView;
-use rogue_reborn::ui::{Canvas, Pointer, Ui};
-use crate::ui_gl::UiGl;
+use rogue_reborn::ui::{Canvas, Pointer};
 use rogue_reborn::net::animation::Doing;
 use rogue_reborn::net::round::{Outcome, Phase, RoundState};
 use rogue_reborn::net::watch::{BEHIND, Pose, RISE, Watch, WatchContext, WatchMode, behind};
@@ -42,6 +41,7 @@ use crate::render::assets::{Uniform, SCORCH_VARIANTS, HOLE_VARIANTS};
 use crate::render::level::LevelDraw;
 use crate::render::window;
 use crate::audio::Audio;
+use crate::overlay::Overlay;
 use crate::scene::Scene;
 use crate::session::{Game, Session};
 use crate::state::{Pressed, Timing, Toggles};
@@ -151,27 +151,10 @@ fn main() {
     let mut eye_now = eye_height;
     // Left Ctrl switches between standing and crouched
     let mut crouch_wanted = false;
-    let mut last_cursor_pos = None;
-    let mut recent_log: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     window.set_cursor_mode(CursorMode::Disabled);
     // The lobby between rounds (see lobby.rs), drawn over everything with the original's art.
     // While it shows, the keys and mouse are its, and the pointer is free.
-    let mut ui = Ui::load(Path::new("data/font"));
-    let ui_gl = UiGl::load(&ui, Path::new("data/bitmap"));
-    let mut gate: Gate<Key> = Gate::default();
-    let mut pointer_down = false;
-    // The chat, for the whole game, what has been typed for it to say, and the wheel turned
-    // over the lobby since the last frame
-    let mut chat = Chat::default();
-    // Whom the results screen shows, by a click on their row
-    let mut picked = rogue_reborn::results::Picked::default();
-    let mut typed: Vec<LobbyCommand> = Vec::new();
-    let mut wheel = 0.0f32;
-    let level_name = session.joined.as_ref().map(|s| Path::new(&s.map).file_stem().map_or(s.map.clone(), |n| n.to_string_lossy().into_owned())).unwrap_or_default();
-    let pair_names: Vec<String> = session.joined.as_ref().map(|s| s.base_pairs.iter().map(|p| rogue_reborn::levels::game_text(&p.name).unwrap_or_else(|| p.name.clone())).collect()).unwrap_or_default();
-    // The mission's name for the results, as the original's mission file has it
-    let mission = session.joined.as_ref().and_then(|s| rogue_reborn::levels::mission_name(&s.map)).unwrap_or_else(|| level_name.clone());
-    let uniform_names: [String; 2] = session.joined.as_ref().map(|s| s.uniforms.clone().map(|u| lobby::uniform_name(&u))).unwrap_or_default();
+    let mut overlay = Overlay::new(session.joined.as_ref());
     // Hosting, the server we joined must name us its host, or it is someone else's
     let mut host_checked = session.hosted.is_none();
 
@@ -185,9 +168,7 @@ fn main() {
     let mut shown;
     let mut was_free = false;
     let mut audio = Audio::new(&args, &session.map_path);
-    // The latest kills, with when they leave the screen and their color, and how this player died:
-    // by whom, and where they were looking before
-    let mut feed: Vec<(f32, String, [f32; 3])> = Vec::new();
+    // How this player died: by whom, and where they were looking before
     let mut killed_by: Option<Option<usize>> = None;
     let mut alive_look: Option<(f32, f32)> = None;
     // The round the marks and bodies are from
@@ -230,11 +211,11 @@ fn main() {
 
         // Between rounds the lobby shows. Whatever was held when it comes or goes is let go.
         let showing = session.net.as_ref().is_some_and(|(c, _)| c.status == Status::Connected && c.round.phase.screen());
-        if gate.show(showing) {
-            (trigger, walk_held, pointer_down, wheel) = (false, false, false, 0.0);
+        if overlay.gate.show(showing) {
+            (trigger, walk_held, overlay.pointer_down, overlay.wheel) = (false, false, false, 0.0);
             (pressed.use_key, pressed.reload, pressed.gun, pressed.grenade, pressed.culling) = (false, false, false, false, false);
             // The first movement after it does not turn the view
-            last_cursor_pos = None;
+            overlay.last_cursor_pos = None;
             window.set_cursor_mode(if showing { CursorMode::Normal } else { CursorMode::Disabled });
             scene.casings.clear();
             scene.casing_pending.borrow_mut().clear();
@@ -246,17 +227,17 @@ fn main() {
                     match (key, action) {
                         // In the lobby, Escape clears the chat's line first
                         (Key::Escape, Action::Press) => {
-                            if !(gate.showing() && chat.clear()) {
+                            if !(overlay.gate.showing() && overlay.chat.clear()) {
                                 window.set_should_close(true)
                             }
                         }
                         // The lobby's keys type on the chat's line, and only the keys for
                         // dumps go through to the game
-                        (k, action) if gate.showing() && !matches!(k, Key::F2 | Key::F3 | Key::F4) => {
+                        (k, action) if overlay.gate.showing() && !matches!(k, Key::F2 | Key::F3 | Key::F4) => {
                             match (k, action) {
-                                (Key::Enter | Key::KpEnter, Action::Press) => typed.extend(chat.send()),
-                                (Key::Backspace, Action::Press | Action::Repeat) => chat.erase(),
-                                (_, Action::Release) => gate.release(k),
+                                (Key::Enter | Key::KpEnter, Action::Press) => overlay.typed.extend(overlay.chat.send()),
+                                (Key::Backspace, Action::Press | Action::Repeat) => overlay.chat.erase(),
+                                (_, Action::Release) => overlay.gate.release(k),
                                 _ => {}
                             }
                         }
@@ -339,42 +320,42 @@ fn main() {
                             toggles.first_person = !toggles.first_person;
                         }
                         (k, Action::Press) => {
-                            gate.press(k);
+                            overlay.gate.press(k);
                         }
                         (k, Action::Release) => {
-                            gate.release(k);
+                            overlay.gate.release(k);
                         }
                         _ => {}
                     }
                 }
-                WindowEvent::Char(c) if gate.showing() => chat.typed(c),
-                WindowEvent::Scroll(_, y) if gate.showing() => wheel += y as f32,
-                WindowEvent::CursorPos(..) if gate.showing() => {}
+                WindowEvent::Char(c) if overlay.gate.showing() => overlay.chat.typed(c),
+                WindowEvent::Scroll(_, y) if overlay.gate.showing() => overlay.wheel += y as f32,
+                WindowEvent::CursorPos(..) if overlay.gate.showing() => {}
                 WindowEvent::CursorPos(xpos, ypos) => {
                     // A scripted run (--walk) or a replay is not steered by a real mouse
-                    if let (Some((last_x, last_y)), None, false) = (last_cursor_pos, args.walk, session.playback.is_some()) {
+                    if let (Some((last_x, last_y)), None, false) = (overlay.last_cursor_pos, args.walk, session.playback.is_some()) {
                         let dx = xpos - last_x;
                         let dy = ypos - last_y;
-                        if args.cinematic && toggles.first_person && toggles.third_person && gate.held(Key::LeftShift) {
+                        if args.cinematic && toggles.first_person && toggles.third_person && overlay.gate.held(Key::LeftShift) {
                             toggles.orbit.0 -= dx as f32 * 0.2;
                             toggles.orbit.1 = (toggles.orbit.1 - dy as f32 * 0.1).clamp(-60.0, 60.0);
-                            last_cursor_pos = Some((xpos, ypos));
+                            overlay.last_cursor_pos = Some((xpos, ypos));
                             continue;
                         }
                         camera.yaw -= dx as f32 * 0.1;
                         camera.pitch -= dy as f32 * 0.1;
                         camera.pitch = camera.pitch.clamp(-89.0, 89.0);
                     }
-                    last_cursor_pos = Some((xpos, ypos));
+                    overlay.last_cursor_pos = Some((xpos, ypos));
                 }
                 WindowEvent::FramebufferSize(width, height) => {
                     unsafe { glViewport(0, 0, width, height); }
                 }
                 // In the lobby, the main button clicks on it
-                WindowEvent::MouseButton(glfw::MouseButton::Button1, action, _) if gate.showing() => {
-                    pointer_down = action != Action::Release;
+                WindowEvent::MouseButton(glfw::MouseButton::Button1, action, _) if overlay.gate.showing() => {
+                    overlay.pointer_down = action != Action::Release;
                 }
-                WindowEvent::MouseButton(_, _, _) if gate.showing() => {}
+                WindowEvent::MouseButton(_, _, _) if overlay.gate.showing() => {}
                 // Watching, the buttons go to the next teammate and back, on a press
                 WindowEvent::MouseButton(glfw::MouseButton::Button1, action, _) => {
                     trigger = action != Action::Release;
@@ -426,7 +407,7 @@ fn main() {
             // C crouches for the whole run; K switches stance at frame 30, to see the change
             crouch_wanted = held.contains('C') != (held.contains('K') && timing.frames_drawn >= 30);
             for (ch, key) in [('W', Key::W), ('A', Key::A), ('S', Key::S), ('D', Key::D)] {
-                gate.set(key, timing.frames_drawn < n && held.contains(ch));
+                overlay.gate.set(key, timing.frames_drawn < n && held.contains(ch));
             }
             if timing.frames_drawn % 10 == 0 {
                 println!("frame {frames_drawn:4} crouch_wanted={crouch_wanted} crouched={} feet=({:.1}, {:.1}, {:.1}) on_ground={} movement={movement:?} anim_frame={player_frame:.1}",
@@ -443,7 +424,7 @@ fn main() {
         // Free-fly: WASD moves the view (hold LeftShift to move faster)
         if !toggles.first_person && session.playback.is_none() {
             let mut speed = base_speed;
-            if gate.held(Key::LeftShift) {
+            if overlay.gate.held(Key::LeftShift) {
                 speed *= 5.0;
             }
             let right = camera.get_right();
@@ -451,19 +432,19 @@ fn main() {
             let fwd_flat = [-yaw_rad.sin(), 0.0, -yaw_rad.cos()];
             // Desired horizontal displacement for this frame, in camera space
             let mut mv = [0.0f32; 2];
-            if gate.held(Key::W) {
+            if overlay.gate.held(Key::W) {
                 mv[0] += fwd_flat[0] * speed;
                 mv[1] += fwd_flat[2] * speed;
             }
-            if gate.held(Key::S) {
+            if overlay.gate.held(Key::S) {
                 mv[0] -= fwd_flat[0] * speed;
                 mv[1] -= fwd_flat[2] * speed;
             }
-            if gate.held(Key::A) {
+            if overlay.gate.held(Key::A) {
                 mv[0] -= (right[0] * speed) / 2.0;
                 mv[1] -= (right[2] * speed) / 2.0;
             }
-            if gate.held(Key::D) {
+            if overlay.gate.held(Key::D) {
                 mv[0] += (right[0] * speed) / 2.0;
                 mv[1] += (right[2] * speed) / 2.0;
             }
@@ -480,14 +461,14 @@ fn main() {
 
         // The game runs in fixed ticks, however fast the frames come
         let mut input = sim::Input {
-            forward: gate.held(Key::W),
-            back: gate.held(Key::S),
-            left: gate.held(Key::A),
-            right: gate.held(Key::D),
+            forward: overlay.gate.held(Key::W),
+            back: overlay.gate.held(Key::S),
+            left: overlay.gate.held(Key::A),
+            right: overlay.gate.held(Key::D),
             run: !walk_held,
             crouch: crouch_wanted,
-            peek_left: gate.held(Key::Q),
-            peek_right: gate.held(Key::E),
+            peek_left: overlay.gate.held(Key::Q),
+            peek_right: overlay.gate.held(Key::E),
             fire: trigger,
             use_key: pressed.use_key,
             reload: pressed.reload,
@@ -603,14 +584,14 @@ fn main() {
             sim.players[me].player.pos
         };
 
-        feed.retain(|(until, ..)| *until > game_time);
+        overlay.feed.retain(|(until, ..)| *until > game_time);
         // A new round leaves nothing of the last
         if let Some((client, _)) = &session.net {
             if client.round.number != round_seen {
                 round_seen = client.round.number;
                 scene.decals.clear();
                 scene.corpses.clear();
-                feed.clear();
+                overlay.feed.clear();
             }
         }
 
@@ -709,17 +690,17 @@ fn main() {
                 sim::Event::Log(line) => {
                     println!("{line}");
                     // The latest, for the debug dump
-                    if recent_log.len() >= RECENT_LOG {
-                        recent_log.pop_front();
+                    if overlay.recent_log.len() >= RECENT_LOG {
+                        overlay.recent_log.pop_front();
                     }
-                    recent_log.push_back(line);
+                    overlay.recent_log.push_back(line);
                 }
                 sim::Event::Shot { player, hit_character, .. } => {
                     if player == me {
                         hit_marker_until = if hit_character { game_time + 0.1 } else { 0.0 };
                     }
                     // The gun's place is known only when it is drawn, so the casings wait for that
-                    if player_ejector.is_some() && !gate.showing() {
+                    if player_ejector.is_some() && !overlay.gate.showing() {
                         *scene.casing_pending.borrow_mut().entry(player).or_default() += 1;
                     }
                     if let (Some((name, at)), Some(snd)) = (sim::shot_sound(&event, me), audio.sound.as_mut()) {
@@ -730,7 +711,7 @@ fn main() {
                 sim::Event::CharacterShot { npc, .. } => {
                     if let Some(n) = sim.npcs.get_mut(npc) {
                         n.last_shot = game_time;
-                        if n.weapon.and_then(|w| assets.held_ejectors.get(w)).is_some_and(Option::is_some) && !gate.showing() {
+                        if n.weapon.and_then(|w| assets.held_ejectors.get(w)).is_some_and(Option::is_some) && !overlay.gate.showing() {
                             *scene.casing_pending.borrow_mut().entry(NPC_OWNERS + npc).or_default() += 1;
                         }
                     }
@@ -831,9 +812,9 @@ fn main() {
                         (None, _) => format!("{victim_name} KILLED THEMSELVES"),
                     };
                     let color = if victim == me { [1.0, 0.35, 0.3] } else if killer == Some(me) { [1.0, 0.85, 0.3] } else { [1.0, 1.0, 1.0] };
-                    feed.push((game_time + 6.0, text, color));
-                    if feed.len() > 5 {
-                        feed.remove(0);
+                    overlay.feed.push((game_time + 6.0, text, color));
+                    if overlay.feed.len() > 5 {
+                        overlay.feed.remove(0);
                     }
                     if victim == me {
                         killed_by = Some(killer);
@@ -843,11 +824,11 @@ fn main() {
                 sim::Event::Chat { name, text, dead, .. } => {
                     let line = format!("{}: {text}", lobby::speaker(&name, dead));
                     println!("{line}");
-                    feed.push((game_time + 8.0, line, [0.95, 0.78, 0.2]));
-                    if feed.len() > 5 {
-                        feed.remove(0);
+                    overlay.feed.push((game_time + 8.0, line, [0.95, 0.78, 0.2]));
+                    if overlay.feed.len() > 5 {
+                        overlay.feed.remove(0);
                     }
-                    chat.said(&name, &text, dead);
+                    overlay.chat.said(&name, &text, dead);
                 }
             }
         }
@@ -911,7 +892,7 @@ fn main() {
         // then stops with a closing crack
         let firing = sim.firing(me);
         if let Some(snd) = audio.sound.as_mut() {
-            if gate.showing() {
+            if overlay.gate.showing() {
                 audio.firing_sound = None;
             } else if firing && audio.firing_sound.is_none() {
                 audio.firing_sound = snd.play_loop("C_SB5KB.WAV", 1.0);
@@ -928,7 +909,7 @@ fn main() {
                 .filter(|r| r.contains(feet, 50.0))
                 .map(|r| r.section_name.as_str())
                 .collect();
-            if gate.showing() {
+            if overlay.gate.showing() {
                 amb.silence();
             } else {
                 amb.update(snd, &rooms, listener, game_time, step_dt);
@@ -1807,7 +1788,7 @@ fn main() {
                 draw_fracture(&level.materials, &session.map_num, &mut textures, toggles.textured, f);
             }
 
-            if !gate.showing() {
+            if !overlay.gate.showing() {
                 let spots = scene.casing_spots.take();
                 if let Some(to_map) = &view_to_map {
                     for (owner, ejector, gun) in spots {
@@ -1986,7 +1967,7 @@ fn main() {
                 }
                 // The casings leave the gun as it is placed here.
                 // Its view is narrower than the world's, so they start further from the middle.
-                if let (true, false, Some(e), Some(to_map)) = (casing_rounds > 0, gate.showing(), player_ejector.as_ref().filter(|_| !sim.players[me].equipped_grenade), &view_to_map) {
+                if let (true, false, Some(e), Some(to_map)) = (casing_rounds > 0, overlay.gate.showing(), player_ejector.as_ref().filter(|_| !sim.players[me].equipped_grenade), &view_to_map) {
                     let mut gun = [0f32; 16];
                     glGetFloatv(GL_MODELVIEW_MATRIX, gun.as_mut_ptr());
                     let widen = half_view_tan() / 22.5f32.to_radians().tan();
@@ -2053,7 +2034,7 @@ fn main() {
             let banner = round_banner(&round, game_time, winner);
             let msg = if game_time < sim.players[me].message.1 { sim.players[me].message.0.as_str() } else { banner.as_str() };
             let marker = game_time < hit_marker_until;
-            let lines: Vec<(String, [f32; 3])> = feed.iter().map(|(_, text, color)| (text.clone(), *color)).collect();
+            let lines: Vec<(String, [f32; 3])> = overlay.feed.iter().map(|(_, text, color)| (text.clone(), *color)).collect();
             let dead = session.net.is_some() && sim.players[me].respawn_at.is_some();
             let meter = session.net.as_ref().filter(|_| toggles.lag_meter).map(|(client, _)| (&client.meter, session.net_clock.elapsed().as_secs_f64()));
             // The crosshair opens as wide as the gun's spread, in the world view
@@ -2103,28 +2084,28 @@ fn main() {
             let mine = (me, sim.players[me].joined);
             let view = LobbyView {
                 round: client.round, time: game_time, session: client.session, me, players: &players, continued: client.continued.contains(&mine),
-                ready: &ready, level: &level_name, base_pairs: &pair_names, uniforms: [&uniform_names[0], &uniform_names[1]], results: client.results.as_ref(),
+                ready: &ready, level: &overlay.level_name, base_pairs: &overlay.pair_names, uniforms: [&overlay.uniform_names[0], &overlay.uniform_names[1]], results: client.results.as_ref(),
             };
-            chat.watch(&view);
-            let mut commands = std::mem::take(&mut typed);
-            if gate.showing() {
+            overlay.chat.watch(&view);
+            let mut commands = std::mem::take(&mut overlay.typed);
+            if overlay.gate.showing() {
                 let (fw, fh) = window.get_framebuffer_size();
                 let (ww, wh) = window.get_size();
                 let (cx, cy) = window.get_cursor_pos();
                 let at = Canvas::fit([fw as f32, fh as f32]).pointer([cx, cy], [ww, wh], [fw, fh]);
-                ui.begin(Pointer { at, down: pointer_down, wheel: std::mem::take(&mut wheel) }, client.session.generation);
+                overlay.ui.begin(Pointer { at, down: overlay.pointer_down, wheel: std::mem::take(&mut overlay.wheel) }, client.session.generation);
                 match client.results.as_ref().filter(|_| client.round.phase == Phase::Debrief) {
                     Some(table) => {
                         let results = ResultsView {
                             results: table, time: game_time, me: mine, host: client.session.host == Some(me as u8), continued: &client.continued,
-                            sent: !client.may_continue(), mission: &mission,
+                            sent: !client.may_continue(), mission: &overlay.mission,
                         };
-                        commands.extend(rogue_reborn::results::results(&mut ui, &results, &mut chat, &mut picked));
+                        commands.extend(rogue_reborn::results::results(&mut overlay.ui, &results, &mut overlay.chat, &mut overlay.picked));
                     }
-                    None => commands.extend(lobby::lobby(&mut ui, &view, &mut chat)),
+                    None => commands.extend(lobby::lobby(&mut overlay.ui, &view, &mut overlay.chat)),
                 }
-                let draws = ui.finish();
-                ui_gl.draw(&ui, &draws, [fw, fh]);
+                let draws = overlay.ui.finish();
+                overlay.ui_gl.draw(&overlay.ui, &draws, [fw, fh]);
             }
             for command in commands {
                 if let Some(rec) = session.net_recorder.as_mut() {
@@ -2169,7 +2150,7 @@ fn main() {
                 map_path: &session.map_path, map_num: &session.map_num, level: &level, eye, feet, yaw: camera.yaw, pitch: camera.pitch, dir,
                 hit, first_person: toggles.first_person, third_person: toggles.third_person, textured: toggles.textured, room_debug: toggles.room_debug, show_portals: toggles.show_portals, show_collisions: toggles.show_collisions, sprite_mode: toggles.sprite_mode, depth_bits,
                 fps, render_ms, culling: sim.culling, portal_paths: args.portal_paths, room: current_rooms.first().copied(), drawn: &drawn_rooms, collision: &sim.players[me].collision_rooms, player_rooms: &sim.players[me].player_rooms, render_rooms: &sim.players[me].render_rooms, doors: &nearby_doors,
-                terrorists: &sim.terrorist_report(me), log: recent_log.make_contiguous(),
+                terrorists: &sim.terrorist_report(me), log: overlay.recent_log.make_contiguous(),
             };
             let clipping = stem.is_some();
             if let Err(e) = std::fs::create_dir_all(stem.as_deref().and_then(|s| Path::new(s).parent()).unwrap_or(Path::new("debug"))) {
