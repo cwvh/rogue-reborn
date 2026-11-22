@@ -25,13 +25,12 @@ use rogue_reborn::motion::MOTION_FPS;
 use rogue_reborn::{map, combat, crp, grenade, sim, glass, casings};
 use rogue_reborn::net::client::{Seen, Status};
 use rogue_reborn::net::animation::Doing;
-use rogue_reborn::net::watch::{BEHIND, Pose, RISE, behind};
 use rogue_reborn::sim::characters::{Characters, Npc, Rig};
 use rogue_reborn::sim::movement::{Movement, Reloading, animation_pace, hip_turn, movement_from_keys};
 use rogue_reborn::impact;
 use crate::opengl::*;
 use crate::args::parse_args;
-use crate::camera::{Camera, listener_of, apply_camera};
+use crate::camera::listener_of;
 use rogue_reborn::util::unit3;
 use crate::player::{BodyKey, BodyState};
 use rogue_reborn::body;
@@ -39,6 +38,7 @@ use rogue_reborn::lighting::{CharacterLight, Lighting};
 use rogue_reborn::visibility::Visibility;
 use crate::render::assets::Uniform;
 use crate::render::level::LevelDraw;
+use crate::render::world::{WorldPass, draw_world};
 use crate::render::window;
 use crate::audio::Audio;
 use crate::capture::{CapturePass, capture_frame};
@@ -50,8 +50,7 @@ use crate::scene::{NPC_OWNERS, Scene};
 use crate::session::{Game, Session};
 use crate::view::{PlayerView, ViewPass, Watched};
 use crate::state::{Pressed, Timing, Toggles};
-use crate::render::draw::{WeaponDraw, CharacterArrays, draw_weapon, FlashSpot, draw_flash, draw_flash_here, draw_character, draw_glass, draw_fracture, level_radius, Which, draw_plan, wipe_opening, room_color};
-use crate::textures::ensure_texture;
+use crate::render::draw::{WeaponDraw, CharacterArrays, draw_weapon, FlashSpot, draw_flash, draw_flash_here, draw_character, draw_glass, draw_fracture, level_radius};
 
 // The first-person view's height in degrees. The width follows the screen shape.
 const VIEW_HIGH: f32 = 90.0;
@@ -268,316 +267,12 @@ fn main() {
         let npc_flash: Vec<bool> = sim.npcs.iter().enumerate().map(|(i, n)| scene.npc_flashes.shows(i, n.last_shot, game_time)).collect();
 
         let render_time = Instant::now();
-        let view_to_map: Option<casings::Mat4>;
-        let drawn_rooms: Vec<String>;
+        let world = WorldPass { args: &args, level: &level, sim: &sim, session: &session, level_draw: &level_draw, me, game_time, aspect, z_near, z_far, watch_pose, camera_feet, current_rooms: &current_rooms };
+        let drawn = draw_world(world, &toggles, &mut pview, &mut textures);
         unsafe {
-            glClearStencil(1);
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-            // The HUD leaves the depth test off
-            glEnable(GL_DEPTH_TEST);
-            glMatrixMode(GL_PROJECTION);
-            glLoadIdentity();
-            glu_perspective(VIEW_HIGH, aspect, z_near, z_far);
-
-            glMatrixMode(GL_MODELVIEW);
-            glLoadIdentity();
-            // A blast shakes the view: a quick tremble that dies away
-            if pview.shake > 0.002 && watch_pose.is_none() {
-                let t = game_time;
-                let s = pview.shake.min(1.0);
-                glRotatef(5.0 * s * (t * 47.0).sin(), 0.0, 0.0, 1.0);
-                glTranslatef(9.0 * s * (t * 61.0 + 1.0).sin(), 7.0 * s * (t * 53.0 + 2.0).sin(), 0.0);
-                glRotatef(2.5 * s * (t * 39.0 + 3.0).sin(), 1.0, 0.0, 0.0);
-            }
-            // Third person: pull the view back behind and above the player's eyes
-            let view = if toggles.first_person && toggles.third_person && watch_pose.is_none() {
-                // Orbited round the player to see them from the side, if asked, and kept out
-                // of the walls as the camera behind a watched player is
-                let eye = [pview.camera.position[0], pview.camera.position[1], -pview.camera.position[2]];
-                let from = Pose { eye, yaw: pview.camera.yaw, pitch: (pview.camera.pitch + toggles.orbit.1).clamp(-89.0, 89.0) };
-                let p = behind(&sim, from, args.view_dist.unwrap_or(BEHIND), RISE, toggles.orbit.0);
-                Camera { position: [p.eye[0], p.eye[1], -p.eye[2]], yaw: p.yaw, pitch: p.pitch }
-            } else {
-                Camera { position: pview.camera.position, yaw: pview.camera.yaw, pitch: pview.camera.pitch }
-            };
-            apply_camera(&view);
-            glScalef(1.0, 1.0, -1.0);
-            let mut world_view = [0f32; 16];
-            glGetFloatv(GL_MODELVIEW_MATRIX, world_view.as_mut_ptr());
-            view_to_map = casings::invert_affine(&world_view);
-
-            // What the portals show from here: the rooms the player is in, and each room
-            // seen through the previous one's portals (see visibility::plan)
-            let cam_eye = [view.position[0], view.position[1], -view.position[2]];
-            let mut plan: Vec<rogue_reborn::visibility::PlanNode> = Vec::new();
-            // Each visible room once, with its screen rectangle (unless --portal-paths)
-            let mut rect_plan: Vec<rogue_reborn::visibility::RectRoom> = Vec::new();
-            // Dead on a server, drawn from the rooms of whoever the camera is on: the player's own
-            // rooms are not followed while they are dead
-            let (cull_rooms, cull_body) = if session.net.is_some() && sim.players[me].respawn_at.is_some() {
-                let (rooms, room) = sim.standing_rooms(camera_feet, pview.camera_room);
-                pview.camera_room = room;
-                (rooms, [[camera_feet[0], camera_feet[1] + 10.0, camera_feet[2]], cam_eye])
-            } else {
-                (sim.players[me].render_rooms.clone(), sim.players[me].body)
-            };
-            if sim.culling && !cull_rooms.is_empty() {
-                let (mut modelview, mut projection) = ([0f32; 16], [0f32; 16]);
-                glGetFloatv(GL_MODELVIEW_MATRIX, modelview.as_mut_ptr());
-                glGetFloatv(GL_PROJECTION_MATRIX, projection.as_mut_ptr());
-                let clip = |v: [f32; 3]| mul_mat4(&projection, mul_mat4(&modelview, [v[0], v[1], v[2], 1.0]));
-                if args.portal_paths {
-                    plan = cull_rooms.iter().map(|&r| sim.visibility.plan(&level, r, &cull_body, cam_eye, &sim.blocked_portals, &clip)).collect();
-                } else {
-                    rect_plan = sim.visibility.rect_plan(&level, &cull_rooms, &cull_body, cam_eye, &sim.blocked_portals, &clip);
-                    // The player's rooms and the doorways they stand in are still cut where
-                    // they overlap
-                    plan = cull_rooms.iter().map(|&r| sim.visibility.touched_plan(&level, r, &cull_body, cam_eye, &sim.blocked_portals)).collect();
-                }
-            }
-            let mut visible_rooms: Vec<u32> = rect_plan.iter().map(|rr| rr.room).collect();
-            for node in &plan {
-                node.rooms(&mut visible_rooms);
-            }
-            visible_rooms.sort();
-            visible_rooms.dedup();
-            drawn_rooms = visible_rooms.iter().map(|n| n.to_string()).collect();
-
-            // Combined
-            {
-                // Textured mode
-                if toggles.textured {
-                    glEnable(GL_TEXTURE_2D);
-                    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-                } else {
-                    glDisable(GL_TEXTURE_2D);
-                    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-                }
-                let level_mode = if toggles.textured { GL_FILL } else { GL_LINE };
-
-                // Iterate map geometry by material groups
-                if toggles.room_debug {
-                    glDisable(GL_TEXTURE_2D);
-                }
-
-                // Draws some of the level's objects, and only the part beyond `plane`.
-                // An object belongs to the room its name starts with ("204", "20_doormetal").
-                let mut draw_objects = |which: Which, planes: &[[f32; 4]]| {
-                    set_clip_planes(planes);
-                    let indices: &[usize] = match which {
-                        Which::All => &level_draw.all_objects,
-                        Which::Room(n) => sim.visibility.objects_of(n),
-                        Which::Unowned => sim.visibility.unowned_objects(),
-                    };
-                    // The doors of these rooms are drawn along with them, each leaf where
-                    // its door is
-                    let room_doors: &[usize] = match which {
-                        Which::All => &level_draw.all_doors,
-                        Which::Room(n) => level_draw.doors_by_room.get(&n).map(Vec::as_slice).unwrap_or_default(),
-                        Which::Unowned => &[],
-                    };
-                    let items: Vec<(usize, Option<usize>)> = indices.iter().map(|&i| (i, None)).chain(room_doors.iter().map(|&d| (sim.doors[d].model_index, Some(d)))).collect();
-                    // Opaque and cut-out faces first, then the soft sprites over them
-                    for pass in 0..2 {
-                    for &(object_index, door) in &items {
-                        let object = &level.geometries.objects[object_index];
-                        // Panes are drawn in place below, and door leaves with their doors
-                        if level_draw.pane_objects[object_index] || (level_draw.door_leaf[object_index] && door.is_none()) {
-                            continue;
-                        }
-                        let room = sim.visibility.room_of_object(object_index);
-                        if room.is_some_and(|n| args.hide_rooms.contains(&n)) {
-                            continue;
-                        }
-                        if let Some(d) = door {
-                            glPushMatrix();
-                            glMultMatrixf(sim.doors[d].matrix(sim.door_states[d].open).as_ptr());
-                        }
-                        if toggles.room_debug {
-                            let [r, g, b] = room_color(&object.name, current_rooms.iter().any(|n| *n == object.name));
-                            glColor3f(r, g, b);
-                        }
-                    for (od_index, od) in object.object_datas.iter().enumerate() {
-                        let mat_index = od.material as usize;
-                        let blend = if toggles.textured { level_draw.sprite_blends.get(mat_index).copied().flatten() } else { None };
-                        if blend.is_some() != (pass == 1) {
-                            continue;
-                        }
-                        match blend {
-                            Some(additive) => {
-                                // The sprite writes depth, so that a room drawn again through another
-                                // portal does not blend it a second time (a shadow twice as dark, a
-                                // light twice as bright). The alpha test keeps its clear pixels out
-                                // of the depth buffer.
-                                glEnable(GL_ALPHA_TEST);
-                                glAlphaFunc(GL_GREATER, 0.02);
-                                glEnable(GL_BLEND);
-                                glBlendFunc(GL_SRC_ALPHA, if additive { GL_ONE } else { GL_ONE_MINUS_SRC_ALPHA });
-                                glDepthMask(u8::from(toggles.sprite_mode != 2));
-                            }
-                            None => {
-                                glDepthMask(1);
-                                glDisable(GL_BLEND);
-                                if toggles.textured {
-                                    glEnable(GL_ALPHA_TEST);
-                                    glAlphaFunc(GL_GREATER, 0.5);
-                                }
-                            }
-                        }
-                        // A face is seen from the side its normal points to (its corners in
-                        // order turn counterclockwise there), as in the original engine; the
-                        // mirrored z makes that clockwise on screen. Two-sided materials (glass,
-                        // foliage, nets) show both. Most impossible geometry is a room's surfaces
-                        // seen from behind (rm05's cabin walls from outside, rm11's hall's stairs
-                        // from inside 119), and this hides it.
-                        if !args.no_cull_backs {
-                            if level.materials.materials.get(mat_index).is_some_and(|m| m.two_sided) {
-                                glDisable(GL_CULL_FACE);
-                            } else {
-                                glEnable(GL_CULL_FACE);
-                                glCullFace(GL_BACK);
-                                glFrontFace(GL_CW);
-                            }
-                        }
-                        // Room colors replace the textures, so they show even where textures are missing
-                        let tex_id = if toggles.room_debug { Some(0) } else { ensure_texture(&level.materials, mat_index, &session.map_num, &mut textures) };
-                        if let Some(tex_id) = tex_id {
-                            // TODO put all faces with same tex-id together so I can bind once
-                            if !toggles.room_debug {
-                                glBindTexture(GL_TEXTURE_2D, tex_id);
-                            }
-
-                            // Faces and UVs are parallel arrays
-                            let face_count = od.faces.face_indices.len().min(od.faces.texture_indices.len());
-                            if face_count == 0 {
-                                continue;
-                            }
-
-                            // Each face corner's light, baked at load; soft sprites and lamps are not lit
-                            let shades = session.baked.as_ref().filter(|_| toggles.textured && !toggles.room_debug && blend.is_none() && !level_draw.glowing.get(mat_index).copied().unwrap_or(false))
-                                .map(|b| &b.colors[object_index][od_index]);
-                            if shades.is_none() && toggles.textured && !toggles.room_debug {
-                                glColor3f(1.0, 1.0, 1.0);
-                            }
-
-                            // Faces over others in their plane come after, each layer nearer
-                            let layers = &level_draw.coplanar_layers[object_index];
-                            for layer in 0..=layers.max {
-                            // Most groups have faces in only one of their object's layers
-                            if !layers.per_face[od_index][..face_count].contains(&layer) {
-                                continue;
-                            }
-                            // A sprite's faces come nearer than the surface they lie on
-                            let offset = f32::from(layer) + if blend.is_some() && toggles.sprite_mode == 0 { 2.0 } else { 0.0 };
-                            if offset > 0.0 {
-                                glEnable(GL_POLYGON_OFFSET_FILL);
-                                glPolygonOffset(-offset, -offset);
-                            }
-                            glBegin(GL_TRIANGLES);
-                            for i in 0..face_count {
-                                if layers.per_face[od_index][i] != layer {
-                                    continue;
-                                }
-                                let (i0, i1, i2) = od.faces.face_indices[i];
-                                let (t0, t1, t2) = od.faces.texture_indices[i];
-
-                                let p0 = &object.vertices[i0 as usize];
-                                let p1 = &object.vertices[i1 as usize];
-                                let p2 = &object.vertices[i2 as usize];
-
-                                let uv0 = &od.texture_vertices.uv_coords[t0 as usize];
-                                let uv1 = &od.texture_vertices.uv_coords[t1 as usize];
-                                let uv2 = &od.texture_vertices.uv_coords[t2 as usize];
-
-                                if toggles.textured {
-                                    let c = shades.map_or([[1.0; 3]; 3], |s| s[i]);
-                                    if shades.is_some() { glColor3f(c[0][0], c[0][1], c[0][2]); }
-                                    glTexCoord2f(uv0.u, uv0.v); glVertex3f(p0.x, p0.y, p0.z);
-                                    if shades.is_some() { glColor3f(c[1][0], c[1][1], c[1][2]); }
-                                    glTexCoord2f(uv1.u, uv1.v); glVertex3f(p1.x, p1.y, p1.z);
-                                    if shades.is_some() { glColor3f(c[2][0], c[2][1], c[2][2]); }
-                                    glTexCoord2f(uv2.u, uv2.v); glVertex3f(p2.x, p2.y, p2.z);
-                                } else {
-                                    glVertex3f(p0.x, p0.y, p0.z);
-                                    glVertex3f(p1.x, p1.y, p1.z);
-                                    glVertex3f(p2.x, p2.y, p2.z);
-                                }
-                            }
-                            glEnd();
-                            }
-                            if layers.max > 0 || blend.is_some() {
-                                glDisable(GL_POLYGON_OFFSET_FILL);
-                            }
-                        }
-                    }
-                    if door.is_some() {
-                        glPopMatrix();
-                    }
-                    }
-                    }
-                    glDisable(GL_CULL_FACE);
-                    glDisable(GL_ALPHA_TEST);
-                    glDisable(GL_BLEND);
-                    glDepthMask(1);
-                };
-
-                if !rect_plan.is_empty() {
-                    // The player's rooms and the doorways they stand in, cut where they
-                    // overlap, then every other room whole, within its rectangle, nearest
-                    // first, sorted out by depth as the original engine does. Inside the
-                    // openings of the player's rooms' own doorways the room beyond shows in
-                    // front of them: rm11's hall's wall, one step past its door into 119 (its
-                    // stairs there are seen from behind, and culled). Deeper, overlaps show,
-                    // as in the original (the hall's wall in 120's doorway, see BUGS.txt)
-                    draw_objects(Which::Unowned, &[]);
-                    let mut cut_rooms: Vec<u32> = Vec::new();
-                    glEnable(GL_STENCIL_TEST);
-                    for node in &plan {
-                        node.rooms(&mut cut_rooms);
-                        draw_plan(node, 1, level_mode, toggles.textured && !toggles.room_debug, &mut |room, planes| draw_objects(Which::Room(room), planes));
-                    }
-                    glDisable(GL_STENCIL_TEST);
-                    set_clip_planes(&[]);
-                    let mut viewport = [0i32; 4];
-                    glGetIntegerv(GL_VIEWPORT, viewport.as_mut_ptr());
-                    glEnable(GL_SCISSOR_TEST);
-                    for rr in rect_plan.iter().filter(|rr| !cut_rooms.contains(&rr.room)) {
-                        let r = rr.rect;
-                        let x0 = viewport[0] + ((r[0].max(-1.0) + 1.0) / 2.0 * viewport[2] as f32).floor() as i32;
-                        let y0 = viewport[1] + ((r[1].max(-1.0) + 1.0) / 2.0 * viewport[3] as f32).floor() as i32;
-                        let x1 = viewport[0] + ((r[2].min(1.0) + 1.0) / 2.0 * viewport[2] as f32).ceil() as i32;
-                        let y1 = viewport[1] + ((r[3].min(1.0) + 1.0) / 2.0 * viewport[3] as f32).ceil() as i32;
-                        glScissor(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0));
-                        // Through the player's room's own doorways, as the original engine does
-                        for &(p, plan) in &rr.doorways {
-                            let height = sim.visibility.height(rr.room);
-                            wipe_opening(sim.visibility.polygon(p), plan, height, cam_eye, level_mode, toggles.textured && !toggles.room_debug);
-                        }
-                        draw_objects(Which::Room(rr.room), &[]);
-                    }
-                    glDisable(GL_SCISSOR_TEST);
-                } else if plan.is_empty() {
-                    draw_objects(Which::All, &[]);
-                } else {
-                    // Things that belong to no room first, then each room through its portals
-                    draw_objects(Which::Unowned, &[]);
-                    glEnable(GL_STENCIL_TEST);
-                    for node in &plan {
-                        draw_plan(node, 1, level_mode, toggles.textured && !toggles.room_debug, &mut |room, planes| draw_objects(Which::Room(room), planes));
-                    }
-                    glDisable(GL_STENCIL_TEST);
-                }
-                set_clip_planes(&[]);
-                glColor3f(1.0, 1.0, 1.0);
-            }
-
             let view = frame.clone();
 
-            // A character shows only when a room it is in is drawn: the level overlaps itself,
-            // and on rm05 a character on the plane's upper deck pokes out of the top of the hull.
-            // `feet` in map space; with no rooms drawn (culling off) everyone shows.
-            let shown = |feet: [f32; 3]| visible_rooms.is_empty()
-                || sim.visibility.rooms_holding(&level, [feet[0], feet[1] + 10.0, feet[2]], None).iter().any(|r| visible_rooms.contains(r));
+            let shown = |feet: [f32; 3]| drawn.shows(&sim, &level, feet);
 
             // The light of a blast on a character standing at `feet`: nothing when there is none
             let glow_on = |feet: [f32; 3]| -> [f32; 3] {
@@ -1105,8 +800,8 @@ fn main() {
             scene.fractures.retain(|f| !f.done());
             // A pane shows only with its room. Some maps glaze a window on the inside alone and
             // give the outside a solid one: from outside, the room and its glass are not drawn.
-            let pane_shows = |pane: &glass::Pane| plan.is_empty()
-                || map::object_room(&pane.name).is_none_or(|n| visible_rooms.contains(&n));
+            let pane_shows = |pane: &glass::Pane| drawn.plan_empty
+                || map::object_room(&pane.name).is_none_or(|n| drawn.visible_rooms.contains(&n));
             for (pane, _) in sim.panes.iter().zip(&sim.broken_at).filter(|(p, b)| b.is_none() && pane_shows(p)) {
                 draw_glass(&level.materials, pane.material, &session.map_num, &mut textures, toggles.textured, pane.opacity, pane.tris.iter().map(|t| (t.p, t.uv)));
             }
@@ -1116,7 +811,7 @@ fn main() {
 
             if !overlay.gate.showing() {
                 let spots = scene.casing_spots.take();
-                if let Some(to_map) = &view_to_map {
+                if let Some(to_map) = &drawn.view_to_map {
                     for (owner, ejector, gun) in spots {
                         let rounds = scene.casing_pending.borrow().get(&owner).copied().unwrap_or(0);
                         for _ in 0..rounds.min(MOST_CASINGS_A_FRAME) {
@@ -1293,7 +988,7 @@ fn main() {
                 }
                 // The casings leave the gun as it is placed here.
                 // Its view is narrower than the world's, so they start further from the middle.
-                if let (true, false, Some(e), Some(to_map)) = (casing_rounds > 0, overlay.gate.showing(), player_ejector.as_ref().filter(|_| !sim.players[me].equipped_grenade), &view_to_map) {
+                if let (true, false, Some(e), Some(to_map)) = (casing_rounds > 0, overlay.gate.showing(), player_ejector.as_ref().filter(|_| !sim.players[me].equipped_grenade), &drawn.view_to_map) {
                     let mut gun = [0f32; 16];
                     glGetFloatv(GL_MODELVIEW_MATRIX, gun.as_mut_ptr());
                     let widen = half_view_tan() / 22.5f32.to_radians().tan();
@@ -1312,7 +1007,7 @@ fn main() {
         scene.casing_spots.borrow_mut().clear();
 
         // Debug text and the HUD
-        let hud = HudPass { args: &args, level: &level, sim: &sim, me, game_time, w, h, fps, render_time, watch_pose, current_rooms: &current_rooms, drawn_rooms: &drawn_rooms };
+        let hud = HudPass { args: &args, level: &level, sim: &sim, me, game_time, w, h, fps, render_time, watch_pose, current_rooms: &current_rooms, drawn_rooms: &drawn.drawn_rooms };
         let render_ms = overlay.draw_hud_and_debug(hud, &toggles, &timing, &pview, &session);
 
         // The lobby, the results and the chat, over the game
@@ -1320,7 +1015,7 @@ fn main() {
 
         // F2: a screenshot and a text log of where the player is and what they see, the
         // screenshot mode's capture, and the benchmark's timing
-        let capture = CapturePass { args: &args, level: &level, sim: &sim, me, fps, render_ms, raw_dt, current_rooms: &current_rooms, drawn_rooms: &drawn_rooms };
+        let capture = CapturePass { args: &args, level: &level, sim: &sim, me, fps, render_ms, raw_dt, current_rooms: &current_rooms, drawn_rooms: &drawn.drawn_rooms };
         if capture_frame(capture, &mut toggles, &mut timing, &mut overlay, &scene, &pview, &session, &mut window) {
             break;
         }
