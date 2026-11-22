@@ -154,9 +154,6 @@ fn main() {
     // The lobby between rounds (see lobby.rs), drawn over everything with the original's art.
     // While it shows, the keys and mouse are its, and the pointer is free.
     let mut overlay = Overlay::new(session.joined.as_ref());
-    // Hosting, the server we joined must name us its host, or it is someone else's
-    let mut host_checked = session.hosted.is_none();
-
     let mut textures = HashMap::new();
     let mut toggles = Toggles::new(&args);
     // A scripted run, or a replay, takes one tick a frame instead of keeping time
@@ -166,8 +163,6 @@ fn main() {
     // What the player did in the last tick, which the animation follows
     let mut shown;
     let mut audio = Audio::new(&args, &session.map_path);
-    // The round the marks and bodies are from
-    let mut round_seen = 0u16;
     let team_game = session.joined.as_ref().is_some_and(|s| s.bases.iter().all(|b| !b.is_empty()));
     let player_ejector = assets.weapon_def.as_ref().and_then(casings::Ejector::of);
     let flash_rng = std::cell::Cell::new(0x9E37_79B9_7F4A_7C15u64);
@@ -534,8 +529,8 @@ fn main() {
                     window.set_should_close(true);
                 }
             }
-            if !host_checked && client.snapshots > 0 {
-                host_checked = true;
+            if !session.host_checked && client.snapshots > 0 {
+                session.host_checked = true;
                 if client.session.host != Some(me as u8) {
                     eprintln!("the server on that port is not the one we started: someone else is its host");
                     window.set_should_close(true);
@@ -560,8 +555,8 @@ fn main() {
         overlay.feed.retain(|(until, ..)| *until > game_time);
         // A new round leaves nothing of the last
         if let Some((client, _)) = &session.net {
-            if client.round.number != round_seen {
-                round_seen = client.round.number;
+            if client.round.number != session.round_seen {
+                session.round_seen = client.round.number;
                 scene.decals.clear();
                 scene.corpses.clear();
                 overlay.feed.clear();

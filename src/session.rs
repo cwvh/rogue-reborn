@@ -26,6 +26,8 @@ pub struct Session {
     pub joined: Option<Setup>,
     pub net: Option<(Client, Impaired<UdpLink>)>,
     pub net_clock: Instant,
+    // Held so the server it started stops with the game
+    #[allow(dead_code)]
     pub hosted: Option<HostedServer>,
     pub playback: Option<Playback>,
     pub recorder: Option<Recorder>,
@@ -35,6 +37,10 @@ pub struct Session {
     pub level: Rc<map::Map>,
     pub lighting: Option<Lighting>,
     pub baked: Option<rogue_reborn::lighting::Baked>,
+    // Hosting, the server we joined must name us its host, or it is someone else's
+    pub host_checked: bool,
+    // The round the marks and bodies are from
+    pub round_seen: u16,
 }
 
 // What the game needs to run, once its level and models are loaded
@@ -246,7 +252,7 @@ impl Session {
         }
 
         Some((Session {
-            net_recorder, joined, net, net_clock, hosted, playback, recorder: None, seed, map_path: map_buf, map_num, level, lighting, baked,
+            net_recorder, joined, net, net_clock, host_checked: hosted.is_none(), round_seen: 0, hosted, playback, recorder: None, seed, map_path: map_buf, map_num, level, lighting, baked,
         }, world))
     }
 
