@@ -108,7 +108,8 @@ impl Recording {
 
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut w = Writer(Vec::new());
-        w.0.extend_from_slice(MAGIC);
+        // A cap that counts the player's point is only meaningful in version 5
+        w.0.extend_from_slice(if self.header.cap_counts_player { MAGIC_V5 } else { MAGIC });
         let h = &self.header;
         w.string(&h.build);
         w.string(&h.map);
@@ -384,6 +385,11 @@ mod tests {
         assert!(!Recording::from_bytes(&rec.to_bytes()).unwrap().header.cap_counts_player);
         bytes[7] = 4;
         assert!(Recording::from_bytes(&bytes).is_err());
+        // Saving a version 5 game again keeps its meaning
+        rec.header.cap_counts_player = true;
+        let bytes = rec.to_bytes();
+        assert_eq!(bytes[7], 5);
+        assert_eq!(Recording::from_bytes(&bytes).unwrap().header, rec.header);
     }
 
     #[test]

@@ -365,7 +365,8 @@ impl Session {
             build: option_env!("GIT_HASH").unwrap_or("unknown").to_string(),
             map: if args.demo { "demo".to_string() } else { map_path.display().to_string() },
             npcs: args.npcs.map_or(u32::MAX, |n| n.min(u32::MAX as usize - 1) as u32),
-            cap_counts_player: false,
+            // Recording a version 5 replay again keeps its placement rule
+            cap_counts_player: self.playback.as_ref().is_some_and(|p| p.header().cap_counts_player),
             own_spawn: own_spawn.map(|i| i as u32),
             camera: camera.position,
             yaw: camera.yaw,
