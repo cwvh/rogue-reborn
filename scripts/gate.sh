@@ -29,8 +29,8 @@ run() {
   build
   export NOBUILD=1
   local start=$SECONDS
-  bash scripts/shots.sh "$d/shots" || fail "shots"
-  bash scripts/golden.sh "$d/golden" || fail "golden"
+  "$BASH" scripts/shots.sh "$d/shots" || fail "shots"
+  "$BASH" scripts/golden.sh "$d/golden" || fail "golden"
   [ -f "$d/golden/h.rrd" ] || fail "no recording"
   echo "gate run took $((SECONDS - start)) s (PROFILE=$PROFILE)"
 }
@@ -38,8 +38,12 @@ run() {
 # Every expected file is there and every game exited 0
 complete() {
   local d="$1"
-  bash scripts/shots.sh --expect | verify "$d/shots" || fail "$d/shots is incomplete"
-  bash scripts/golden.sh --expect | verify "$d/golden" || fail "$d/golden is incomplete"
+  local sub
+  for sub in shots golden; do
+    "$BASH" scripts/$sub.sh --expect | verify "$d/$sub"
+    local st=("${PIPESTATUS[@]}")
+    { [ "${st[0]}" = 0 ] && [ "${st[1]}" = 0 ]; } || fail "$d/$sub is incomplete"
+  done
 }
 
 compare() {
@@ -48,6 +52,7 @@ compare() {
   base="$(absdir "$1")"; new="$(absdir "$2")"
   complete "$base"
   complete "$new"
+  [ $fails = 0 ] || { echo "GATE FAILED: an input is incomplete, nothing was compared"; exit 1; }
 
   for sub in shots golden; do
     "$PY" -I scripts/pngdiff.py --strict "$base/$sub" "$new/$sub" "${WIDTH}x${HEIGHT}" || fail "$sub pictures"
@@ -60,20 +65,24 @@ compare() {
   done
   [ "$(ls "$base/golden" | grep -c '\.txt$')" = "$(ls "$new/golden" | grep -c '\.txt$')" ] || fail "different numbers of logs"
 
-  # The baseline's recording, played with this build: every tick, no desync, exit 0
-  local ticks out="$new/replay"
-  ticks="$(replay_ticks "$base/golden/h-play.txt")"
-  [ -n "$ticks" ] || fail "the baseline's own replay did not play every tick"
+  # The baseline's recordings, played with this build: every tick, no desync, exit 0
+  local out n ticks
+  mkdir -p target/gate
+  out="$(mktemp -d target/gate/replay.XXXXXX)"
+  echo "replays go to $out"
   build
-  rm -rf "$out"
-  mkdir -p "$out"
-  "$EXE" --first-person --textured --no-sound --seed 1 --max-fps 10000 --cinematic --play "$base/golden/h.rrd" \
-    --screenshot "$out/h-play.png" 2>&1 < /dev/null | grep -vE "^(timing|wrote|loaded|spawning at|lit the level in )" > "$out/h-play.txt"
-  [ "${PIPESTATUS[0]}" = 0 ] || fail "the replay did not exit 0"
-  grep -q "^played $ticks of $ticks ticks: the game matched the recording" "$out/h-play.txt" \
-    || fail "the replay did not play $ticks of $ticks ticks and match (see $out/h-play.txt)"
-  [ -f "$out/h-play.png" ] || fail "the replay wrote no picture"
-  cmp -s "$out/h-play.png" "$base/golden/h-play.png" || fail "the replay's picture differs from the baseline's"
+  local replays
+  replays="$("$BASH" scripts/golden.sh --replays)"
+  [ -n "$replays" ] || fail "golden.sh lists no recordings to replay"
+  for n in $replays; do
+    ticks="$(replay_ticks "$base/golden/$n-play.txt")"
+    [ -n "$ticks" ] || fail "the baseline's own replay of $n did not play every tick"
+    "$EXE" --first-person --textured --no-sound --seed 1 --max-fps 10000 --cinematic --play "$base/golden/$n.rrd"       --screenshot "$out/$n-play.png" 2>&1 < /dev/null | grep -vE "^(timing|wrote|loaded|spawning at|lit the level in )" > "$out/$n-play.txt"
+    [ "${PIPESTATUS[0]}" = 0 ] || fail "the replay of $n did not exit 0"
+    grep -q "^played $ticks of $ticks ticks: the game matched the recording" "$out/$n-play.txt"       || fail "the replay of $n did not play $ticks of $ticks ticks and match (see $out/$n-play.txt)"
+    [ -f "$out/$n-play.png" ] || fail "the replay of $n wrote no picture"
+    cmp -s "$out/$n-play.png" "$base/golden/$n-play.png" || fail "the replay of $n's picture differs from the baseline's"
+  done
 
   if [ $fails = 0 ]; then echo "GATE PASSED"; else echo "GATE FAILED ($fails problems)"; return 1; fi
 }

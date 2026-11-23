@@ -84,6 +84,7 @@ dr  --demo --walk 150 --hold WF --record @DIR@/dr.rrd
 EOF
 )
 REPLAYS="h dr"
+if [ "$1" = "--replays" ]; then echo $REPLAYS; exit 0; fi
 
 expect() {
   for n in $(case_names "$CASES"); do echo ".exit/$n"; done

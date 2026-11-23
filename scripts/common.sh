@@ -56,11 +56,13 @@ case_names() { grep -vE '^(#|[[:space:]]*$)' <<< "$1" | awk '{print $1}'; }
 # Checks that every expected file (one per line on stdin) is in DIR, and that every game that
 # ran there exited 0. Prints what is wrong and returns 1.
 verify() {
-  local dir="$1" bad=0 f
+  local dir="$1" bad=0 f count=0
   while read -r f; do
+    count=$((count + 1))
     [ -e "$dir/$f" ] || { echo "MISSING $dir/$f"; bad=1; continue; }
     case "$f" in *.png|*.rrd) [ -s "$dir/$f" ] || { echo "EMPTY $dir/$f"; bad=1; } ;; esac
   done
+  [ $count -gt 0 ] || { echo "NOTHING EXPECTED in $dir (the list of files was empty)"; bad=1; }
   for f in "$dir"/.exit/*; do
     [ "$(cat "$f")" = 0 ] || { echo "FAILED ${f##*/} in $dir (exit $(cat "$f"))"; bad=1; }
   done
