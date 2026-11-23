@@ -84,7 +84,7 @@ impl Session {
             args.demo = h.map == "demo";
             args.map = (!args.demo).then(|| PathBuf::from(&h.map));
             args.level = None;
-            args.npcs = Some(h.npcs as usize);
+            args.npcs = (h.npcs != u32::MAX).then_some(h.npcs as usize);
             args.seed = Some(h.seed);
             args.speed_scale = Some(h.speed_scale);
             args.no_cull = !h.culling;
@@ -324,8 +324,8 @@ impl Session {
                 s.npcs.iter().map(|n| n.actor.map(|a| a as usize)).collect(),
             ),
             // Characters at the spawn points
-            // `--npcs` caps them in any level. 0 skips the terrorists and their walking grid.
-            (None, Some(c), false, None) => place_npcs(&mission_spawns[..args.npcs.unwrap_or(usize::MAX).min(mission_spawns.len())], own_spawn.as_slice(), &world, &c.model, &assets.actors, &|i, p| {
+            // `--npcs` caps them in any level, not counting the player's own spawn point.
+            (None, Some(c), false, None) => place_npcs(&mission_spawns, own_spawn.as_slice(), args.npcs.unwrap_or(usize::MAX), &world, &c.model, &assets.actors, &|i, p| {
                 args.model_yaw.unwrap_or_else(|| match mission_spawns.first() {
                     // In the demo room everyone faces the player
                     Some(player) if args.demo => (player[0] - p[0]).atan2(player[2] - p[2]).to_degrees(),
@@ -359,7 +359,7 @@ impl Session {
         self.recorder = args.record.as_ref().filter(|_| self.net.is_none()).map(|_| Recorder::new(recording::Header {
             build: option_env!("GIT_HASH").unwrap_or("unknown").to_string(),
             map: if args.demo { "demo".to_string() } else { map_path.display().to_string() },
-            npcs: args.npcs.unwrap_or(demo::MAX_NPCS) as u32,
+            npcs: args.npcs.map_or(u32::MAX, |n| n as u32),
             own_spawn: own_spawn.map(|i| i as u32),
             camera: camera.position,
             yaw: camera.yaw,

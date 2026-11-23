@@ -35,8 +35,8 @@ pub struct Args {
     pub play: Option<PathBuf>,
     /// The built-in box room instead of a level from the game
     pub demo: bool,
-    /// Characters standing in the demo room (0 to 8, default 8), or the most a level places.
-    /// 0 loads a level faster, with no terrorists.
+    /// Characters standing in the demo room (0 to 8, default 8), or the most a level places
+    /// at its spawn points. Not counting you. Mission terrorists are not capped.
     pub npcs: Option<usize>,
     pub map: Option<PathBuf>,
     pub screenshot: Option<PathBuf>,

@@ -29,7 +29,7 @@ pub struct Header {
     pub build: String,
     /// The level's MAP file, or "demo" for the built-in box room
     pub map: String,
-    /// How many characters stand in the box room
+    /// The `--npcs` cap, or `u32::MAX` for none
     pub npcs: u32,
     /// Which spawn point is the player's, counting from 0, so that the others hold characters
     pub own_spawn: Option<u32>,

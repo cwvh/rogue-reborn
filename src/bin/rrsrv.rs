@@ -268,7 +268,7 @@ fn main() {
     let (npcs, faces) = match (&characters, &mission_file) {
         _ if args.teams => (Vec::new(), Vec::new()),
         (Some(_), Some(_)) => (Vec::new(), Vec::new()),
-        (Some(c), None) => place_npcs(&npc_spawns, &[], &world, &c.model, &actors, &|_, p| {
+        (Some(c), None) => place_npcs(&npc_spawns, &[], usize::MAX, &world, &c.model, &actors, &|_, p| {
             // In the box room they face the players; elsewhere they are dealt a facing
             let first = player_spawns[0];
             if level_path.is_none() { (first[0] - p[0]).atan2(first[2] - p[2]).to_degrees() } else { (p[0] * 7.0 + p[2] * 3.0) % 360.0 }

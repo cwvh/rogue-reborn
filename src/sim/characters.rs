@@ -528,11 +528,12 @@ pub fn place_terrorists(teams: &[crate::mission::Team], seed: u64, setting: &cra
 }
 
 /// Stand a character at each spawn point (a point on the map's floor) but those in `skip`,
-/// dealing the team members' faces out in turn. `yaw` says which way the character at a
+/// at most `max` of them, dealing the team members' faces out in turn. `yaw` says which way the character at a
 /// spawn point faces, given its index and position. Also returns which team member each one is.
 pub fn place_npcs(
     spawns: &[V3],
     skip: &[usize],
+    max: usize,
     world: &CollisionWorld,
     model: &Crp,
     actors: &[Actor],
@@ -540,7 +541,7 @@ pub fn place_npcs(
 ) -> (Vec<Npc>, Vec<Option<usize>>) {
     let feet_to_origin = -model.bounds().0[1];
     let (mut npcs, mut faces) = (Vec::new(), Vec::new());
-    for (n, (i, p)) in spawns.iter().enumerate().filter(|(i, _)| !skip.contains(i)).enumerate() {
+    for (n, (i, p)) in spawns.iter().enumerate().filter(|(i, _)| !skip.contains(i)).take(max).enumerate() {
         let floor = world.ground_at(p[0], p[2], p[1] + 100.0).unwrap_or(p[1]);
         let actor = (!actors.is_empty()).then(|| n % actors.len());
         let scale_y = actor.map_or(1.0, |a| actors[a].scale[1]);
