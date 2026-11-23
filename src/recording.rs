@@ -20,7 +20,8 @@ use crate::sim::{Input, Sim, TICK};
 /// Every this many ticks, the sim's checksum is recorded
 pub const CHECK_EVERY: u32 = 60;
 
-const MAGIC: &[u8; 8] = b"RRDEMO\0\x05";
+const MAGIC: &[u8; 8] = b"RRDEMO\0\x06";
+const MAGIC_V5: &[u8; 8] = b"RRDEMO\0\x05";
 
 /// How a game began: enough to set up the same sim again
 #[derive(Clone, Debug, PartialEq)]
@@ -81,6 +82,18 @@ impl std::fmt::Display for Desync {
 
 impl std::error::Error for Desync {}
 
+/// Version 5 applied the cap to the spawn points including the player's own, and stored 8 for
+/// the demo room's default. Version 6 counts only the other characters, with `u32::MAX` for none.
+fn npcs_from_v5(map: &str, npcs: u32, own_spawn: Option<u32>) -> u32 {
+    if map == "demo" && npcs as usize == crate::demo::MAX_NPCS {
+        return u32::MAX;
+    }
+    match own_spawn {
+        Some(i) if i < npcs => npcs - 1,
+        _ => npcs,
+    }
+}
+
 impl Recording {
     /// Play every input into a sim that was set up from the header, checking the checksums.
     /// Returns where it first stopped matching, if it did.
@@ -140,11 +153,16 @@ impl Recording {
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Recording> {
         let mut r = Reader { bytes, at: 0 };
-        ensure!(r.take(MAGIC.len())? == MAGIC, "not a recording (or one from another version)");
+        let magic = r.take(MAGIC.len())?;
+        ensure!(magic == MAGIC || magic == MAGIC_V5, "not a recording (or one from another version)");
+        let v5 = magic == MAGIC_V5;
         let build = r.string()?;
         let map = r.string()?;
-        let npcs = r.u32()?;
+        let mut npcs = r.u32()?;
         let own_spawn = r.opt_u32()?;
+        if v5 {
+            npcs = npcs_from_v5(&map, npcs, own_spawn);
+        }
         let camera = [r.f32()?, r.f32()?, r.f32()?];
         let (yaw, pitch) = (r.f32()?, r.f32()?);
         let seed = r.u64()?;
@@ -342,6 +360,25 @@ mod tests {
         // Seven checksums a second apart, and the last at the end
         assert_eq!(rec.checks.len(), 7);
         assert_eq!(rec.checks.last().unwrap().0, 400);
+    }
+
+    #[test]
+    fn a_version_5_cap_becomes_the_new_meaning() {
+        assert_eq!(npcs_from_v5("demo", 8, Some(0)), u32::MAX);
+        assert_eq!(npcs_from_v5("demo", 1, Some(0)), 0);
+        assert_eq!(npcs_from_v5("data/map/rm11.MAP", 3, Some(5)), 3);
+        assert_eq!(npcs_from_v5("data/map/rm11.MAP", 3, None), 3);
+
+        let (mut rec, _) = play();
+        rec.header.npcs = u32::MAX;
+        assert_eq!(Recording::from_bytes(&rec.to_bytes()).unwrap().header.npcs, u32::MAX);
+        // The same file as version 5, which stored 8 for the demo's default
+        rec.header.npcs = 8;
+        let mut bytes = rec.to_bytes();
+        bytes[7] = 5;
+        assert_eq!(Recording::from_bytes(&bytes).unwrap().header.npcs, u32::MAX);
+        bytes[7] = 4;
+        assert!(Recording::from_bytes(&bytes).is_err());
     }
 
     #[test]

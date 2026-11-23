@@ -359,7 +359,7 @@ impl Session {
         self.recorder = args.record.as_ref().filter(|_| self.net.is_none()).map(|_| Recorder::new(recording::Header {
             build: option_env!("GIT_HASH").unwrap_or("unknown").to_string(),
             map: if args.demo { "demo".to_string() } else { map_path.display().to_string() },
-            npcs: args.npcs.map_or(u32::MAX, |n| n as u32),
+            npcs: args.npcs.map_or(u32::MAX, |n| n.min(u32::MAX as usize - 1) as u32),
             own_spawn: own_spawn.map(|i| i as u32),
             camera: camera.position,
             yaw: camera.yaw,
