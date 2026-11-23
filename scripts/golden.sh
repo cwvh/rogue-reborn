@@ -77,15 +77,19 @@ ac  --level rm08 --pos 35619.9,32567,-31889.9 --yaw 540.9 --pitch 76.7 --walk 3 
 # Strafe and walk slowly in the demo room
 f   --demo --walk 120 --hold DRF
 # Record a run and play it back (below): it must do the same, and every checksum must match.
-# On a level: a demo-room recording desyncs at its first checksum, tick 60, even idle
+# One on a level, one in the demo room (which desynced at tick 60 when the replay placed one
+# character fewer than the run)
 h   --level rm11 --spawn 1 --walk 330 --hold T --record @DIR@/h.rrd
+dr  --demo --walk 150 --hold WF --record @DIR@/dr.rrd
 EOF
 )
+REPLAYS="h dr"
 
 expect() {
-  for n in $(case_names "$CASES") h-play h-check; do echo ".exit/$n"; done
+  for n in $(case_names "$CASES"); do echo ".exit/$n"; done
+  for n in $REPLAYS; do echo ".exit/$n-play"; echo ".exit/$n-check"; done
   for n in $(case_names "$CASES"); do echo "$n.png"; echo "$n.txt"; done
-  echo h.rrd; echo h-play.png; echo h-play.txt
+  for n in $REPLAYS; do echo "$n.rrd"; echo "$n-play.png"; echo "$n-play.txt"; done
 }
 
 # The frame-rate lines and the file names differ from run to run, and which animation the
@@ -100,20 +104,21 @@ golden() {
   echo "${PIPESTATUS[0]}" > "$D/.exit/$name"
 }
 
-# Play the recording back: the game must exit 0, match it, play every tick, and print what
-# the run printed
+# Play case $1's recording back: the game must exit 0, match it, play every tick, and print
+# what the run printed
 replay() {
-  "$EXE" --first-person --textured --no-sound --seed 1 --max-fps 10000 --cinematic --play "$D/h.rrd"     --screenshot "$D/h-play.png" 2>&1 < /dev/null | grep -vE "^(timing|wrote|loaded|spawning at|lit the level in )" > "$D/h-play.txt"
-  echo "${PIPESTATUS[0]}" > "$D/.exit/h-play"
+  local n="$1"
+  "$EXE" --first-person --textured --no-sound --seed 1 --max-fps 10000 --cinematic --play "$D/$n.rrd"     --screenshot "$D/$n-play.png" 2>&1 < /dev/null | grep -vE "^(timing|wrote|loaded|spawning at|lit the level in )" > "$D/$n-play.txt"
+  echo "${PIPESTATUS[0]}" > "$D/.exit/$n-play"
   local ok=1
-  grep -qE "^played ([0-9]+) of \1 ticks: the game matched the recording" "$D/h-play.txt" || ok=0
-  diff <(grep -v "^frame" "$D/h.txt") <(grep -vE "^(played|DESYNC)" "$D/h-play.txt") > /dev/null || ok=0
+  grep -qE "^played ([0-9]+) of \1 ticks: the game matched the recording" "$D/$n-play.txt" || ok=0
+  diff <(grep -v "^frame" "$D/$n.txt") <(grep -vE "^(played|DESYNC)" "$D/$n-play.txt") > /dev/null || ok=0
   if [ $ok = 1 ]; then
-    echo "playing the recording back matched the run"
-    echo 0 > "$D/.exit/h-check"
+    echo "playing $n's recording back matched the run"
+    echo 0 > "$D/.exit/$n-check"
   else
-    echo "PLAYING THE RECORDING BACK DID NOT MATCH THE RUN (see $D/h.txt and $D/h-play.txt)"
-    echo 1 > "$D/.exit/h-check"
+    echo "PLAYING $n's RECORDING BACK DID NOT MATCH THE RUN (see $D/$n.txt and $D/$n-play.txt)"
+    echo 1 > "$D/.exit/$n-check"
   fi
 }
 
@@ -123,5 +128,5 @@ D="$(absdir "$1")"
 fresh_dir "$D"
 build
 each_case "$CASES" golden
-replay
+for n in $REPLAYS; do replay $n; done
 expect | verify "$D"
