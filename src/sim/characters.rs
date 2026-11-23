@@ -559,9 +559,24 @@ pub fn place_npcs(
     (npcs, faces)
 }
 
+/// The `--npcs` limit as version 5 recordings meant it: the first `cap` spawn points held the
+/// player's too. Returns how many of those are not the player's.
+pub fn v5_npc_limit(cap: usize, points: usize, own_spawn: Option<usize>) -> usize {
+    let n = cap.min(points);
+    n - own_spawn.filter(|&i| i < n).map_or(0, |_| 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_version_5_cap_counts_the_players_point() {
+        assert_eq!(v5_npc_limit(2, 3, Some(0)), 1);
+        assert_eq!(v5_npc_limit(3, 3, Some(5)), 3);
+        assert_eq!(v5_npc_limit(0, 3, Some(0)), 0);
+        assert_eq!(v5_npc_limit(5, 3, None), 3);
+    }
     use crate::collision::{Params, Player};
     use crate::mission::{self, Difficulty};
 

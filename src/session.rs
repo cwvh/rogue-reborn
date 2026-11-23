@@ -14,7 +14,7 @@ use rogue_reborn::net::link::{Conditions, Impaired, UdpLink};
 use rogue_reborn::net::proto::Setup;
 use rogue_reborn::net::record::ClientRecorder;
 use rogue_reborn::recording::{Playback, Recorder, Recording};
-use rogue_reborn::sim::characters::{Characters, Npc, place_npcs, place_terrorists};
+use rogue_reborn::sim::characters::{Characters, Npc, place_npcs, place_terrorists, v5_npc_limit};
 use crate::args::Args;
 use crate::camera::Camera;
 use crate::opengl::*;
@@ -290,6 +290,11 @@ impl Session {
         if let Some(p) = &self.playback {
             own_spawn = p.header().own_spawn.map(|i| i as usize);
         }
+        // Version 5 recordings counted the player's point in the cap
+        let npc_limit = match (args.npcs, self.playback.as_ref().is_some_and(|p| p.header().cap_counts_player)) {
+            (Some(n), true) => v5_npc_limit(n, mission_spawns.len(), own_spawn),
+            (n, _) => n.unwrap_or(usize::MAX),
+        };
         // Character models standing at every other mission spawn point
         let model_path = args.model.clone()
             .unwrap_or_else(|| PathBuf::from("data/character/team_hrt/blue_M_a.CRP"));
@@ -325,7 +330,7 @@ impl Session {
             ),
             // Characters at the spawn points
             // `--npcs` caps them in any level, not counting the player's own spawn point.
-            (None, Some(c), false, None) => place_npcs(&mission_spawns, own_spawn.as_slice(), args.npcs.unwrap_or(usize::MAX), &world, &c.model, &assets.actors, &|i, p| {
+            (None, Some(c), false, None) => place_npcs(&mission_spawns, own_spawn.as_slice(), npc_limit, &world, &c.model, &assets.actors, &|i, p| {
                 args.model_yaw.unwrap_or_else(|| match mission_spawns.first() {
                     // In the demo room everyone faces the player
                     Some(player) if args.demo => (player[0] - p[0]).atan2(player[2] - p[2]).to_degrees(),
@@ -360,6 +365,7 @@ impl Session {
             build: option_env!("GIT_HASH").unwrap_or("unknown").to_string(),
             map: if args.demo { "demo".to_string() } else { map_path.display().to_string() },
             npcs: args.npcs.map_or(u32::MAX, |n| n.min(u32::MAX as usize - 1) as u32),
+            cap_counts_player: false,
             own_spawn: own_spawn.map(|i| i as u32),
             camera: camera.position,
             yaw: camera.yaw,

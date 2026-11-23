@@ -32,6 +32,8 @@ pub struct Header {
     pub map: String,
     /// The `--npcs` cap, or `u32::MAX` for none
     pub npcs: u32,
+    /// Set for version 5 files, whose cap counted the player's own spawn point. Never written.
+    pub cap_counts_player: bool,
     /// Which spawn point is the player's, counting from 0, so that the others hold characters
     pub own_spawn: Option<u32>,
     /// Where the view starts (camera space) and which way it looks
@@ -82,16 +84,9 @@ impl std::fmt::Display for Desync {
 
 impl std::error::Error for Desync {}
 
-/// Version 5 applied the cap to the spawn points including the player's own, and stored 8 for
-/// the demo room's default. Version 6 counts only the other characters, with `u32::MAX` for none.
-fn npcs_from_v5(map: &str, npcs: u32, own_spawn: Option<u32>) -> u32 {
-    if map == "demo" && npcs as usize == crate::demo::MAX_NPCS {
-        return u32::MAX;
-    }
-    match own_spawn {
-        Some(i) if i < npcs => npcs - 1,
-        _ => npcs,
-    }
+/// Version 5 stored 8 for the demo room's default, which means no cap
+fn npcs_from_v5(map: &str, npcs: u32) -> u32 {
+    if map == "demo" && npcs as usize == crate::demo::MAX_NPCS { u32::MAX } else { npcs }
 }
 
 impl Recording {
@@ -160,8 +155,9 @@ impl Recording {
         let map = r.string()?;
         let mut npcs = r.u32()?;
         let own_spawn = r.opt_u32()?;
+        let cap_counts_player = v5 && npcs_from_v5(&map, npcs) != u32::MAX;
         if v5 {
-            npcs = npcs_from_v5(&map, npcs, own_spawn);
+            npcs = npcs_from_v5(&map, npcs);
         }
         let camera = [r.f32()?, r.f32()?, r.f32()?];
         let (yaw, pitch) = (r.f32()?, r.f32()?);
@@ -178,7 +174,7 @@ impl Recording {
         let mission = Some(r.string()?).filter(|m| !m.is_empty());
         let god = r.u8()? != 0;
         let header = Header {
-            build, map, npcs, own_spawn, camera, yaw, pitch, seed, magazine, ammo, reserve, grenades,
+            build, map, npcs, cap_counts_player, own_spawn, camera, yaw, pitch, seed, magazine, ammo, reserve, grenades,
             speed_scale, culling, doors_open, model, no_models, model_yaw, actor, mission, god,
         };
 
@@ -311,7 +307,7 @@ mod tests {
 
     fn header() -> Header {
         Header {
-            build: "abc1234".to_string(), map: "demo".to_string(), npcs: 8, own_spawn: Some(0),
+            build: "abc1234".to_string(), map: "demo".to_string(), npcs: 8, cap_counts_player: false, own_spawn: Some(0),
             camera: [0.0, 165.0, 350.0], yaw: 12.5, pitch: -3.0, seed: 7, magazine: 30, ammo: 30,
             reserve: 90, grenades: 3, speed_scale: 1.0, culling: true, doors_open: Some(0.5),
             model: "data/character/team_hrt/blue_M_a.CRP".to_string(), no_models: false, model_yaw: None,
@@ -363,12 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn a_version_5_cap_becomes_the_new_meaning() {
-        assert_eq!(npcs_from_v5("demo", 8, Some(0)), u32::MAX);
-        assert_eq!(npcs_from_v5("demo", 1, Some(0)), 0);
-        assert_eq!(npcs_from_v5("data/map/rm11.MAP", 3, Some(5)), 3);
-        assert_eq!(npcs_from_v5("data/map/rm11.MAP", 3, None), 3);
-
+    fn a_version_5_cap_keeps_its_old_meaning() {
         let (mut rec, _) = play();
         rec.header.npcs = u32::MAX;
         assert_eq!(Recording::from_bytes(&rec.to_bytes()).unwrap().header.npcs, u32::MAX);
@@ -376,7 +367,21 @@ mod tests {
         rec.header.npcs = 8;
         let mut bytes = rec.to_bytes();
         bytes[7] = 5;
-        assert_eq!(Recording::from_bytes(&bytes).unwrap().header.npcs, u32::MAX);
+        let h = Recording::from_bytes(&bytes).unwrap().header;
+        assert_eq!((h.npcs, h.cap_counts_player), (u32::MAX, false));
+        // Any other version 5 cap is kept, and counts the player
+        rec.header.npcs = 2;
+        let mut bytes = rec.to_bytes();
+        bytes[7] = 5;
+        let h = Recording::from_bytes(&bytes).unwrap().header;
+        assert_eq!((h.npcs, h.cap_counts_player), (2, true));
+        rec.header.map = "data/map/rm11.MAP".to_string();
+        rec.header.npcs = 8;
+        let mut bytes = rec.to_bytes();
+        bytes[7] = 5;
+        let h = Recording::from_bytes(&bytes).unwrap().header;
+        assert_eq!((h.npcs, h.cap_counts_player), (8, true));
+        assert!(!Recording::from_bytes(&rec.to_bytes()).unwrap().header.cap_counts_player);
         bytes[7] = 4;
         assert!(Recording::from_bytes(&bytes).is_err());
     }
