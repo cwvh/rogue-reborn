@@ -68,7 +68,7 @@ compare() {
   # The baseline's recordings, played with this build: every tick, no desync, exit 0
   local out n ticks
   mkdir -p target/gate
-  out="$(mktemp -d target/gate/replay.XXXXXX)"
+  out="$(mktemp -d target/gate/replay.XXXXXX)" && [ -d "$out" ] || { echo "GATE FAILED: could not make a directory for the replays"; return 1; }
   echo "replays go to $out"
   build
   local replays
